@@ -31,10 +31,10 @@ cd 仓库名
 pip install -r requirements.txt
 
 # 3. 放置模型文件
-# 将 faster-whisper-large-v3-turbo 模型目录放到项目根目录
+将 faster-whisper-large-v3-turbo 模型目录放到项目根目录
 
 # 4. 放置 ffmpeg
-# 将 ffmpeg.exe 和 ffprobe.exe 放到项目根目录
+将 ffmpeg.exe 和 ffprobe.exe 放到项目根目录
 
 # 5. 配置 API 密钥
 copy zimu_app\config.example.json zimu_app\config.json
