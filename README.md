@@ -18,7 +18,18 @@
 - Windows
 - Python 3.10+
 - NVIDIA GPU（推荐，支持 CUDA 加速；也可用 CPU）
-- ffmpeg.exe / ffprobe.exe（需放在应用目录下）
+
+## 所需文件
+
+### ffmpeg.exe / ffprobe.exe（必需）
+
+从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 版本，将 `ffmpeg.exe` 和 `ffprobe.exe` 放入项目根目录。**两个文件缺一不可**，ffprobe 用于获取视频时长和验证输出文件。
+
+### 语音识别模型
+
+从以下地址下载 faster-whisper-large-v3-turbo 模型（约 1.6 GB），放入项目根目录的 `faster-whisper-large-v3-turbo/` 文件夹：
+
+https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary
 
 ## 快速开始
 
@@ -30,21 +41,29 @@ cd 仓库名
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 放置模型文件
-将 faster-whisper-large-v3-turbo 模型目录放到项目根目录
+# 3. 放置 ffmpeg.exe 和 ffprobe.exe（必需）到项目根目录
 
-# 4. 放置 ffmpeg
-将 ffmpeg.exe 和 ffprobe.exe 放到项目根目录
+# 4. 下载模型到 faster-whisper-large-v3-turbo/ 目录
 
-# 5. 配置 API 密钥
+# 5. 配置 API
 copy zimu_app\config.example.json zimu_app\config.json
-# 编辑 config.json，填入 translation.api_key
+# 编辑 config.json，填入 translation.api_key 和 translation.api_url
 
 # 6. 启动
 python subtitle_app.py
 ```
 
 或双击 `启动字幕工具.bat`（以 pythonw.exe 无控制台启动）。
+
+### 启动检查
+
+应用启动后会自动检测以下项目，缺少的项目会以黄色警告显示在日志区：
+
+- ✅ ffmpeg.exe 是否存在
+- ✅ 语音识别模型是否已下载
+- ✅ API 地址和密钥是否已配置
+
+如未配置翻译 API，程序仍可正常使用转写功能，仅翻译功能不可用。
 
 ## 配置文件
 

@@ -93,6 +93,9 @@ class SubtitleApp(QMainWindow):
         # 初始化设置对话框（第一次点击时创建）
         self.settings_dialog = None
 
+        # 启动检查
+        QTimer.singleShot(500, self._run_startup_checks)
+
     # ─── 构建 UI ───
 
     def _restore_window_state(self):
@@ -383,9 +386,36 @@ class SubtitleApp(QMainWindow):
 
     def _open_settings(self):
         dlg = SettingsDialog(self, self.settings_data)
-        if dlg.exec():
+        result = dlg.exec()
+        if result == 1:
             self.settings_data = dlg.get_values()
             self._add_log_entry("设置已应用（本次运行有效）")
+        elif result == 2:
+            self.settings_data = dlg.get_values()
+            self._save_settings_permanently(dlg.get_values())
+            self._add_log_entry("设置已保存到 config.json（永久生效）")
+
+    def _save_settings_permanently(self, values: dict):
+        import json
+        path = Path(__file__).resolve().parent / "config.json"
+        if not path.exists():
+            QMessageBox.warning(self, "保存失败", "未找到 config.json，请先复制 config.example.json")
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw.setdefault("whisper", {})["model_dir"] = values.get("model_dir", "")
+        raw["whisper"]["language"] = values.get("language", "auto")
+        raw["whisper"]["device"] = values.get("device", "cuda")
+        raw["whisper"]["compute_type"] = values.get("compute_type", "int8_float16")
+        raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
+        raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
+        raw.setdefault("translation", {})["target_lang"] = values.get("target_lang", "zh")
+        raw["translation"]["model"] = values.get("translation_model", "")
+        raw["translation"]["api_url"] = values.get("api_url", "")
+        raw["translation"]["api_key"] = values.get("api_key", "")
+        raw["translation"]["pipeline"] = values.get("pipeline", True)
+        raw["translation"]["batch_size"] = values.get("translation_batch_size", 50)
+        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+ 
 
     def _add_files(self, is_video: bool):
         exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
@@ -789,6 +819,21 @@ class SubtitleApp(QMainWindow):
         max_lines = cfg.app.max_log_lines
         while self.log_list.count() > max_lines:
             self.log_list.takeItem(0)
+
+    def _run_startup_checks(self):
+        # 检查 ffmpeg / ffprobe
+        if not find_tool("ffmpeg.exe", APP_DIR) and not find_tool("ffmpeg", APP_DIR):
+            self._add_log_entry("未找到 ffmpeg.exe，请放入应用目录", "WARNING")
+        if not find_tool("ffprobe.exe", APP_DIR) and not find_tool("ffprobe", APP_DIR):
+            self._add_log_entry("未找到 ffprobe.exe，请放入应用目录（与 ffmpeg 在同一目录）", "WARNING")
+        # 检查模型目录
+        model_dir = APP_DIR / "faster-whisper-large-v3-turbo"
+        if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
+            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 faster-whisper-large-v3-turbo/ 目录", "WARNING")
+        # 检查 API 设置
+        s = self.settings_data
+        if not s.get("api_url") or not s.get("api_key"):
+            self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
 
     def _export_log(self):
         """导出当前日志列表到文件"""
