@@ -46,7 +46,7 @@ pip install -r requirements.txt
 # 4. 下载模型到 faster-whisper-large-v3-turbo/ 目录
 
 # 5. 配置 API
-copy zimu_app\config.example.json zimu_app\config.json
+copy subtitle_app\config.example.json subtitle_app\config.json
 # 编辑 config.json，填入 translation.api_key 和 translation.api_url
 
 # 6. 启动
@@ -67,7 +67,7 @@ python subtitle_app.py
 
 ## 配置文件
 
-所有参数集中在 `zimu_app/config.json`（需自行从 `config.example.json` 复制创建）：
+所有参数集中在 `subtitle_app/config.json`（需自行从 `config.example.json` 复制创建）：
 
 | 字段 | 说明 |
 |---|---|
@@ -81,7 +81,7 @@ python subtitle_app.py
 ## 项目结构
 
 ```
-├── zimu_app/
+├── subtitle_app/
 │   ├── qt_app.py          # Qt 主窗口 UI
 │   ├── transcriber.py     # 音频提取 + Whisper 转写
 │   ├── translation.py     # AI 翻译客户端
