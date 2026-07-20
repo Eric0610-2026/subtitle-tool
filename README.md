@@ -35,7 +35,7 @@ https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summ
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Eirc0610/subtitle-tool.git
+git clone https://github.com/Eric0610-2026/subtitle-tool.git
 cd 仓库名
 
 # 2. 安装依赖
@@ -67,16 +67,17 @@ python subtitle_app.py
 
 ## 配置文件
 
-所有参数集中在 `subtitle_app/config.json`（需自行从 `config.example.json` 复制创建）：
-
-| 字段 | 说明 |
-|---|---|
-| `translation.api_key` | API 密钥 |
-| `translation.api_url` | API 地址 |
-| `whisper.device` | 计算设备（cuda / cpu） |
-| `whisper.model_dir` | 模型路径 |
-
-修改配置后需重启应用生效。
+ 所有参数集中在 `subtitle_app/config.json`（需自行从 `config.example.json` 复制创建）：
+ 
+ | 字段 | 说明 |
+ |---|---|
+ | `translation.api_key` | API 密钥 |
+ | `translation.api_url` | API 地址 |
+ | `whisper.device` | 计算设备（cuda / cpu） |
+ | `whisper.model_dir` | 模型路径 |
+ | `app.default_video_dir` | 默认视频目录，记得改为你自己的路径 |
+ 
+ 修改配置后需重启应用生效。
 
 ## 项目结构
 
@@ -105,7 +106,7 @@ python -m unittest discover -s tests
 
 ## 注意事项
 
-- 首次运行会自动下载模型（约 1.6 GB），或手动放置到 `faster-whisper-large-v3-turbo/`
+- 模型需手动从 modelscope 下载（约 1.6 GB），放入项目根目录的 `faster-whisper-large-v3-turbo/`
 - 翻译缓存文件 `.subtitle_translation_cache.json` 超过 10000 条时会自动裁剪
 
 ## 技术栈
