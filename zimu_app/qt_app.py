@@ -829,7 +829,7 @@ class SubtitleApp(QMainWindow):
         # 检查模型目录
         model_dir = APP_DIR / "faster-whisper-large-v3-turbo"
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
-            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 faster-whisper-large-v3-turbo/ 目录", "WARNING")
+            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 faster-whisper-large-v3-turbo/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
         # 检查 API 设置
         s = self.settings_data
         if not s.get("api_url") or not s.get("api_key"):

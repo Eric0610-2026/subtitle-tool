@@ -53,7 +53,7 @@ copy zimu_app\config.example.json zimu_app\config.json
 python subtitle_app.py
 ```
 
-或双击 `启动字幕工具.bat`（以 pythonw.exe 无控制台启动）。
+或双击 `启动字幕工具.bat`（自动安装依赖 + 以 pythonw.exe 无控制台启动）。
 
 ### 启动检查
 
