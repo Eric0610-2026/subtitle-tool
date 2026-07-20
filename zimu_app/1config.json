@@ -1,6 +1,6 @@
 {
   "_version": 1,
-  "_说明": "配置模板。复制为 config.json 后填入 API 密钥即可使用。修改后需重启应用生效。",
+  "_说明": "本地字幕生成工具配置文件。修改后需重启应用生效。",
 
   "app": {
     "window_width": 1280,
@@ -45,9 +45,9 @@
     "concurrency_serial": 1,
     "batch_size": 50,
     "target_lang": "zh",
-    "model": "",
-    "api_url": "",
-    "api_key": "",
+    "model": "deepseek-v4-flash",
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "api_key": "sk-5053f65092ef4e3f812e4ae01a376614",
     "api_timeout": 120,
     "retry_count": 3,
     "retry_base_delay": 2.0,
