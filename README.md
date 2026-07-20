@@ -24,7 +24,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/你的用户名/仓库名.git
+git clone https://github.com/Eirc0610/subtitle-tool.git
 cd 仓库名
 
 # 2. 安装依赖
@@ -86,7 +86,6 @@ python -m unittest discover -s tests
 
 ## 注意事项
 
-- API 密钥以明文存储在 `config.json` 中，已加入 `.gitignore`，**切勿提交到仓库**
 - 首次运行会自动下载模型（约 1.6 GB），或手动放置到 `faster-whisper-large-v3-turbo/`
 - 翻译缓存文件 `.subtitle_translation_cache.json` 超过 10000 条时会自动裁剪
 
