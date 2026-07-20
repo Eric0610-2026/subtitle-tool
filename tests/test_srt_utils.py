@@ -5,7 +5,7 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from zimu_app.srt_utils import (
+from subtitle_app.srt_utils import (
     seconds_to_srt_time, srt_time_to_seconds, fmt_duration,
     SubtitleBlock, parse_srt, write_srt, split_sentences,
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
