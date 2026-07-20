@@ -131,11 +131,15 @@ class SettingsDialog(QDialog):
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
-        ok_btn = QPushButton("保存")
-        ok_btn.setObjectName("startBtn")
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
+        session_btn = QPushButton("💾 本次有效")
+        btn_row.addWidget(session_btn)
+        permanent_btn = QPushButton("💾 永久保存")
+        permanent_btn.setObjectName("startBtn")
+        btn_row.addWidget(permanent_btn)
         layout.addLayout(btn_row)
+
+        session_btn.clicked.connect(lambda: self.done(1))
+        permanent_btn.clicked.connect(lambda: self.done(2))
 
     def get_values(self) -> dict:
         return {
