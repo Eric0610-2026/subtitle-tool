@@ -1,0 +1,109 @@
+{
+  "_version": 1,
+  "_说明": "配置模板。复制为 config.json 后填入 API 密钥即可使用。修改后需重启应用生效。",
+
+  "app": {
+    "window_width": 1280,
+    "window_height": 780,
+    "window_min_width": 1024,
+    "window_min_height": 680,
+    "poll_interval_ms": 100,
+    "max_log_lines": 500,
+    "default_video_dir": "F:\\VIDEO",
+    "notification_duration_ms": 8000,
+    "notification_sleep_s": 9,
+    "scan_skip_exts": [".mkv"]
+  },
+
+  "whisper": {
+    "model_dir": "faster-whisper-large-v3-turbo",
+    "language": "auto",
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "extract_audio": true,
+    "vad_filter": true,
+    "beam_size": 5,
+    "audio_sample_rate": 16000,
+    "audio_channels": 1,
+    "audio_codec": "pcm_s16le",
+    "silence_gap_seconds": 2.0,
+    "thread_join_timeout": 30,
+    "checkpoint_enabled": true,
+    "checkpoint_interval": 30,
+    "word_timestamps": false,
+    "model_speed_factors": {
+      "tiny": 0.3, "base": 0.5, "small": 0.8,
+      "medium": 1.5, "large": 3.0, "large-v3": 3.5,
+      "large-v3-turbo": 1.5
+    }
+  },
+
+  "translation": {
+    "enabled": true,
+    "pipeline": true,
+    "concurrency_pipeline": 2,
+    "concurrency_serial": 1,
+    "batch_size": 50,
+    "target_lang": "zh",
+    "model": "deepseek-v4-flash",
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "api_key": "",
+    "api_timeout": 120,
+    "retry_count": 3,
+    "retry_base_delay": 2.0,
+    "temperature": 0.1,
+    "max_cache_entries": 10000,
+    "paragraph_gap_seconds": 3.0,
+    "context_window": 5,
+    "timeout_curl": 120,
+    "embed_subtitle_lang": "chi",
+    "embed_timeout": 300,
+    "ffprobe_timeout": 30
+  },
+
+  "translation_lang_names": {
+    "zh": "简体中文", "en": "英语", "ja": "日语",
+    "ko": "韩语", "fr": "法语", "de": "德语",
+    "es": "西班牙语", "ru": "俄语"
+  },
+
+  "srt": {
+    "video_exts": [".mp4", ".mkv", ".mov", ".avi", ".flv", ".wmv", ".m4v", ".ts", ".webm"],
+    "audio_exts": [".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg", ".wma"],
+    "sub_exts": [".srt"],
+    "max_filename_stem": 80,
+    "abbreviations": [
+      "mr", "mrs", "ms", "miss", "dr", "prof", "sr", "jr",
+      "eg", "ie", "etc", "vs", "cf", "ibid", "et", "al",
+      "inc", "ltd", "corp", "llc", "co", "llp",
+      "fig", "figs", "ref", "refs", "eq", "eqs",
+      "st", "dept", "est", "approx", "min", "max", "avg",
+      "sec", "hr", "temp", "no", "vol"
+    ]
+  },
+
+  "progress": {
+    "transcribe_weight": 80
+  },
+
+  "pricing": {
+    "input_per_1k": 0.00014,
+    "cache_hit_per_1k": 0.00007,
+    "output_per_1k": 0.00028
+  },
+
+  "theme": {
+    "light": {
+      "bg": "#f4f5f7", "card": "#ffffff", "header": "#1a1a2e",
+      "accent": "#6366f1", "text": "#0f172a", "text_sec": "#475569",
+      "text_muted": "#94a3b8", "border": "#e2e8f0", "success": "#22c55e",
+      "danger": "#ef4444"
+    },
+    "dark": {
+      "bg": "#0b0d14", "card": "#16182a", "header": "#06070c",
+      "accent": "#818cf8", "text": "#e2e8f0", "text_sec": "#94a3b8",
+      "text_muted": "#64748b", "border": "#2a2b45", "success": "#22c55e",
+      "danger": "#ef4444"
+    }
+  }
+}
