@@ -821,16 +821,19 @@ class SubtitleApp(QMainWindow):
             self.log_list.takeItem(0)
 
     def _run_startup_checks(self):
-        # 检查 ffmpeg / ffprobe
+        missing_essential = []
         if not find_tool("ffmpeg.exe", APP_DIR) and not find_tool("ffmpeg", APP_DIR):
+            missing_essential.append("ffmpeg.exe")
             self._add_log_entry("未找到 ffmpeg.exe，请放入应用目录", "WARNING")
         if not find_tool("ffprobe.exe", APP_DIR) and not find_tool("ffprobe", APP_DIR):
+            missing_essential.append("ffprobe.exe")
             self._add_log_entry("未找到 ffprobe.exe，请放入应用目录（与 ffmpeg 在同一目录）", "WARNING")
-        # 检查模型目录
+        if missing_essential:
+            QMessageBox.warning(self, "缺少必需文件",
+                f"未找到 {', '.join(missing_essential)}，请放入项目根目录后重启应用。")
         model_dir = APP_DIR / "faster-whisper-large-v3-turbo"
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
             self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 faster-whisper-large-v3-turbo/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
-        # 检查 API 设置
         s = self.settings_data
         if not s.get("api_url") or not s.get("api_key"):
             self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
