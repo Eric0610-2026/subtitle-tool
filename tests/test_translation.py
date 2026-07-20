@@ -5,9 +5,9 @@ import unittest
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
+from subtitle_app.srt_utils import SubtitleBlock
 
-from zimu_app.srt_utils import SubtitleBlock
-from zimu_app.translation import (
+from subtitle_app.translation import (
     TranslationClient, ApiForbiddenError, _extract_json, _compose_sentences,
 )
 
@@ -107,7 +107,7 @@ class TestRecursionProtection(unittest.TestCase):
     """递归深度保护测试"""
 
     def test_depth_limit_returns_original(self):
-        from zimu_app.translation import MAX_RECURSION_DEPTH
+        from subtitle_app.translation import MAX_RECURSION_DEPTH
         client = TranslationClient("url", "key", "m",
                                    Path(tempfile.mktemp()), lambda *a: None, batch_size=5)
         texts = ["a", "b", "c"]
@@ -162,19 +162,19 @@ class TestSentenceSplitting(unittest.TestCase):
     """句子拆分扩展测试"""
 
     def test_abbreviation_protection(self):
-        from zimu_app.srt_utils import split_sentences
+        from subtitle_app.srt_utils import split_sentences
         sents = split_sentences("Dr. Smith is here.")
         # Dr. 不应触发句子分割
         self.assertEqual(len(sents), 1)
 
     def test_chinese_sentence_split(self):
-        from zimu_app.srt_utils import split_sentences
+        from subtitle_app.srt_utils import split_sentences
         text = "你好。世界！今天天气怎么样？"
         sents = split_sentences(text)
         self.assertGreaterEqual(len(sents), 3)
 
     def test_cache_key_consistency(self):
-        from zimu_app.srt_utils import sentence_cache_key
+        from subtitle_app.srt_utils import sentence_cache_key
         k1 = sentence_cache_key("Hello", "m", True)
         k2 = sentence_cache_key("Hello", "m", True)
         k3 = sentence_cache_key("hello", "m", True)
@@ -183,7 +183,7 @@ class TestSentenceSplitting(unittest.TestCase):
         self.assertEqual(k1, k3)
 
     def test_cache_key_different_model(self):
-        from zimu_app.srt_utils import sentence_cache_key
+        from subtitle_app.srt_utils import sentence_cache_key
         k1 = sentence_cache_key("Hello", "m1", True)
         k2 = sentence_cache_key("Hello", "m2", True)
         self.assertNotEqual(k1, k2)
@@ -193,17 +193,17 @@ class TestChineseDetection(unittest.TestCase):
     """中文检测扩展测试"""
 
     def test_japanese_kana_not_chinese(self):
-        from zimu_app.srt_utils import has_chinese
+        from subtitle_app.srt_utils import has_chinese
         self.assertFalse(has_chinese("こんにちは", "zh"))
         self.assertFalse(has_chinese("カタカナです", "zh"))
 
     def test_japanese_kanji_with_kana(self):
-        from zimu_app.srt_utils import has_chinese
+        from subtitle_app.srt_utils import has_chinese
         # 日文汉字 + 假名 = 不应判定为中文
         self.assertFalse(has_chinese("返事をください"))
 
     def test_bilingual_line(self):
-        from zimu_app.srt_utils import has_chinese
+        from subtitle_app.srt_utils import has_chinese
         self.assertTrue(has_chinese("Hello\n你好世界"))
 
 

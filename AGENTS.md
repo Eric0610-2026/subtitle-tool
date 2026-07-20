@@ -2,7 +2,7 @@
 
 ## 入口与运行
 
-- 入口：`subtitle_app.py:1` → `zimu_app.qt_app.main()`
+- 入口：`subtitle_app.py:1` → `subtitle_app.qt_app.main()`
 - 运行：`python subtitle_app.py` 或双击 `启动字幕工具.bat`（`pythonw.exe` 无控制台）
 - 仅 Windows（`os.startfile`、ffmpeg 二进制）
 
@@ -20,7 +20,7 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 
 ## 项目结构
 
-`zimu_app/` 下 10 个源模块（不含 `__init__.py`）：
+`subtitle_app/` 下 10 个源模块（不含 `__init__.py`）：
 
 | 模块 | 职责 |
 |---|---|
@@ -48,7 +48,7 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 
 ## 配置与安全
 
-- 配置在 `zimu_app/config.json`，从 `config.example.json` 复制创建
+- 配置在 `subtitle_app/config.json`，从 `config.example.json` 复制创建
 - **API 密钥明文**在 `config.json:api_key`，已加入 `.gitignore`，切勿提交
 - `config.py` fallback：优先读 `config.json`，不存在自动回退 `config.example.json`
 - 改配置后需**重启应用**（各模块导入时固化 `cfg`，无热重载）
