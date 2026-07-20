@@ -34,6 +34,7 @@ from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
 
 APP_DIR = Path(__file__).resolve().parent.parent
+VERSION = "1.0.2"
 
 
 # ─── 配色（从 config.json 读取）───
@@ -316,6 +317,9 @@ class SubtitleApp(QMainWindow):
         ar.addWidget(self._make_btn("📦 嵌入字幕", self._manual_embed, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 导出日志", self._export_log, object_name="bottomBtn"))
         ar.addStretch()
+        version_label = QLabel(f"v{VERSION}")
+        version_label.setStyleSheet("color: #888888; font-size: 10px; background: transparent;")
+        ar.addWidget(version_label)
         main.addLayout(ar)
 
     # ─── 样式 ───
