@@ -15,28 +15,40 @@
 
 ## 系统要求
 
-- Windows
-- Python 3.10+
-- NVIDIA GPU（推荐，支持 CUDA 加速；也可用 CPU）
+- Windows 10/11
+- Python 3.10+（[下载地址](https://www.python.org/downloads/windows/)，安装时务必勾选 **Add Python to PATH**）
+- NVIDIA GPU 推荐（支持 CUDA 加速；也可用纯 CPU，但转写速度慢约 10 倍）
+- [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)（PySide6 必需，缺少则启动闪退）
 
-## 所需文件
+## 首次部署前必读
 
-### ffmpeg.exe / ffprobe.exe（必需）
+### ① 语音识别模型（必需，约 1.6 GB）
 
-从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 版本，将 `ffmpeg.exe` 和 `ffprobe.exe` 放入项目根目录。**两个文件缺一不可**，ffprobe 用于获取视频时长和验证输出文件。
-
-### 语音识别模型
-
-从以下地址下载 faster-whisper-large-v3-turbo 模型（约 1.6 GB），放入项目根目录的 `faster-whisper-large-v3-turbo/` 文件夹：
+从以下地址下载整个 `faster-whisper-large-v3-turbo` 文件夹（包含 `model.bin`、`tokenizer.json`、`vocabulary.json`、`config.json` 等文件），放入项目根目录：
 
 https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary
+
+### ② ffmpeg.exe / ffprobe.exe（必需）
+
+从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 版本（选择 **Windows → Windows Builds → ffmpeg-release-full** 或 **gyan.dev** 的完整构建），将解压后 `bin/` 目录下的 `ffmpeg.exe` 和 `ffprobe.exe` 放入项目根目录。**两个文件缺一不可**。
+
+### ③ GPU 加速（可选，强烈推荐）
+
+默认 `pip install -r requirements.txt` 安装的是 CPU 版 torch，转写非常慢。如需 GPU 加速，请先运行以下命令安装 CUDA 版 torch，再安装其他依赖：
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+```
+
+前提条件：NVIDIA 显卡 + [CUDA 12.x](https://developer.nvidia.com/cuda-downloads) + [cuDNN](https://developer.nvidia.com/cudnn)。
 
 ## 快速开始
 
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/Eric0610-2026/subtitle-tool.git
-cd 仓库名
+cd subtitle-tool
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -55,9 +67,11 @@ python subtitle_app.py
 
 或双击 `启动字幕工具.bat`（自动安装依赖 + 以 pythonw.exe 无控制台启动）。
 
+> **⚠ 首次启动较慢**：PySide6 和 torch 加载需要 20-30 秒，期间界面不会立即弹出，请耐心等待，不要反复点击。
+
 ### 启动检查
 
-应用启动后会自动检测以下项目，缺少的项目会以黄色警告显示在日志区：
+应用启动后会自动检测以下项目，缺少的项目会以黄色警告显示在日志区，ffmpeg/ffprobe 缺失还会弹出对话框：
 
 - ✅ ffmpeg.exe 是否存在
 - ✅ 语音识别模型是否已下载
