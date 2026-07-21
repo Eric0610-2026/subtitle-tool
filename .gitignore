@@ -26,6 +26,7 @@ config.json
 .opencode/
 .workbuddy/
 .reasonix/
+reasonix.toml
 
 # 系统文件
 Thumbs.db

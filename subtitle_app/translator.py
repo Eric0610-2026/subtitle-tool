@@ -60,6 +60,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         return
 
     translated_srt: Optional[Path] = None
+    cost_info: dict = {}
     if translate_enabled and api_url and api_key:
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / ".subtitle_translation_cache.json"
@@ -85,7 +86,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
                                  batch_size=opts.get("translation_batch_size", cfg.translation.batch_size),
                                  target_lang=opts.get("target_lang", "zh"))
-        cost_info = {}
         try:
             detected_lang = language
             if need_translate_idx:
