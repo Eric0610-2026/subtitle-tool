@@ -164,10 +164,9 @@ def save_json(path: Path, data: Any) -> None:
             tmp.unlink(missing_ok=True)
     except Exception as e:
         logger.error("保存 JSON 失败 %s: %s", path, e)
-        # 尝试清理临时文件
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:
+        except OSError:
             pass
         raise
 

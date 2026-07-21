@@ -21,7 +21,7 @@ def _sanitize_srt_for_mux(srt_path: Path) -> Path:
     返回净化后的临时 SRT 路径（与源同目录，调用方负责清理）。"""
     try:
         blocks = parse_srt(srt_path)
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         logger.warning("解析 SRT 失败，跳过净化: %s", e)
         return srt_path
     if not blocks:
@@ -60,8 +60,8 @@ def _count_existing_sub_streams(video_path: Path, ffprobe_bin: Optional[str]) ->
             capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             return len([s for s in r.stdout.strip().split("\n") if s.strip()])
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        logger.debug("统计字幕流失败: %s", e)
     return 0
 
 
@@ -80,8 +80,8 @@ def _probe_duration(path: Path, ffprobe_bin: Optional[str]) -> Optional[float]:
             val = r.stdout.strip()
             if val and val != "N/A":
                 return float(val)
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        logger.debug("探测时长失败 %s: %s", path, e)
     return None
 
 
@@ -371,7 +371,7 @@ def _cleanup_file(path) -> None:
     if path is not None:
         try:
             path.unlink(missing_ok=True)
-        except Exception:
+        except OSError:
             pass
 
 
