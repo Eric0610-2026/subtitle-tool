@@ -87,6 +87,7 @@ python subtitle_app.py
  |---|---|
  | `translation.api_key` | API 密钥 |
  | `translation.api_url` | API 地址 |
+ | `translation.model` | 模型名称（如 `deepseek-chat`） |
  | `whisper.device` | 计算设备（cuda / cpu） |
  | `whisper.model_dir` | 模型路径 |
  | `app.default_video_dir` | 默认视频目录，记得改为你自己的路径 |
@@ -98,6 +99,8 @@ python subtitle_app.py
 ```
 ├── subtitle_app/
 │   ├── qt_app.py          # Qt 主窗口 UI
+│   ├── panels.py          # 进度/预览/日志面板
+│   ├── widgets.py         # 拖放列表、日志条目控件
 │   ├── transcriber.py     # 音频提取 + Whisper 转写
 │   ├── translation.py     # AI 翻译客户端
 │   ├── translator.py      # 翻译阶段编排
