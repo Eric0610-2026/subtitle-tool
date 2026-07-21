@@ -22,12 +22,26 @@ from .srt_utils import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from faster_whisper import WhisperModel
-    _WHISPER_AVAILABLE = True
-except ImportError:
-    WhisperModel = None  # type: ignore
-    _WHISPER_AVAILABLE = False
+# 延迟导入 faster_whisper（C 扩展加载 ~3s），避免拖慢应用启动
+_WHISPER_AVAILABLE = None
+
+def _ensure_whisper():
+    global _WHISPER_AVAILABLE, WhisperModel
+    if _WHISPER_AVAILABLE is not None:
+        return _WHISPER_AVAILABLE
+    try:
+        from faster_whisper import WhisperModel
+        _WHISPER_AVAILABLE = True
+    except ImportError:
+        WhisperModel = None
+        _WHISPER_AVAILABLE = False
+    return _WHISPER_AVAILABLE
+
+def _get_whisper_model():
+    if not _ensure_whisper():
+        raise RuntimeError("缺少 faster-whisper，请运行: pip install faster-whisper\n"
+                           "如遇外部包管理冲突，可加 --break-system-packages 参数")
+    return WhisperModel
 
 # 各模型相对速度因子（越大越慢），用于进度条权重估算
 _MODEL_SPEED: Dict[str, float] = {k: v for k, v in cfg.whisper.model_speed_factors.__dict__.items()}
@@ -191,9 +205,7 @@ class Transcriber:
                 post({"type": "log", "message": "使用已加载的模型缓存", "level": "INFO"})
                 return model
 
-            if not _WHISPER_AVAILABLE:
-                raise RuntimeError("缺少 faster-whisper，请运行: pip install faster-whisper\n"
-                                   "如遇外部包管理冲突，可加 --break-system-packages 参数")
+            WhisperModel = _get_whisper_model()
             with self._cache_lock:
                 self.clear_cache()
             try:
@@ -412,6 +424,7 @@ class Transcriber:
                     srt_lines.append(block.text)
                     srt_lines.append("")
                 source_srt.write_text("\n".join(srt_lines), encoding="utf-8")
+                t_post({"type": "preview", "message": "\n".join(srt_lines)})
                 # ── 转写完成，清理断点文件 ──
                 if checkpoint_enabled and partial_srt and partial_srt.exists():
                     try:

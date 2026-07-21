@@ -12,12 +12,13 @@ from typing import List, Optional, Dict
 logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QLabel, QTabWidget, QSplitter, QGroupBox,
     QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
-    QInputDialog,
+    QInputDialog, QMenu,
 )
 from PySide6.QtGui import QFont, QColor, QFontMetrics
 
@@ -25,9 +26,8 @@ from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
     load_json, save_json, estimate_eta,
     seconds_to_srt_time, srt_time_to_seconds, parse_srt,
-    OverallProgress, find_tool,
+    OverallProgress, find_tool, IGNORE_FILE,
 )
-from .pipeline import SubtitleWorker
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog
 from .muxer import embed_subtitles_to_video
@@ -55,7 +55,11 @@ class SubtitleApp(QMainWindow):
         self.video_jobs: List[Path] = []
         self.subtitle_jobs: List[Path] = []
         self._last_progress_update = 0
+        from .pipeline import SubtitleWorker
         self.worker = SubtitleWorker()
+        self._ignore_path = APP_DIR / IGNORE_FILE
+        self._migrate_old_progress()
+        self._ignore_set = self._load_ignore_set()
         self._start_time: Optional[float] = None
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
@@ -159,10 +163,16 @@ class SubtitleApp(QMainWindow):
         self.video_list.itemClicked.connect(lambda item: self._load_preview(item, True))
         self.video_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, True))
         self.video_list.reordered.connect(lambda: self._sync_jobs_from_list(True))
+        self.video_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.video_list.customContextMenuRequested.connect(
+            lambda pos: self._show_file_context_menu(self.video_list, pos))
         self.sub_list = DropListWidget(is_video_tab=False)
         self.sub_list.itemClicked.connect(lambda item: self._load_preview(item, False))
         self.sub_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, False))
         self.sub_list.reordered.connect(lambda: self._sync_jobs_from_list(False))
+        self.sub_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sub_list.customContextMenuRequested.connect(
+            lambda pos: self._show_file_context_menu(self.sub_list, pos))
         self.tabs.addTab(self.video_list, "视频/音频生成字幕")
         self.tabs.addTab(self.sub_list, "已有字幕翻译")
         ll.addWidget(self.tabs)
@@ -182,6 +192,7 @@ class SubtitleApp(QMainWindow):
         # ── 右侧预览面板 ──
         self.preview_panel = PreviewPanel()
         self.preview_panel.connect_toolbar(self._find_in_preview, self._save_preview, self._offset_preview_time)
+        self.preview_panel.fileDropped.connect(self._on_preview_file_dropped)
         splitter.addWidget(self.preview_panel)
         splitter.setSizes([600, 600])
         bl.addWidget(splitter, 2)
@@ -250,7 +261,7 @@ class SubtitleApp(QMainWindow):
         ar.addWidget(self._make_btn("📋 历史", self._show_history, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("💾 缓存", self._show_cache, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📦 嵌入字幕", self._manual_embed, object_name="bottomBtn"))
-        ar.addWidget(self._make_btn("📤 导出日志", self._export_log, object_name="bottomBtn"))
+        ar.addWidget(self._make_btn("📤 导出", self._export_log, object_name="bottomBtn"))
         ar.addStretch()
         main.addLayout(ar)
 
@@ -374,18 +385,73 @@ class SubtitleApp(QMainWindow):
     def _load_done_set(self):
         done = set()
         done_stems = set()
-        prog_path = APP_DIR / ".subtitle_progress.json"
-        if prog_path.exists():
-            data = load_json(prog_path, {})
-            for path_str in data.get("done", []):
-                done.add(path_str)
-                done_stems.add(Path(path_str).stem)
-                first_part = Path(path_str).stem.split(".")[0]
-                if first_part != Path(path_str).stem:
-                    done_stems.add(first_part)
-            if done:
-                self._add_log_entry(f"历史记录：{len(done)} 个已完成文件")
+        data = load_json(self._ignore_path, {})
+        for path_str in data.get("done", []):
+            done.add(path_str)
+            done_stems.add(Path(path_str).stem)
+            first_part = Path(path_str).stem.split(".")[0]
+            if first_part != Path(path_str).stem:
+                done_stems.add(first_part)
+        if done:
+            self._add_log_entry(f"历史记录：{len(done)} 个已完成文件")
         return done, done_stems
+
+    def _migrate_old_progress(self):
+        old = APP_DIR / ".subtitle_progress.json"
+        if not old.exists():
+            return
+        if self._ignore_path.exists():
+            old.unlink()
+            return
+        data = load_json(old, {})
+        data.setdefault("ignored", [])
+        save_json(self._ignore_path, data)
+        old.unlink()
+        self._add_log_entry("已迁移历史记录到新版忽略文件")
+
+    def _load_ignore_set(self):
+        data = load_json(self._ignore_path, {})
+        ignored = set(data.get("ignored", []))
+        if ignored:
+            self._add_log_entry(f"已加载 {len(ignored)} 个忽略文件")
+        return ignored
+
+    def _save_ignore(self):
+        data = load_json(self._ignore_path, {})
+        data["ignored"] = sorted(self._ignore_set)
+        save_json(self._ignore_path, data)
+
+    def _is_ignored(self, path: Path) -> bool:
+        return str(path.resolve()) in self._ignore_set
+
+    def _toggle_ignore(self, item):
+        lb = self.video_list if self.tabs.currentIndex() == 0 else self.sub_list
+        jobs = self.video_jobs if self.tabs.currentIndex() == 0 else self.subtitle_jobs
+        row = lb.row(item)
+        if row < 0 or row >= len(jobs):
+            return
+        path = jobs[row]
+        resolved = str(path.resolve())
+        if resolved in self._ignore_set:
+            self._ignore_set.discard(resolved)
+            self._add_log_entry(f"已取消忽略：{path.name}")
+        else:
+            self._ignore_set.add(resolved)
+            self._add_log_entry(f"已忽略：{path.name}")
+        self._save_ignore()
+        self._refresh_item_visual(item)
+
+    def _refresh_item_visual(self, item):
+        path_str = item.data(Qt.UserRole)
+        font = item.font()
+        if path_str and str(Path(path_str).resolve()) in self._ignore_set:
+            font.setStrikeOut(True)
+            item.setForeground(QColor("#94a3b8"))
+            item.setFont(font)
+        else:
+            font.setStrikeOut(False)
+            item.setForeground(QColor())
+            item.setFont(font)
 
     def _add_paths(self, paths: List[Path], is_video: bool):
         lb = self.video_list if is_video else self.sub_list
@@ -409,6 +475,8 @@ class SubtitleApp(QMainWindow):
             item = QListWidgetItem(fmt_job_display(p))
             item.setData(Qt.UserRole, str(p))
             lb.addItem(item)
+            if self._is_ignored(p):
+                self._refresh_item_visual(item)
             added += 1
         if added:
             self._add_log_entry(f"已添加 {added} 个文件" + (f"，{skipped} 个已完成已跳过" if skipped else ""))
@@ -453,6 +521,20 @@ class SubtitleApp(QMainWindow):
                 new_jobs.append(Path(path_str))
         jobs.clear()
         jobs.extend(new_jobs)
+
+    def _show_file_context_menu(self, lb, pos):
+        item = lb.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu()
+        path_str = item.data(Qt.UserRole)
+        if path_str and str(Path(path_str).resolve()) in self._ignore_set:
+            action = QAction("取消忽略", self)
+        else:
+            action = QAction("忽略此文件", self)
+        action.triggered.connect(lambda: self._toggle_ignore(item))
+        menu.addAction(action)
+        menu.exec(lb.viewport().mapToGlobal(pos))
 
     def _select_all(self):
         lb = self.video_list if self.tabs.currentIndex() == 0 else self.sub_list
@@ -505,6 +587,16 @@ class SubtitleApp(QMainWindow):
                 self.preview_panel.last_output_dir = c.parent
                 return
         self.preview_panel.clear()
+
+    def _on_preview_file_dropped(self, path: str):
+        """拖入字幕到预览区时，同时加入已有字幕翻译列表"""
+        self._add_paths([Path(path)], is_video=False)
+        self.tabs.setCurrentIndex(1)
+        resolved = str(Path(path).resolve())
+        for i in range(self.sub_list.count()):
+            if self.sub_list.item(i).data(Qt.UserRole) == resolved:
+                self.sub_list.setCurrentRow(i)
+                break
 
     def _find_in_preview(self):
         """在预览区弹出查找对话框"""
@@ -633,16 +725,24 @@ class SubtitleApp(QMainWindow):
         is_video = self.tabs.currentIndex() == 0
         return self.video_jobs if is_video else self.subtitle_jobs
 
+    def _active_jobs(self):
+        """返回所有未被忽略的作业"""
+        return [j for j in self._get_jobs() if not self._is_ignored(j)]
+
     def _start(self):
         if self.worker.thread and self.worker.thread.is_alive():
             QMessageBox.warning(self, "提示", "正在处理中")
             return
-        jobs = self._get_jobs()
+        jobs = self._active_jobs()
+        total = len(self._get_jobs())
+        skipped = total - len(jobs)
         if not jobs:
-            QMessageBox.warning(self, "提示", "队列为空")
+            QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
             return
-        self._begin_processing(jobs, self._build_opts(False),
-                               f"开始处理，队列 {len(jobs)} 个文件")
+        msg = f"开始处理，队列 {len(jobs)} 个文件"
+        if skipped:
+            msg += f"（已跳过 {skipped} 个忽略文件）"
+        self._begin_processing(jobs, self._build_opts(False), msg)
 
     def _set_elided(self, label: QLabel, text: str) -> None:
         fm = QFontMetrics(label.font())
@@ -664,12 +764,16 @@ class SubtitleApp(QMainWindow):
         if self.worker.thread and self.worker.thread.is_alive():
             QMessageBox.warning(self, "提示", "正在处理中")
             return
-        jobs = self._get_jobs()
+        jobs = self._active_jobs()
+        total = len(self._get_jobs())
+        skipped = total - len(jobs)
         if not jobs:
-            QMessageBox.warning(self, "提示", "队列为空")
+            QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
             return
-        self._begin_processing(jobs, self._build_opts(True),
-                               f"断点续翻，检查 {len(jobs)} 个文件...")
+        msg = f"断点续翻，检查 {len(jobs)} 个文件..."
+        if skipped:
+            msg += f"（已跳过 {skipped} 个忽略文件）"
+        self._begin_processing(jobs, self._build_opts(True), msg)
 
     def _show_history(self):
         try:
@@ -1085,25 +1189,35 @@ def main():
     )
 
     app = QApplication(sys.argv)
+    app.setAttribute(Qt.AA_DontUseNativeDialogs, True)
     app.setApplicationName("本地字幕生成工具")
 
+    window = SubtitleApp()
+    window.show()
+
+    # 延迟检查高峰时段——不阻塞窗口首次显示
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _check_peak_hours(window))
+
+    sys.exit(app.exec())
+
+
+def _check_peak_hours(parent):
+    from datetime import timezone, timedelta, datetime
     bj_tz = timezone(timedelta(hours=8))
     hour = datetime.now(bj_tz).hour
     peak_periods = "9:00-12:00、14:00-18:00"
     in_peak = (9 <= hour < 12) or (14 <= hour < 18)
     if in_peak:
         reply = QMessageBox.question(
-            None, "高峰时段提醒",
+            parent, "高峰时段提醒",
             f"当前为 DeepSeek API 高峰时段（{peak_periods}），价格较高。\n是否继续？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.No:
+            import sys
             sys.exit(0)
-
-    window = SubtitleApp()
-    window.show()
-    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

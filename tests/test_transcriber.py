@@ -261,9 +261,11 @@ class TestModelCache(unittest.TestCase):
     def setUp(self):
         self.t = Transcriber()
 
-    @patch("subtitle_app.transcriber.WhisperModel")
-    def test_cache_same_model(self, MockWhisper):
+    @patch("subtitle_app.transcriber._get_whisper_model")
+    def test_cache_same_model(self, mock_get):
         """相同 key 应返回缓存，不重复加载"""
+        MockWhisperCls = MagicMock()
+        mock_get.return_value = MockWhisperCls
         post = MagicMock()
         model_dir = Path("fake-model")
         m1 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
@@ -272,11 +274,13 @@ class TestModelCache(unittest.TestCase):
 
         self.assertIsNotNone(m1)
         self.assertIs(m1, m2)  # 同一个对象
-        self.assertEqual(MockWhisper.call_count, 1)
+        self.assertEqual(MockWhisperCls.call_count, 1)
 
-    @patch("subtitle_app.transcriber.WhisperModel")
-    def test_different_key_different_model(self, MockWhisper):
+    @patch("subtitle_app.transcriber._get_whisper_model")
+    def test_different_key_different_model(self, mock_get):
         """不同设备/精度创建不同的模型实例"""
+        MockWhisperCls = MagicMock()
+        mock_get.return_value = MockWhisperCls
         post = MagicMock()
         model_dir = Path("fake-model")
 
@@ -285,7 +289,7 @@ class TestModelCache(unittest.TestCase):
 
         self.assertIsNotNone(m1)
         self.assertIsNotNone(m2)
-        self.assertEqual(MockWhisper.call_count, 2)
+        self.assertEqual(MockWhisperCls.call_count, 2)
 
 
 if __name__ == "__main__":

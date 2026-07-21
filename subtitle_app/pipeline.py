@@ -11,6 +11,7 @@ import queue
 import subprocess
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -18,6 +19,7 @@ from .config import cfg
 from .srt_utils import (
     VIDEO_EXTS, AUDIO_EXTS, SUB_EXTS, safe_stem,
     find_existing_subtitle, match_video_for_subtitle, find_tool,
+    IGNORE_FILE,
 )
 from .transcriber import Transcriber
 from .translator import translate_stage
@@ -83,7 +85,7 @@ class SubtitleWorker:
 
     def start(self, jobs: List[Path], opts: dict) -> None:
         self.stop_requested = False
-        self._progress_file = Path(opts["work_dir"]) / ".subtitle_progress.json"
+        self._progress_file = Path(opts["work_dir"]) / IGNORE_FILE
         self.transcriber.attach_proc_handlers(self._register_proc, self._unregister_proc)
         self.transcriber.stop_check = lambda: self.stop_requested
         self.thread = threading.Thread(target=self._run, args=(jobs, opts), daemon=True)
@@ -153,21 +155,33 @@ class SubtitleWorker:
         trans_thread = threading.Thread(target=transcribe_worker, daemon=True)
         trans_thread.start()
 
+        translate_workers = max(1, getattr(cfg.translation, "concurrency_translate", 3))
         try:
-            while True:
-                if self.stop_requested:
-                    break
-                try:
-                    result = tq.get(timeout=0.5)
-                except queue.Empty:
-                    if not trans_thread.is_alive() and tq.empty():
+            with ThreadPoolExecutor(max_workers=translate_workers) as tpool:
+                translate_futures = []
+                while True:
+                    if self.stop_requested:
                         break
-                    continue
-                if result is _STREAM_END:
-                    break
-                if result is None:
-                    continue
-                self._translate_stage(result, opts, post)
+                    # 清理已完成 future
+                    translate_futures = [f for f in translate_futures if not f.done()]
+                    try:
+                        result = tq.get(timeout=0.5)
+                    except queue.Empty:
+                        if not trans_thread.is_alive() and tq.empty():
+                            break
+                        continue
+                    if result is _STREAM_END:
+                        break
+                    if result is None:
+                        continue
+                    future = tpool.submit(self._translate_stage, result, opts, post)
+                    translate_futures.append(future)
+                # 等待所有翻译任务完成
+                for f in translate_futures:
+                    try:
+                        f.result(timeout=300)
+                    except Exception as e:
+                        logger.error("翻译任务异常: %s", e)
         except Exception as e:
             tb = traceback.format_exc()
             logger.error("翻译阶段出错: %s\n%s", e, tb)

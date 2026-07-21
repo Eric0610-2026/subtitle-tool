@@ -28,6 +28,7 @@ INPUT_EXTS = VIDEO_EXTS | AUDIO_EXTS | SUB_EXTS
 MAX_FILENAME_STEM = cfg.srt.max_filename_stem
 
 _ABBREVIATIONS = set(cfg.srt.abbreviations)
+IGNORE_FILE = ".subtitle_ignore.json"
 
 # 扩充的繁简转换表（常用繁体字）
 _SIMPLE_T2S = {
@@ -200,8 +201,10 @@ SRT_BLOCK_RE = re.compile(
 
 
 def parse_srt(path: Path) -> List[SubtitleBlock]:
-    text = path.read_text(encoding="utf-8-sig")
-    # 统一换行符
+    return parse_srt_text(path.read_text(encoding="utf-8-sig"))
+
+
+def parse_srt_text(text: str) -> List[SubtitleBlock]:
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     blocks = []
     idx_counter = 0

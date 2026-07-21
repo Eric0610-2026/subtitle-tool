@@ -11,8 +11,10 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import cfg
@@ -82,7 +84,8 @@ class TranslationClient:
         self._balance_after = None
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
-                         is_bilingual: bool, state_path: Optional[Path] = None) -> List[str]:
+                         is_bilingual: bool, state_path: Optional[Path] = None,
+                         translation_concurrency: int = 3) -> List[str]:
         # Step 0: 按时间间隔划分段落
         para_of_block: List[int] = []
         current_para = 0
@@ -140,62 +143,72 @@ class TranslationClient:
         for gsid, sent in to_translate:
             text_to_gsid.setdefault(sent, []).append(gsid)
         unique_texts = list(text_to_gsid.keys())
+        if not unique_texts:
+            self._balance_after = self._balance_before
+            return [block.text for block in blocks]
 
-        # Step 3: 批量翻译（带自适应段落上下文）
+        # Step 3: 批量翻译（多线程并发 API 调用）
         total_batches = (len(unique_texts) + self.batch_size - 1) // self.batch_size
         para_context: Dict[int, List[str]] = {}
+        _cache_lock = Lock()
 
-        for batch_idx in range(0, len(unique_texts), self.batch_size):
-            batch = unique_texts[batch_idx:batch_idx + self.batch_size]
-            batch_id = batch_idx // self.batch_size + 1
-            para_ids = set()
-            for text in batch:
-                for gsid in text_to_gsid.get(text, []):
-                    if gsid < len(gsid_to_para):
-                        para_ids.add(gsid_to_para[gsid])
-            main_para = min(para_ids) if para_ids else 0
-            ctx_list = para_context.get(main_para, [])
-            context_text = ""
-            if ctx_list:
-                context_lines = []
-                for ctx in ctx_list[-CONTEXT_WINDOW:]:
-                    context_lines.append(f"（上文）{ctx}")
-                context_text = "\n".join(context_lines) + "\n"
-            self.post_ui({
-                "type": "progress", "percent": (batch_id / max(total_batches, 1)) * 100,
-                "stage": "翻译", "detail": f"翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
-                "total": len(blocks), "cache": len(self.cache),
-            })
-            try:
-                translations = self._translate_batch(batch, context_text, depth=0)
-            except RuntimeError:
-                self._save_cache()
+        with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
+            batch_futures: List[tuple] = []
+            for batch_idx in range(0, len(unique_texts), self.batch_size):
+                batch = unique_texts[batch_idx:batch_idx + self.batch_size]
+                batch_id = batch_idx // self.batch_size + 1
+                para_ids = set()
+                for text in batch:
+                    for gsid in text_to_gsid.get(text, []):
+                        if gsid < len(gsid_to_para):
+                            para_ids.add(gsid_to_para[gsid])
+                main_para = min(para_ids) if para_ids else 0
+                ctx_list = para_context.get(main_para, [])
+                context_text = ""
+                if ctx_list:
+                    context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
+                    context_text = "\n".join(context_lines) + "\n"
+                self.post_ui({
+                    "type": "progress", "percent": (batch_id / max(total_batches, 1)) * 100,
+                    "stage": "翻译", "detail": f"翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
+                    "total": len(blocks), "cache": len(self.cache),
+                })
+                future = executor.submit(self._translate_batch, batch, context_text, 0)
+                batch_futures.append((future, batch, text_to_gsid, batch_id, main_para))
+
+            # 按提交顺序处理结果（保证段落上下文连续性）
+            for future, batch, t2g, batch_id, main_para in batch_futures:
+                try:
+                    translations = future.result()
+                except RuntimeError:
+                    self._save_cache()
+                    if state_path:
+                        save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
+                    raise
+                for item in translations:
+                    sid = item.get("id", 0)
+                    zh_text = item.get("zh", "")
+                    if 1 <= sid <= len(batch):
+                        orig_text = batch[sid - 1]
+                        key = sentence_cache_key(orig_text, self.model, True)
+                        with _cache_lock:
+                            self.cache[key] = zh_text
+                        for gsid in t2g.get(orig_text, []):
+                            sent_trans[gsid] = zh_text
+                for item in translations:
+                    zh_text = item.get("zh", "")
+                    if not zh_text:
+                        continue
+                    sid = item.get("id", 0)
+                    if 1 <= sid <= len(batch):
+                        orig_text = batch[sid - 1]
+                        for gsid in t2g.get(orig_text, []):
+                            if gsid < len(gsid_to_para):
+                                para = gsid_to_para[gsid]
+                                para_context.setdefault(para, []).append(zh_text)
+                                para_context[para] = para_context[para][-CONTEXT_WINDOW:]
                 if state_path:
                     save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
-                raise
-            for item in translations:
-                sid = item.get("id", 0)
-                zh_text = item.get("zh", "")
-                if 1 <= sid <= len(batch):
-                    orig_text = batch[sid - 1]
-                    key = sentence_cache_key(orig_text, self.model, True)
-                    self.cache[key] = zh_text
-                    for gsid in text_to_gsid.get(orig_text, []):
-                        sent_trans[gsid] = zh_text
-            for item in translations:
-                zh_text = item.get("zh", "")
-                if not zh_text:
-                    continue
-                sid = item.get("id", 0)
-                if 1 <= sid <= len(batch):
-                    orig_text = batch[sid - 1]
-                    for gsid in text_to_gsid.get(orig_text, []):
-                        if gsid < len(gsid_to_para):
-                            para = gsid_to_para[gsid]
-                            para_context.setdefault(para, []).append(zh_text)
-                            para_context[para] = para_context[para][-CONTEXT_WINDOW:]
-            if state_path:
-                save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
         self._balance_after = self._query_balance()
         self._report_cost()
         self._save_cache()
