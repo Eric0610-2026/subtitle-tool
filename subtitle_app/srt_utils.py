@@ -105,8 +105,7 @@ def srt_time_to_seconds(t_str: str) -> float:
     m = re.match(r"(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})", t_str.strip())
     if not m:
         return 0.0
-    h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-    # 处理毫秒位数不一致的情况（补零）
+    h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
     ms_str = m.group(4).ljust(3, '0')[:3]
     ms = int(ms_str)
     return h * 3600 + mi * 60 + s + ms / 1000
