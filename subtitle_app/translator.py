@@ -195,7 +195,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             out_dir.mkdir(parents=True, exist_ok=True)
         final_srt = out_dir / f"{item_stem}.srt"
 
-        if not is_video and source_srt and source_srt.exists():
+        if source_srt and source_srt.exists() and source_srt.resolve() != final_srt.resolve():
             bak_name = f"{item_stem}_bak.srt"
             bak_path = out_dir / bak_name
             if bak_path.exists():
@@ -211,17 +211,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             translated_srt.unlink(missing_ok=True)
         else:
             write_srt(final_srt, blocks, final_texts)
-
-        if source_srt and source_srt.exists() and source_srt.resolve() != final_srt.resolve():
-            bak_name = f"{item_stem}_bak.srt"
-            bak_path = out_dir / bak_name
-            if bak_path.exists():
-                bak_path = out_dir / f"{item_stem}_bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
-            try:
-                os.rename(str(source_srt), str(bak_path))
-                post({"type": "log", "message": f"原文已备份为: {bak_path.name}", "level": "INFO"})
-            except OSError as e:
-                logger.warning("备份原文字幕失败: %s", e)
 
         post({"type": "progress", "percent": 100, "stage": "完成",
               "detail": f"字幕保存至: {final_srt}", "idx": idx, "total": total})

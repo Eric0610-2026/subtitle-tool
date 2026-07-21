@@ -75,6 +75,9 @@ class Transcriber:
 
     @staticmethod
     def _read_stderr_loop(stream, lines, lock, done):
+        if stream is None:
+            done.set()
+            return
         try:
             for line in stream:
                 with lock:

@@ -348,7 +348,8 @@ class SubtitleApp(QMainWindow):
         raw["translation"]["pipeline"] = values.get("pipeline", True)
         raw["translation"]["batch_size"] = values.get("translation_batch_size", 50)
         path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
- 
+        cfg.reload()
+
 
     def _add_files(self, is_video: bool):
         exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
@@ -432,12 +433,14 @@ class SubtitleApp(QMainWindow):
         is_video = self.tabs.currentIndex() == 0
         lb = self.video_list if is_video else self.sub_list
         jobs = self.video_jobs if is_video else self.subtitle_jobs
+        removed = set()
         for item in reversed(sorted(lb.selectedItems(), key=lambda x: lb.row(x))):
             row = lb.row(item)
             if 0 <= row < len(jobs):
                 jobs.pop(row)
             lb.takeItem(row)
-        self._add_log_entry("已移除选中项")
+            removed.add(row)
+        self._add_log_entry(f"已移除 {len(removed)} 个选中项")
 
     def _sync_jobs_from_list(self, is_video: bool):
         """列表拖拽排序后，按新顺序重建 jobs"""
@@ -619,7 +622,7 @@ class SubtitleApp(QMainWindow):
         self._reset_progress()
         self.preview_panel.clear()
         self._add_log_entry(log_msg)
-        w = getattr(getattr(cfg, "progress", None) or type("", (), {})(), "transcribe_weight", 80.0)
+        w = getattr(cfg.progress, "transcribe_weight", 80.0) if hasattr(cfg, "progress") else 80.0
         self._overall = OverallProgress(len(jobs), transcribe_weight=w)
         self._overall.start()
         self.progress_panel.overall_progress.setValue(0)
