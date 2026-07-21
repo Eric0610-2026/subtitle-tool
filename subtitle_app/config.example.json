@@ -59,7 +59,8 @@
     "concurrency_translate": 3,
     "embed_subtitle_lang": "chi",
     "embed_timeout": 300,
-    "ffprobe_timeout": 30
+    "ffprobe_timeout": 30,
+    "pause_before_embed": false
   },
 
   "translation_lang_names": {
