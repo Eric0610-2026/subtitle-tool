@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash(cd \"D:\\workbuddy app\\zimu1\" && git remote -v)", "Bash(cd \"D:\\workbuddy app\\zimu1\" && git branch -a)", "Edit", "Bash(cd \"D:\\workbuddy app\\zimu1\" && git add -A && git commit -m \"修复：替换 QInputDialog 为静默对话框，消除系统提示音\n\n- 新增 _silent_text_input() / _silent_double_input() 自定义对话框函数\n- 替换 EditDialog 查找和时间偏移中的 QInputDialog\n- 替换预览区查找和时间偏移中的 QInputDialog\n- .gitignore 添加 .reasonix/\")"]

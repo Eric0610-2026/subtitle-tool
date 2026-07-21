@@ -10,7 +10,8 @@ from PySide6.QtCore import Qt, QObject, Signal, QTimer
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QTextEdit, QListWidget, QListWidgetItem, QWidget, QPushButton,
-    QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox, QMessageBox,
+    QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
+    QDoubleSpinBox, QLineEdit, QMessageBox,
     QApplication, QAbstractSpinBox,
 )
 from PySide6.QtGui import QFont, QFontMetrics, QColor, QDragEnterEvent, QDropEvent
@@ -19,6 +20,55 @@ from .srt_utils import fmt_duration, estimate_eta
 from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
+
+
+def _silent_text_input(parent, title: str, label: str) -> tuple:
+    """无声音的文本输入对话框"""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(label))
+    edit = QLineEdit()
+    layout.addWidget(edit)
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = QPushButton("确定")
+    ok_btn.clicked.connect(dialog.accept)
+    btn_row.addWidget(ok_btn)
+    cancel_btn = QPushButton("取消")
+    cancel_btn.clicked.connect(dialog.reject)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+    result = dialog.exec()
+    text = edit.text().strip()
+    return text, result == QDialog.Accepted
+
+
+def _silent_double_input(parent, title: str, label: str,
+                         default: float = 0, min_v: float = -3600,
+                         max_v: float = 3600, decimals: int = 1) -> tuple:
+    """无声音的数值输入对话框"""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(label))
+    spin = QDoubleSpinBox()
+    spin.setRange(min_v, max_v)
+    spin.setValue(default)
+    spin.setDecimals(decimals)
+    spin.setFixedWidth(120)
+    layout.addWidget(spin)
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = QPushButton("确定")
+    ok_btn.clicked.connect(dialog.accept)
+    btn_row.addWidget(ok_btn)
+    cancel_btn = QPushButton("取消")
+    cancel_btn.clicked.connect(dialog.reject)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+    result = dialog.exec()
+    return spin.value(), result == QDialog.Accepted
 
 
 class ProgressPanel(QGroupBox):
@@ -410,7 +460,7 @@ class EditDialog(QDialog):
         self.accept()
 
     def _find_in_editor(self):
-        text, ok = QInputDialog.getText(self, "查找", "输入要查找的文本：")
+        text, ok = _silent_text_input(self, "查找", "输入要查找的文本：")
         if not ok or not text:
             return
         editor = self._editor
@@ -440,8 +490,8 @@ class EditDialog(QDialog):
 
     def _offset_time(self):
         self._save_edit_buffer()
-        offset, ok = QInputDialog.getDouble(self, "时间偏移",
-                                              "偏移量（秒）：正数=延后，负数=提前", 0, -3600, 3600, 1)
+        offset, ok = _silent_double_input(self, "时间偏移",
+                                           "偏移量（秒）：正数=延后，负数=提前")
         if not ok:
             return
         import re
