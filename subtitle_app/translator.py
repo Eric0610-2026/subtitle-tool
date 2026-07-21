@@ -42,7 +42,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     translate_enabled = opts.get("translate_enabled", True)
     api_url = opts.get("api_url", "")
     api_key = opts.get("api_key", "")
-    translation_model = opts.get("translation_model", "deepseek-v4-flash")
+    translation_model = opts.get("translation_model", "") or ""
     translation_only = opts.get("translation_only", False)
     language = opts["language"]
     detected_lang = opts.get("_detected_lang", language)

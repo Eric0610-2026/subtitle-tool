@@ -4,7 +4,7 @@
 PySide6/Qt 版主应用窗口
 """
 import logging
-import os, queue, re, subprocess, time, traceback
+import os, re, subprocess, time, traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -32,6 +32,7 @@ from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog
 from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
@@ -53,8 +54,6 @@ class SubtitleApp(QMainWindow):
         self.work_dir = str(APP_DIR)
         self.video_jobs: List[Path] = []
         self.subtitle_jobs: List[Path] = []
-        # 使用有界队列防止内存溢出（maxsize=2000）
-        self.ui_queue: queue.Queue = queue.Queue(maxsize=2000)
         self._last_progress_update = 0
         self.worker = SubtitleWorker()
         self._start_time: Optional[float] = None
@@ -63,6 +62,10 @@ class SubtitleApp(QMainWindow):
         self._stats: Dict[str, any] = {}  # 处理统计
         self._overall = None  # 跨文件总进度跟踪
         self._settings_path = Path.home() / ".subtitle_tool_settings.json"
+
+        # ── 信号桥（替代 queue.Queue + QTimer 轮询）──
+        self.signal_bridge = SignalBridge()
+        self.signal_bridge.event_received.connect(self._handle_event)
         # 默认配置（来自 config.json）
         self.settings_data = {
             "model_dir": str(APP_DIR / cfg.whisper.model_dir) if (APP_DIR / cfg.whisper.model_dir).exists() else cfg.whisper.model_dir,
@@ -81,11 +84,6 @@ class SubtitleApp(QMainWindow):
         }
         self._build_ui()
         self._apply_style()
-
-        # 定时器轮询队列
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll_queue)
-        self._timer.start(cfg.app.poll_interval_ms)
 
         self._add_log_entry("应用就绪")
         self._restore_window_state()
@@ -107,8 +105,8 @@ class SubtitleApp(QMainWindow):
             state = s.get("window_state")
             if state:
                 self.restoreState(bytes.fromhex(state))
-        except Exception:
-            pass
+        except (ValueError, OSError, TypeError) as e:
+            logger.debug("恢复窗口状态失败: %s", e)
 
     def _save_window_state(self):
         s = load_json(self._settings_path, {})
@@ -150,71 +148,53 @@ class SubtitleApp(QMainWindow):
         hl.addWidget(self.theme_btn)
         main.addWidget(header)
 
-    def _build_progress_group(self, name, label_attr, bar_attr, detail_attr):
-        group = QGroupBox(name)
-        v = QVBoxLayout(group)
-        v.setContentsMargins(8, 6, 8, 6)
-        label = QLabel("等待中")
-        label.setStyleSheet("font-weight:600;")
-        label.setMinimumWidth(10)
-        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        v.addWidget(label)
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        bar.setValue(0)
-        bar.setFixedHeight(20)
-        bar.setTextVisible(True)
-        bar.setFormat("")
-        v.addWidget(bar)
-        detail = QLabel("")
-        detail.setMinimumWidth(10)
-        detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        v.addWidget(detail)
-        setattr(self, label_attr, label)
-        setattr(self, bar_attr, bar)
-        setattr(self, detail_attr, detail)
-        return group
+    def _build_file_list(self, bl):
+        """构建文件列表区（splitter + 操作按钮）"""
+        splitter = QSplitter()
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabWidget()
+        self.video_list = DropListWidget(is_video_tab=True)
+        self.video_list.itemClicked.connect(lambda item: self._load_preview(item, True))
+        self.video_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, True))
+        self.video_list.reordered.connect(lambda: self._sync_jobs_from_list(True))
+        self.sub_list = DropListWidget(is_video_tab=False)
+        self.sub_list.itemClicked.connect(lambda item: self._load_preview(item, False))
+        self.sub_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, False))
+        self.sub_list.reordered.connect(lambda: self._sync_jobs_from_list(False))
+        self.tabs.addTab(self.video_list, "视频/音频生成字幕")
+        self.tabs.addTab(self.sub_list, "已有字幕翻译")
+        ll.addWidget(self.tabs)
+        btn_row = QHBoxLayout()
+        for text, cb in [
+            ("📂 添加文件", lambda: self._add_files(self.tabs.currentIndex() == 0)),
+            ("📁 添加文件夹", lambda: self._add_folder(self.tabs.currentIndex() == 0)),
+            ("🔍 扫描", lambda: self._scan_dir()),
+            ("✕ 移除", lambda: self._remove_selected()),
+            ("☑ 全选", lambda: self._select_all()),
+            ("🗑 清空", lambda: self._clear_jobs()),
+        ]:
+            btn_row.addWidget(self._make_btn(text, cb, object_name="actionBtn"))
+        ll.addLayout(btn_row)
+        splitter.addWidget(left)
 
-    def _build_progress_area(self, bl):
-        pg = QGroupBox("进度")
-        pgl = QVBoxLayout(pg)
-        self.overall_label = QLabel("总进度：等待中")
-        self.overall_label.setStyleSheet("font-weight:600; color:#6366f1;")
-        pgl.addWidget(self.overall_label)
-        self.overall_progress = QProgressBar()
-        self.overall_progress.setRange(0, 100)
-        self.overall_progress.setValue(0)
-        self.overall_progress.setFixedHeight(16)
-        self.overall_progress.setTextVisible(True)
-        self.overall_progress.setFormat("%p%")
-        pgl.addWidget(self.overall_progress)
-        top = QHBoxLayout()
-        self.lang_label = QLabel("语言：auto")
-        top.addWidget(self.lang_label)
-        top.addStretch()
-        self.counter_label = QLabel("已转写 0/0 | 已翻译 0/0 | 缓存 0")
-        top.addWidget(self.counter_label)
-        pgl.addLayout(top)
-        dual = QVBoxLayout()
-        dual.addWidget(self._build_progress_group("转写", "transcribe_label", "transcribe_progress", "transcribe_detail"), 1)
-        dual.addWidget(self._build_progress_group("翻译", "translate_label", "translate_progress", "translate_detail"), 1)
-        pgl.addLayout(dual)
-        bot = QHBoxLayout()
-        self.detail_label = QLabel("已用 --:-- | 剩余 --:-- | 预计 --")
-        bot.addWidget(self.detail_label, 1)
-        pgl.addLayout(bot)
-        lg = QGroupBox("日志")
-        lgl = QVBoxLayout(lg)
-        self.log_list = QListWidget()
-        self.log_list.setObjectName("logList")
-        self.log_list.setMinimumHeight(60)
-        self.log_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.log_list.installEventFilter(self)
-        lgl.addWidget(self.log_list)
+        # ── 右侧预览面板 ──
+        self.preview_panel = PreviewPanel()
+        self.preview_panel.connect_toolbar(self._find_in_preview, self._save_preview, self._offset_preview_time)
+        splitter.addWidget(self.preview_panel)
+        splitter.setSizes([600, 600])
+        bl.addWidget(splitter, 2)
+
+    def _build_progress_and_log(self, bl):
+        """构建进度 + 日志面板"""
+        self.progress_panel = ProgressPanel()
+        self.log_panel = LogPanel()
+        self.log_panel.log_list.installEventFilter(self)
         bottom_splitter = QSplitter(Qt.Horizontal)
         bottom_splitter.setChildrenCollapsible(False)
-        bottom_splitter.addWidget(pg)
-        bottom_splitter.addWidget(lg)
+        bottom_splitter.addWidget(self.progress_panel)
+        bottom_splitter.addWidget(self.log_panel)
         bottom_splitter.setSizes([520, 520])
         bl.addWidget(bottom_splitter, 1)
 
@@ -248,58 +228,11 @@ class SubtitleApp(QMainWindow):
         pr.addWidget(self._make_btn("⚙ 更多设置", self._open_settings, object_name="accentBtn"))
         bl.addLayout(pr)
 
-        # ── 中间双栏 ──
-        splitter = QSplitter()
+        # ── 文件列表（双栏 splitter）──
+        self._build_file_list(bl)
 
-        left = QWidget()
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        self.tabs = QTabWidget()
-        self.video_list = DropListWidget(is_video_tab=True)
-        self.video_list.itemClicked.connect(lambda item: self._load_preview(item, True))
-        self.video_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, True))
-        self.video_list.reordered.connect(lambda: self._sync_jobs_from_list(True))
-        self.sub_list = DropListWidget(is_video_tab=False)
-        self.sub_list.itemClicked.connect(lambda item: self._load_preview(item, False))
-        self.sub_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, False))
-        self.sub_list.reordered.connect(lambda: self._sync_jobs_from_list(False))
-        self.tabs.addTab(self.video_list, "视频/音频生成字幕")
-        self.tabs.addTab(self.sub_list, "已有字幕翻译")
-        ll.addWidget(self.tabs)
-
-        btn_row = QHBoxLayout()
-        for text, cb in [
-            ("📂 添加文件", lambda: self._add_files(self.tabs.currentIndex() == 0)),
-            ("📁 添加文件夹", lambda: self._add_folder(self.tabs.currentIndex() == 0)),
-            ("🔍 扫描", lambda: self._scan_dir()),
-            ("✕ 移除", lambda: self._remove_selected()),
-            ("☑ 全选", lambda: self._select_all()),
-            ("🗑 清空", lambda: self._clear_jobs()),
-        ]:
-            btn_row.addWidget(self._make_btn(text, cb, object_name="actionBtn"))
-        ll.addLayout(btn_row)
-        splitter.addWidget(left)
-
-        right = QWidget()
-        rl2 = QVBoxLayout(right)
-        rl2.setContentsMargins(4, 0, 0, 0)
-        preview_header = QHBoxLayout()
-        preview_header.addWidget(QLabel("字幕预览"))
-        preview_header.addWidget(self._make_btn("🔍 查找", self._find_in_preview, object_name="actionBtn"))
-        preview_header.addWidget(self._make_btn("💾 保存修改", self._save_preview, object_name="actionBtn"))
-        preview_header.addWidget(self._make_btn("⏱ 偏移", self._offset_preview_time, object_name="actionBtn",
-                                       tooltip="批量调整字幕时间戳（±秒）"))
-        preview_header.addStretch()
-        rl2.addLayout(preview_header)
-        self.preview = QTextEdit()
-        self.preview.setReadOnly(True)
-        self.preview.setFont(QFont("Consolas", 10))
-        rl2.addWidget(self.preview, 1)
-        splitter.addWidget(right)
-        splitter.setSizes([600, 600])
-
-        bl.addWidget(splitter, 2)
-        self._build_progress_area(bl)
+        # ── 进度 + 日志（底部）──
+        self._build_progress_and_log(bl)
 
         main.addWidget(body, 1)
 
@@ -565,27 +498,26 @@ class SubtitleApp(QMainWindow):
                     candidates.append(f)
         for c in candidates:
             if c.exists():
-                self.preview.setReadOnly(False)
-                self.preview.setText(c.read_text(encoding="utf-8"))
-                self._last_output_dir = c.parent
+                self.preview_panel.set_text(c.read_text(encoding="utf-8"))
+                self.preview_panel.last_output_dir = c.parent
                 return
-        self.preview.setReadOnly(True)
+        self.preview_panel.clear()
 
     def _find_in_preview(self):
         """在预览区弹出查找对话框"""
         text, ok = QInputDialog.getText(self, "查找", "输入要查找的文本：")
         if not ok or not text:
             return
-        content = self.preview.toPlainText()
+        content = self.preview_panel.get_text()
         # 先清除上次高亮
-        fmt_normal = self.preview.currentCharFormat()
-        cursor = self.preview.textCursor()
+        fmt_normal = self.preview_panel.preview.currentCharFormat()
+        cursor = self.preview_panel.preview.textCursor()
         cursor.select(cursor.SelectionType.Document)
         cursor.setCharFormat(fmt_normal)
-        self.preview.setTextCursor(cursor)
+        self.preview_panel.preview.setTextCursor(cursor)
         # 查找并高亮
         found = False
-        cursor = self.preview.textCursor()
+        cursor = self.preview_panel.preview.textCursor()
         cursor.movePosition(cursor.MoveOperation.Start)
         fmt = cursor.charFormat()
         fmt.setBackground(QColor("#fbbf24"))
@@ -606,7 +538,7 @@ class SubtitleApp(QMainWindow):
 
     def _offset_preview_time(self):
         """批量调整预览区字幕时间戳"""
-        content = self.preview.toPlainText().strip()
+        content = self.preview_panel.get_text().strip()
         if not content:
             QMessageBox.information(self, "提示", "预览区为空")
             return
@@ -623,7 +555,7 @@ class SubtitleApp(QMainWindow):
             return f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}"
 
         new_content = ts_re.sub(_shift, content)
-        self.preview.setText(new_content)
+        self.preview_panel.set_text(new_content)
         self._add_log_entry(f"时间偏移 {offset:+.1f}s（预览区）")
         # 自动保存
         self._save_preview()
@@ -646,9 +578,9 @@ class SubtitleApp(QMainWindow):
         if not srt_path.exists():
             srt_path = jobs[row].parent / f"{stem}.srt"
         try:
-            srt_path.write_text(self.preview.toPlainText(), encoding="utf-8")
+            srt_path.write_text(self.preview_panel.get_text(), encoding="utf-8")
             self._add_log_entry(f"已保存预览修改：{srt_path.name}")
-        except Exception as e:
+        except OSError as e:
             QMessageBox.warning(self, "保存失败", str(e))
 
     # ─── 处理控制 ───
@@ -672,7 +604,7 @@ class SubtitleApp(QMainWindow):
             "translation_batch_size": s.get("translation_batch_size", cfg.translation.batch_size),
             "skip_completed": skip_completed,
             "concurrency": cfg.translation.concurrency_pipeline if s.get("pipeline", True) else cfg.translation.concurrency_serial,
-            "post": self.ui_queue.put,
+            "post": self.signal_bridge.post,
             "_is_stopped": lambda: self.worker.stop_requested,
             "_register_proc": self.worker._register_proc,
             "_unregister_proc": self.worker._unregister_proc,
@@ -685,14 +617,13 @@ class SubtitleApp(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._reset_progress()
-        self.preview.setReadOnly(True)
-        self.preview.clear()
+        self.preview_panel.clear()
         self._add_log_entry(log_msg)
         w = getattr(getattr(cfg, "progress", None) or type("", (), {})(), "transcribe_weight", 80.0)
         self._overall = OverallProgress(len(jobs), transcribe_weight=w)
         self._overall.start()
-        self.overall_progress.setValue(0)
-        self.overall_label.setText(f"总进度：第 1/{len(jobs)} 个 · 已完成 0% · 等待中")
+        self.progress_panel.overall_progress.setValue(0)
+        self.progress_panel.overall_label.setText(f"总进度：第 1/{len(jobs)} 个 · 已完成 0% · 等待中")
         self.worker.start(jobs, opts)
 
     def _get_jobs(self):
@@ -716,14 +647,7 @@ class SubtitleApp(QMainWindow):
         label.setText(fm.elidedText(text, Qt.ElideRight, w))
 
     def _reset_progress(self):
-        self.transcribe_progress.setValue(0)
-        self.transcribe_label.setText("等待中")
-        self.transcribe_detail.setText("")
-        self.translate_progress.setValue(0)
-        self.translate_label.setText("等待中")
-        self.translate_detail.setText("")
-        self.overall_progress.setValue(0)
-        self.overall_label.setText("总进度：等待中")
+        self.progress_panel.reset()
 
     def _stop(self):
         if not (self.worker.thread and self.worker.thread.is_alive()):
@@ -806,21 +730,35 @@ class SubtitleApp(QMainWindow):
             self._add_log_entry("❌ 手动嵌入失败", "WARNING")
 
     def _add_log_entry(self, message: str, level: str = "INFO", trace: str = None) -> None:
-        ts = datetime.now().strftime("%H:%M:%S")
-        text = f"[{ts}] {message}"
-        item = QListWidgetItem()
-        entry = LogEntry(text, level, trace)
-        item.setSizeHint(entry.sizeHint())
-        self.log_list.addItem(item)
-        self.log_list.setItemWidget(item, entry)
-        entry._list_item = item
-        # 下一布局周期后按真实视口宽度重算该条目高度，避免初始宽度未定导致高度偏差
-        QTimer.singleShot(0, lambda: item.setSizeHint(entry.sizeHint()))
-        max_lines = cfg.app.max_log_lines
-        while self.log_list.count() > max_lines:
-            self.log_list.takeItem(0)
+        # 持久化到日志文件
+        py_level = getattr(logging, level.upper(), logging.INFO)
+        logger.log(py_level, "%s", message)
+        if trace:
+            logger.debug("Traceback:\n%s", trace.rstrip())
+
+        # 显示到 UI 日志面板
+        self.log_panel.add_entry(message, level, trace)
+        self.log_panel.trim_to(cfg.app.max_log_lines)
 
     def _run_startup_checks(self):
+        # ── 检查 config.json 是否存在 ──
+        config_path = Path(__file__).resolve().parent / "config.json"
+        config_example = config_path.with_name("config.example.json")
+        if not config_path.exists() and config_example.exists():
+            msg = (
+                "首次使用请先创建配置文件，以便永久保存你的设置。\n\n"
+                f"将 {config_example.name} 复制并重命名为 {config_path.name}：\n"
+                f"  1. 复制 {config_example.name}\n"
+                f"  2. 粘贴并重命名为 {config_path.name}\n"
+                f"  3. 编辑 {config_path.name}，填入你的 API 地址、密钥和模型名称\n\n"
+                "如果没有 config.json，应用会加载默认配置运行，但「永久保存」按钮不可用。\n"
+                "（仍可通过「本次有效」按钮在当前会话中使用所有功能。）"
+            )
+            self._add_log_entry(
+                f"未找到 {config_path.name}，已从 {config_example.name} 加载默认配置。"
+                f"请复制为 {config_path.name} 并编辑 API 信息", "WARNING")
+            QMessageBox.information(self, "首次使用提醒", msg)
+
         missing_essential = []
         if not find_tool("ffmpeg.exe", APP_DIR) and not find_tool("ffmpeg", APP_DIR):
             missing_essential.append("ffmpeg.exe")
@@ -840,24 +778,11 @@ class SubtitleApp(QMainWindow):
 
     def _export_log(self):
         """导出当前日志列表到文件"""
-        if self.log_list.count() == 0:
+        if self.log_panel.count() == 0:
             QMessageBox.information(self, "导出日志", "日志为空，无需导出。")
             return
 
-        lines = []
-        for i in range(self.log_list.count()):
-            item = self.log_list.item(i)
-            w = self.log_list.itemWidget(item)
-            if w is not None and hasattr(w, "message"):
-                level = getattr(w, "level", "INFO").ljust(5)
-                line = f"{w.message}"
-                lines.append(line)
-                if getattr(w, "trace", None):
-                    for tl in w.trace.rstrip().split("\n"):
-                        lines.append(f"  {tl}")
-            else:
-                # fallback: 从 item text 提取
-                lines.append(item.text())
+        lines = self.log_panel.get_all_lines()
 
         header = (
             f"本地字幕生成工具 - 日志导出\n"
@@ -884,67 +809,62 @@ class SubtitleApp(QMainWindow):
 
     # ─── 轮询队列 ───
 
-    def _poll_queue(self):
-        try:
-            while True:
-                self._handle_event(self.ui_queue.get_nowait())
-        except queue.Empty:
-            pass
-
     def _handle_progress(self, e):
+        p = self.progress_panel
         pct = e.get("percent", 0)
         stage = e.get("stage", "")
         detail = e.get("detail", "")
         if stage in ("提取音频", "加载模型", "读取字幕", "转写中"):
-            self.transcribe_progress.setValue(int(pct))
-            self.transcribe_progress.setFormat(f"{int(pct)}%")
-            self.transcribe_detail.setText(detail)
+            p.transcribe_bar.setValue(int(pct))
+            p.transcribe_bar.setFormat(f"{int(pct)}%")
+            p.transcribe_detail.setText(detail)
         elif stage == "翻译":
-            self.translate_progress.setValue(int(pct))
-            self.translate_progress.setFormat(f"{int(pct)}%")
-            self.translate_detail.setText(detail)
+            p.translate_bar.setValue(int(pct))
+            p.translate_bar.setFormat(f"{int(pct)}%")
+            p.translate_detail.setText(detail)
         elif stage == "组织输出":
-            self.transcribe_progress.setValue(100)
-            self.transcribe_progress.setFormat("100%")
-            self.translate_progress.setValue(100)
-            self.translate_progress.setFormat("100%")
+            p.transcribe_bar.setValue(100)
+            p.transcribe_bar.setFormat("100%")
+            p.translate_bar.setValue(100)
+            p.translate_bar.setFormat("100%")
         _has_detail_above = stage in ("提取音频", "加载模型", "读取字幕", "转写中", "翻译")
         if not _has_detail_above and detail and self._start_time and pct:
             elapsed = time.time() - self._start_time
             remain, finish = estimate_eta(self._start_time, pct / 100)
-            self.detail_label.setText(f"{detail} | 已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
+            p.detail_label.setText(f"{detail} | 已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
         elif not _has_detail_above and detail:
-            self.detail_label.setText(detail)
+            p.detail_label.setText(detail)
         elif self._start_time and pct:
             elapsed = time.time() - self._start_time
             remain, finish = estimate_eta(self._start_time, pct / 100)
-            self.detail_label.setText(f"已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
+            p.detail_label.setText(f"已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
         else:
-            self.detail_label.setText("")
+            p.detail_label.setText("")
         idx = e.get("idx", 0)
         if idx and self._overall is not None:
             overall_pct = self._overall.tick(idx, pct, stage)
-            self.overall_progress.setValue(int(overall_pct))
+            p.overall_progress.setValue(int(overall_pct))
             remain, finish = self._overall.eta()
-            self.overall_label.setText(
+            p.overall_label.setText(
                 f"总进度：第 {idx}/{self._overall.total} 个 · 已完成 {overall_pct:.0f}% · "
                 f"预计全部完成 {finish}（剩余 {remain}）")
 
     def _handle_done(self, e):
+        p = self.progress_panel
         msg = e.get("message", "完成")
         self._add_log_entry(msg, "INFO")
-        self.transcribe_progress.setValue(100)
-        self.transcribe_progress.setFormat("100%")
-        self.translate_progress.setValue(100)
-        self.translate_progress.setFormat("100%")
-        self.detail_label.setText("")
+        p.transcribe_bar.setValue(100)
+        p.transcribe_bar.setFormat("100%")
+        p.translate_bar.setValue(100)
+        p.translate_bar.setFormat("100%")
+        p.detail_label.setText("")
         if self._overall is not None:
             self._overall.set_complete()
-            self.overall_progress.setValue(100)
-            self.overall_label.setText("总进度：全部完成 100%")
+            p.overall_progress.setValue(100)
+            p.overall_label.setText("总进度：全部完成 100%")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.preview.setReadOnly(False)
+        self.preview_panel.preview.setReadOnly(False)
         elapsed = time.time() - self._start_time if self._start_time else 0
         stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
@@ -956,28 +876,28 @@ class SubtitleApp(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._reset_progress()
-        self.preview.setReadOnly(False)
+        self.preview_panel.preview.setReadOnly(False)
 
     def _handle_event(self, event: dict):
         t = event.get("type", "")
         handlers = {
             "log": lambda e: self._add_log_entry(e.get("message", ""), e.get("level", "INFO")),
-            "transcribe_status": lambda e: self._set_elided(self.transcribe_label,
+            "transcribe_status": lambda e: self._set_elided(self.progress_panel.transcribe_label,
                 f"🎤 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
             "file_mode": lambda e: self._overall.set_file_translation_only(e.get("idx", 0))
                 if self._overall and not e.get("needs_transcribe", True) else None,
-            "translate_status": lambda e: self._set_elided(self.translate_label,
+            "translate_status": lambda e: self._set_elided(self.progress_panel.translate_label,
                 f"🌍 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
-            "current": lambda e: self._set_elided(self.transcribe_label, f"🎤 {e.get('message', '')}"),
+            "current": lambda e: self._set_elided(self.progress_panel.transcribe_label, f"🎤 {e.get('message', '')}"),
             "progress": self._handle_progress,
-            "counter": lambda e: self.counter_label.setText(
+            "counter": lambda e: self.progress_panel.counter_label.setText(
                 f"已转写 {e.get('generated',0)}/{e.get('total',0)} | "
                 f"已翻译 {e.get('translated',0)}/{e.get('total',0)} | "
                 f"缓存 {e.get('cache',0)}"),
-            "language": lambda e: self.lang_label.setText(f"语言：{e.get('message','')}"),
+            "language": lambda e: self.progress_panel.lang_label.setText(f"语言：{e.get('message','')}"),
             "output_path": self._handle_output_path,
-            "preview": lambda e: self.preview.setText(e.get("message", "")),
-            "preview_clear": lambda e: self.preview.clear(),
+            "preview": lambda e: self.preview_panel.set_text(e.get("message", "")),
+            "preview_clear": lambda e: self.preview_panel.clear(),
             "preview_append": self._handle_preview_append,
             "done": self._handle_done,
             "error": self._handle_error,
@@ -993,8 +913,7 @@ class SubtitleApp(QMainWindow):
         self._check_subtitle_quality(p)
 
     def _handle_preview_append(self, e):
-        self.preview.append(e.get("message", ""))
-        self.preview.verticalScrollBar().setValue(self.preview.verticalScrollBar().maximum())
+        self.preview_panel.append(e.get("message", ""))
 
     def _check_subtitle_quality(self, path: Path):
         """检查字幕质量问题"""
@@ -1002,7 +921,8 @@ class SubtitleApp(QMainWindow):
             return
         try:
             blocks = parse_srt(path)
-        except Exception:
+        except Exception as e:
+            logger.debug("字幕质量检查解析失败 %s: %s", path.name, e)
             return
         issues = []
         for i, b in enumerate(blocks):
@@ -1115,7 +1035,8 @@ class SubtitleApp(QMainWindow):
             v, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
             winreg.CloseKey(k)
             return v == 0
-        except Exception:
+        except (OSError, TypeError) as e:
+            logger.debug("读取系统主题失败: %s", e)
             return False
 
     def closeEvent(self, event):
@@ -1124,37 +1045,40 @@ class SubtitleApp(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # 窗口首次显示后视口宽度已确定，重新计算日志条目高度，避免首条与后续不一致
-        self._relayout_log_items()
+        # 窗口首次显示后视口宽度已确定，重新计算日志条目高度
+        self.log_panel.relayout_items()
 
     def eventFilter(self, obj, event):
-        if obj is self.log_list and event.type() == QEvent.Resize:
-            self._relayout_log_items()
+        if obj is self.log_panel.log_list and event.type() == QEvent.Resize:
+            self.log_panel.relayout_items()
         return super().eventFilter(obj, event)
-
-    def _relayout_log_items(self):
-        """按当前视口宽度重算所有日志条目的 sizeHint，保证高度一致"""
-        if getattr(self, "_relayouting", False):
-            return
-        self._relayouting = True
-        try:
-            for i in range(self.log_list.count()):
-                it = self.log_list.item(i)
-                w = self.log_list.itemWidget(it)
-                if w is not None:
-                    it.setSizeHint(w.sizeHint())
-        finally:
-            self._relayouting = False
 
 
 def main():
     import sys
     import logging
+    from logging.handlers import RotatingFileHandler
+
+    # ── 日志目录 & 文件持久化 ──
+    log_dir = APP_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "subtitle_tool.log"
+
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(), file_handler],
     )
 
     app = QApplication(sys.argv)

@@ -15,6 +15,9 @@ ffprobe.exe
 *.partial.srt
 *.translate_state.json
 
+# 日志
+logs/
+
 # 本地配置（含 API 密钥，不提交到仓库）
 config.json
 

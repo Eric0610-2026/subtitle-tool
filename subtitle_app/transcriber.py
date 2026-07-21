@@ -31,6 +31,8 @@ except ImportError:
 
 # 各模型相对速度因子（越大越慢），用于进度条权重估算
 _MODEL_SPEED: Dict[str, float] = {k: v for k, v in cfg.whisper.model_speed_factors.__dict__.items()}
+# _MODEL_SPEED 读写锁（自适应更新在多线程下安全）
+_model_speed_lock = threading.Lock()
 # 自适应学习率：每处理一个文件，把实测速度按此比例融合到估算值
 _ADAPT_ALPHA = 0.2
 # 模型加载锁，防止并发加载同一模型
@@ -60,7 +62,7 @@ class Transcriber:
             try:
                 _, _, model = self._model_cache[key]
                 del model
-            except Exception:
+            except (KeyError, AttributeError):
                 pass
         self._model_cache.clear()
         try:
@@ -68,7 +70,7 @@ class Transcriber:
             if torch.cuda.is_available():
                 gc.collect()
                 torch.cuda.empty_cache()
-        except Exception:
+        except (ImportError, RuntimeError):
             pass
 
     @staticmethod
@@ -210,7 +212,8 @@ class Transcriber:
         """按音频时长 + 模型大小估算各阶段耗时权重，用于动态分配进度条"""
         name = model_dir.stem.lower() if model_dir else "large-v3-turbo"
         model_name = next((k for k in _MODEL_SPEED if k in name), "large-v3-turbo")
-        speed = _MODEL_SPEED.get(model_name, 1.5)
+        with _model_speed_lock:
+            speed = _MODEL_SPEED.get(model_name, 1.5)
         return {
             "extract": duration * 0.15,
             "model": 15.0,
@@ -421,9 +424,11 @@ class Transcriber:
                     name = model_dir.stem.lower() if model_dir else ""
                     model_name = next((k for k in _MODEL_SPEED if k in name), None)
                     if model_name:
-                        old = _MODEL_SPEED[model_name]
-                        _MODEL_SPEED[model_name] = old * (1 - _ADAPT_ALPHA) + observed_speed * _ADAPT_ALPHA
-                        post({"type": "log", "message": f"速度因子调整：{old:.2f} → {_MODEL_SPEED[model_name]:.2f}", "level": "INFO"})
+                        with _model_speed_lock:
+                            old = _MODEL_SPEED[model_name]
+                            new_speed = old * (1 - _ADAPT_ALPHA) + observed_speed * _ADAPT_ALPHA
+                            _MODEL_SPEED[model_name] = new_speed
+                        post({"type": "log", "message": f"速度因子调整：{old:.2f} → {new_speed:.2f}", "level": "INFO"})
                 t_post({"type": "log", "message": f"转写完成：{len(blocks)} 段字幕（{detected_lang}）", "level": "INFO"})
                 return source_srt, detected_lang
             except Exception:
