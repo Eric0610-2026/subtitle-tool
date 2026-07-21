@@ -25,6 +25,7 @@ config.json
 # 工具配置
 .opencode/
 .workbuddy/
+.reasonix/
 
 # 系统文件
 Thumbs.db

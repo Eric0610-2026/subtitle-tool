@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QLabel, QTabWidget, QSplitter, QGroupBox,
     QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
-    QInputDialog, QMenu,
+    QMenu,
 )
 from PySide6.QtGui import QFont, QColor, QFontMetrics
 
@@ -32,7 +32,7 @@ from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog
 from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
-from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
@@ -600,7 +600,7 @@ class SubtitleApp(QMainWindow):
 
     def _find_in_preview(self):
         """在预览区弹出查找对话框"""
-        text, ok = QInputDialog.getText(self, "查找", "输入要查找的文本：")
+        text, ok = _silent_text_input(self, "查找", "输入要查找的文本：")
         if not ok or not text:
             return
         content = self.preview_panel.get_text()
@@ -637,8 +637,8 @@ class SubtitleApp(QMainWindow):
         if not content:
             QMessageBox.information(self, "提示", "预览区为空")
             return
-        offset, ok = QInputDialog.getDouble(self, "时间偏移",
-                                              "偏移量（秒）：正数=延后，负数=提前", 0, -3600, 3600, 1)
+        offset, ok = _silent_double_input(self, "时间偏移",
+                                           "偏移量（秒）：正数=延后，负数=提前")
         if not ok:
             return
         # 匹配所有 SRT 时间戳行：HH:MM:SS,mmm --> HH:MM:SS,mmm
