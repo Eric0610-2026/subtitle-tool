@@ -9,12 +9,12 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QListWidget,
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
-    QAbstractItemView,
+    QAbstractItemView, QTabWidget, QWidget,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
-from .srt_utils import load_json, save_json
+from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
 
 _SCROLLBAR_STYLE = """
@@ -160,28 +160,41 @@ class SettingsDialog(QDialog):
 
 
 def show_history_dialog(parent, work_dir: str, log_callback) -> None:
-    path = Path(work_dir) / ".subtitle_progress.json"
+    path = Path(work_dir) / IGNORE_FILE
     data = load_json(path, {})
     done = data.get("done", [])
+    ignored = data.get("ignored", [])
     file_cost = data.get("file_cost", {})
-    if not done:
+    if not done and not ignored:
         box = QMessageBox(parent)
         box.setWindowTitle("处理历史")
-        box.setText("尚无处理记录")
+        box.setText("尚无记录")
         box.setIcon(QMessageBox.NoIcon)
         box.exec()
         return
     dlg = QDialog(parent)
     dlg.setStyleSheet(_SCROLLBAR_STYLE)
-    dlg.setWindowTitle(f"处理历史 ({len(done)} 条)")
-    dlg.resize(640, 400)
+    dlg.setWindowTitle(f"处理历史 ({len(done)} 已完成, {len(ignored)} 已忽略)")
+    dlg.resize(640, 480)
     layout = QVBoxLayout(dlg)
+    tabs = QTabWidget()
+    layout.addWidget(tabs)
+    btn_row = QHBoxLayout()
+    layout.addLayout(btn_row)
+    btn_row.addStretch()
+    close_btn = QPushButton("关闭")
+    close_btn.clicked.connect(dlg.accept)
+    btn_row.addWidget(close_btn)
+
+    # ── 已完成标签页 ──
+    done_widget = QWidget()
+    done_layout = QVBoxLayout(done_widget)
     hint = QLabel("选中条目后点击「删除选中」可移除记录（不影响已生成的字幕文件）")
     hint.setStyleSheet("color:#64748b; font-size:11px;")
-    layout.addWidget(hint)
-    list_widget = QListWidget()
-    list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-    list_widget.setFont(QFont("Consolas", 9))
+    done_layout.addWidget(hint)
+    done_list = QListWidget()
+    done_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    done_list.setFont(QFont("Consolas", 9))
     for entry in done:
         if isinstance(entry, dict):
             p = entry.get("path", "")
@@ -196,34 +209,54 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
             display = p
         item = QListWidgetItem(display)
         item.setData(Qt.UserRole, p)
-        list_widget.addItem(item)
-    layout.addWidget(list_widget, 1)
-    btn_row = QHBoxLayout()
-    del_btn = QPushButton("🗑 删除选中")
-    del_btn.setObjectName("stopBtn")
-    btn_row.addWidget(del_btn)
-    btn_row.addStretch()
-    close_btn = QPushButton("关闭")
-    close_btn.clicked.connect(dlg.accept)
-    btn_row.addWidget(close_btn)
-    layout.addLayout(btn_row)
+        done_list.addItem(item)
+    done_layout.addWidget(done_list, 1)
+    btn_row1 = QHBoxLayout()
+    del_done_btn = QPushButton("🗑 删除选中")
+    del_done_btn.setObjectName("stopBtn")
+    btn_row1.addWidget(del_done_btn)
+    btn_row1.addStretch()
+    done_layout.addLayout(btn_row1)
+    tabs.addTab(done_widget, f"已完成 ({len(done)})")
 
-    def _delete_selected():
-        sel = list_widget.selectedItems()
+    # ── 已忽略标签页 ──
+    ignore_widget = QWidget()
+    ignore_layout = QVBoxLayout(ignore_widget)
+    hint2 = QLabel("选中条目后点击「取消忽略」恢复文件")
+    hint2.setStyleSheet("color:#64748b; font-size:11px;")
+    ignore_layout.addWidget(hint2)
+    ignore_list = QListWidget()
+    ignore_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    ignore_list.setFont(QFont("Consolas", 9))
+    for p in ignored:
+        item = QListWidgetItem(p)
+        item.setData(Qt.UserRole, p)
+        ignore_list.addItem(item)
+    ignore_layout.addWidget(ignore_list, 1)
+    btn_row2 = QHBoxLayout()
+    unignore_btn = QPushButton("↩ 取消忽略选中")
+    unignore_btn.setObjectName("accentBtn")
+    btn_row2.addWidget(unignore_btn)
+    btn_row2.addStretch()
+    ignore_layout.addLayout(btn_row2)
+    tabs.addTab(ignore_widget, f"已忽略 ({len(ignored)})")
+
+    def _delete_done():
+        sel = done_list.selectedItems()
         if not sel:
             return
         box = QMessageBox(dlg)
         box.setWindowTitle("删除确认")
-        box.setText(f"确定从历史记录中移除选中的 {len(sel)} 条？\n（不影响已生成的字幕文件）")
+        box.setText(f"确定从历史中移除选中的 {len(sel)} 条？")
         box.setIcon(QMessageBox.NoIcon)
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         if box.exec() != QMessageBox.Yes:
             return
-        for item in reversed(sorted(sel, key=lambda x: list_widget.row(x))):
-            list_widget.takeItem(list_widget.row(item))
+        for item in reversed(sorted(sel, key=lambda x: done_list.row(x))):
+            done_list.takeItem(done_list.row(item))
         remaining = []
-        for i in range(list_widget.count()):
-            item = list_widget.item(i)
+        for i in range(done_list.count()):
+            item = done_list.item(i)
             p = item.data(Qt.UserRole) or item.text()
             remaining.append(p)
         data["done"] = remaining
@@ -233,10 +266,30 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
             if k not in remaining_set:
                 del costs[k]
         save_json(path, data)
-        dlg.setWindowTitle(f"处理历史 ({len(remaining)} 条)")
+        tabs.setTabText(0, f"已完成 ({len(remaining)})")
+        dlg.setWindowTitle(f"处理历史 ({len(remaining)} 已完成, {len(ignored)} 已忽略)")
         log_callback(f"已从历史中移除 {len(sel)} 条记录")
 
-    del_btn.clicked.connect(_delete_selected)
+    def _unignore_selected():
+        sel = ignore_list.selectedItems()
+        if not sel:
+            return
+        removed = 0
+        for item in reversed(sorted(sel, key=lambda x: ignore_list.row(x))):
+            p = item.data(Qt.UserRole) or item.text()
+            row = ignore_list.row(item)
+            ignore_list.takeItem(row)
+            if p in ignored:
+                ignored.remove(p)
+            removed += 1
+        data["ignored"] = ignored
+        save_json(path, data)
+        tabs.setTabText(1, f"已忽略 ({len(ignored)})")
+        dlg.setWindowTitle(f"处理历史 ({len(data.get('done', []))} 已完成, {len(ignored)} 已忽略)")
+        log_callback(f"已取消忽略 {removed} 个文件")
+
+    del_done_btn.clicked.connect(_delete_done)
+    unignore_btn.clicked.connect(_unignore_selected)
     dlg.exec()
 
 

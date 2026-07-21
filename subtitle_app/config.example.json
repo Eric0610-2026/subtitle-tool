@@ -56,6 +56,7 @@
     "paragraph_gap_seconds": 3.0,
     "context_window": 5,
     "timeout_curl": 120,
+    "concurrency_translate": 3,
     "embed_subtitle_lang": "chi",
     "embed_timeout": 300,
     "ffprobe_timeout": 30

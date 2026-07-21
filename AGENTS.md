@@ -3,7 +3,8 @@
 ## 入口与运行
 
 - 入口：`subtitle_app.py:1` → `subtitle_app.qt_app.main()`
-- 运行：`python subtitle_app.py` 或双击 `启动字幕工具.bat`（`pythonw.exe` 无控制台）
+- 运行：双击 `字幕工具.lnk`（最快）或 `python subtitle_app.py`
+- `subtitle_app.py` 智能检测：首次运行自动 `pip install -r requirements.txt` 并创建 `.deps_installed` 标记，此后跳过
 - 仅 Windows（`os.startfile`、ffmpeg 二进制）
 
 ## 测试
@@ -43,6 +44,7 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 
 - **线程**：Qt 主线程（UI）+ 工作线程（转写）+ 队列（翻译消费），经 `ui_queue`（maxsize=2000）回传
 - **并发**：串行（`concurrency=1`）或并行（≥2：转写 N+1 与翻译 N 并行）
+- **翻译加速**：`translation.py` 内部用 `ThreadPoolExecutor`（`concurrency_translate`，默认 3 线程）并行发送 API batch；`pipeline.py` 多文件并行翻译（同一线程池）
 - **断点续转/续翻**：`.partial.srt`（每 30 段写一次）+ `*.translate_state.json`
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验
 

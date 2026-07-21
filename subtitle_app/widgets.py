@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QApplication, QAbstractItemView,
@@ -38,7 +38,7 @@ class DropListWidget(QListWidget):
         self._is_video = is_video_tab
         self.setAcceptDrops(True)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -48,11 +48,17 @@ class DropListWidget(QListWidget):
         else:
             event.ignore()
 
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        elif event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     def dropEvent(self, event: QDropEvent):
-        if event.source() is self:
-            super().dropEvent(event)
-            self.reordered.emit()
-        elif event.mimeData().hasUrls():
+        if event.mimeData().hasUrls():
+            event.accept()
             paths = []
             for url in event.mimeData().urls():
                 p = Path(url.toLocalFile())
@@ -65,6 +71,9 @@ class DropListWidget(QListWidget):
                             paths.append(f)
             if paths:
                 self.dropped.emit(paths, self._is_video)
+        else:
+            super().dropEvent(event)
+            self.reordered.emit()
 
 
 class LogEntry(QWidget):
@@ -110,7 +119,7 @@ class LogEntry(QWidget):
         self.copy_btn = QPushButton("📋")
         self.copy_btn.setFixedSize(22, 18)
         self.copy_btn.setStyleSheet("padding:0; font-size:10px;")
-        self.copy_btn.setToolTip("复制本条日志")
+        self.copy_btn.setToolTip("复制")
         self.copy_btn.clicked.connect(self._copy)
         top.addWidget(self.copy_btn)
         top.addStretch(0)

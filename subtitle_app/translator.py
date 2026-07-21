@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, write_srt, has_chinese, to_simplified,
-    load_json, save_json,
+    load_json, save_json, IGNORE_FILE,
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
@@ -81,6 +81,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         if already_translated_idx:
             post({"type": "log", "message": f"检测到 {len(already_translated_idx)} 条已有中文翻译，跳过翻译", "level": "INFO"})
 
+        trans_concurrency = getattr(cfg.translation, "concurrency_translate", 3)
         client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
                                  batch_size=opts.get("translation_batch_size", cfg.translation.batch_size),
                                  target_lang=opts.get("target_lang", "zh"))
@@ -91,7 +92,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 need_blocks = [blocks[i] for i in need_translate_idx]
                 is_bilingual = not translation_only
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
-                                                     is_bilingual, state_path)
+                                                     is_bilingual, state_path,
+                                                     translation_concurrency=trans_concurrency)
                 cost_info = client.get_cost_info()
                 zh_texts = [""] * len(blocks)
                 for j, i in enumerate(need_translate_idx):
@@ -128,7 +130,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
         post({"type": "counter", "generated": idx, "translated": idx,
               "total": total, "cache": client.get_cache_size()})
-        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts[:20], 1)]
+        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts, 1)]
         post({"type": "preview", "message": "\n".join(preview_lines)})
 
         if state_path and state_path.exists():
@@ -139,7 +141,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 logger.warning("删除翻译状态文件失败: %s", e)
     else:
         final_texts = [block.text for block in blocks]
-        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts[:20], 1)]
+        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts, 1)]
         post({"type": "preview", "message": "\n".join(preview_lines)})
 
     if is_stopped and is_stopped():
@@ -217,7 +219,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         post({"type": "output_path", "path": str(final_srt.resolve())})
 
     # ── 记录进度 ──
-    progress_file = Path(opts["work_dir"]) / ".subtitle_progress.json"
+    progress_file = Path(opts["work_dir"]) / IGNORE_FILE
     progress_data = load_json(progress_file, {})
     done_list = progress_data.setdefault("done", [])
     abs_path = str(item.resolve())
