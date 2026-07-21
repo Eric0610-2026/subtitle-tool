@@ -7,19 +7,28 @@
 import logging
 import os
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 from .config import cfg
 from .srt_utils import (
-    safe_stem, parse_srt, write_srt, has_chinese, to_simplified,
+    safe_stem, parse_srt, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
     load_json, save_json, IGNORE_FILE,
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
 
 logger = logging.getLogger(__name__)
+
+
+class PauseResponse:
+    """用于工作线程与 UI 线程之间的暂停-确认通信"""
+    def __init__(self):
+        self.event = threading.Event()
+        self.action = "embed"  # "embed" | "skip"
+        self.modified_text: Optional[str] = None  # None 表示未修改
 
 
 def translate_stage(result: dict, opts: dict, post: Callable) -> None:
@@ -150,9 +159,41 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     item_stem = safe_stem(item.name)
     is_video = item.suffix.lower() in set(cfg.srt.video_exts)
 
+    # ── 嵌入前暂停，供用户预览/编辑 ──
+    pause_resp: Optional[PauseResponse] = None
+    if is_video and ffmpeg and opts.get("pause_before_embed", False):
+        srt_for_embed_pause = translated_srt if (translated_srt and translated_srt.exists()) else None
+        if srt_for_embed_pause:
+            # 读取翻译后的字幕全文用于预览
+            pause_text = "\n\n".join(
+                f"{b.index}\n{seconds_to_srt_time(b.start)} --> {seconds_to_srt_time(b.end)}\n{t}"
+                for b, t in zip(blocks, final_texts)
+            )
+            pause_resp = PauseResponse()
+            post({
+                "type": "pause_before_embed",
+                "text": pause_text,
+                "file_name": item.name,
+                "response": pause_resp,
+            })
+            # 等待用户确认（最长 1 小时）
+            if not pause_resp.event.wait(timeout=3600):
+                post({"type": "log", "message": "等待用户确认超时，自动继续嵌入", "level": "WARNING"})
+            if pause_resp.action == "skip":
+                post({"type": "log", "message": "用户选择跳过嵌入，仅保留外挂字幕", "level": "INFO"})
+                # pause_resp.action 保持 "skip"，下游条件会正确处理
+            elif pause_resp.modified_text is not None:
+                # 用户修改了字幕，写入临时文件用于嵌入
+                modified_srt = translated_srt.with_name(f"{safe_stem(item.name)}.pause_modified.srt")
+                modified_srt.write_text(pause_resp.modified_text, encoding="utf-8")
+                translated_srt = modified_srt
+                post({"type": "log", "message": "使用修改后的字幕嵌入", "level": "INFO"})
+
     # ── 优先尝试内嵌字幕到 MKV ──
     mkv_ok = False
-    if is_video and ffmpeg:
+    if is_video and ffmpeg and pause_resp is not None and pause_resp.action == "skip":
+        pass  # 用户选择跳过嵌入
+    elif is_video and ffmpeg:
         video_path = item if item.exists() else (output_dir / item.name)
         srt_for_embed = translated_srt if (translated_srt and translated_srt.exists()) else None
         if srt_for_embed:
@@ -165,12 +206,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     mkv_ok = True
                     post({"type": "output_path", "path": str(mkv_path.resolve())})
                     post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
-                    for f in [srt_for_embed, source_srt]:
-                        if f and f.exists():
-                            try:
-                                f.unlink(missing_ok=True)
-                            except OSError as e:
-                                logger.warning("删除临时 SRT 失败: %s", e)
+                    # 保留 SRT 文件（用户可能后续修改后重新嵌入）
+                    post({"type": "log", "message": "已保留字幕文件以便后续修改", "level": "INFO"})
                     if video_path.exists():
                         try:
                             video_path.unlink()
@@ -182,6 +219,14 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     post({"type": "log", "message": "⚠️ 内嵌异常，已保留原文件（时长验证未通过，回退外挂字幕）", "level": "ERROR"})
                     try:
                         mkv_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            # 清理 pause_modified 临时文件
+            if pause_resp and pause_resp.modified_text is not None:
+                modified_srt = translated_srt if translated_srt and translated_srt.exists() else None
+                if modified_srt and modified_srt.name.endswith(".pause_modified.srt"):
+                    try:
+                        modified_srt.unlink(missing_ok=True)
                     except OSError:
                         pass
     # ── 内嵌失败或非视频 → 整理输出外挂字幕 ──

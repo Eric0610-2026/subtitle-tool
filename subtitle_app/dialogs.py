@@ -123,6 +123,11 @@ class SettingsDialog(QDialog):
         self.batch_size.setSingleStep(5)
         self.batch_size.setValue(values.get("translation_batch_size", cfg.translation.batch_size))
         g2.addWidget(self.batch_size, r, 1, 1, 2)
+        r += 1
+        self.pause_embed_cb = QCheckBox("嵌入前暂停确认（可预览/编辑字幕后再嵌入）")
+        self.pause_embed_cb.setChecked(values.get("pause_before_embed", False))
+        self.pause_embed_cb.setToolTip("翻译完成后弹出对话框，确认或编辑字幕内容后再嵌入 MKV")
+        g2.addWidget(self.pause_embed_cb, r, 0, 1, 3)
         layout.addWidget(sg2)
 
         layout.addStretch()
@@ -156,6 +161,7 @@ class SettingsDialog(QDialog):
             "pipeline": self.pipeline_cb.isChecked(),
             "translation_only": self.only_zh_cb.isChecked(),
             "translation_batch_size": self.batch_size.value(),
+            "pause_before_embed": self.pause_embed_cb.isChecked(),
         }
 
 

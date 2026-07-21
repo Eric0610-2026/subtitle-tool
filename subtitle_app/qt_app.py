@@ -85,6 +85,7 @@ class SubtitleApp(QMainWindow):
             "pipeline": cfg.translation.pipeline,
             "translation_only": False,
             "translation_batch_size": cfg.translation.batch_size,
+            "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
         }
         self._build_ui()
         self._apply_style()
@@ -358,6 +359,7 @@ class SubtitleApp(QMainWindow):
         raw["translation"]["api_key"] = values.get("api_key", "")
         raw["translation"]["pipeline"] = values.get("pipeline", True)
         raw["translation"]["batch_size"] = values.get("translation_batch_size", 50)
+        raw["translation"]["pause_before_embed"] = values.get("pause_before_embed", False)
         path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         cfg.reload()
 
@@ -697,6 +699,7 @@ class SubtitleApp(QMainWindow):
             "translation_model": s.get("translation_model", ""),
             "translation_only": s.get("translation_only", False),
             "translation_batch_size": s.get("translation_batch_size", cfg.translation.batch_size),
+            "pause_before_embed": s.get("pause_before_embed", False),
             "skip_completed": skip_completed,
             "concurrency": cfg.translation.concurrency_pipeline if s.get("pipeline", True) else cfg.translation.concurrency_serial,
             "post": self.signal_bridge.post,
@@ -1003,6 +1006,7 @@ class SubtitleApp(QMainWindow):
                 f"缓存 {e.get('cache',0)}"),
             "language": lambda e: self.progress_panel.lang_label.setText(f"语言：{e.get('message','')}"),
             "output_path": self._handle_output_path,
+            "pause_before_embed": self._handle_pause_before_embed,
             "preview": lambda e: self.preview_panel.set_text(e.get("message", "")),
             "preview_clear": lambda e: self.preview_panel.clear(),
             "preview_append": self._handle_preview_append,
@@ -1018,6 +1022,65 @@ class SubtitleApp(QMainWindow):
         self._output_paths.append(str(p))
         self._last_output_dir = p.parent
         self._check_subtitle_quality(p)
+
+    def _handle_pause_before_embed(self, e):
+        """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QPushButton
+
+        text = e.get("text", "")
+        file_name = e.get("file_name", "")
+        resp = e.get("response")
+        if resp is None:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"确认嵌入字幕 — {file_name}")
+        dialog.setMinimumSize(600, 500)
+        dialog.resize(720, 580)
+
+        layout = QVBoxLayout(dialog)
+
+        info_label = QLabel(
+            f"📄 <b>{file_name}</b> — 翻译完成，请确认字幕内容后点击「嵌入」或「跳过」"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        editor = QTextEdit()
+        editor.setPlainText(text)
+        editor.setFont(QFont("Consolas", 10))
+        layout.addWidget(editor, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        skip_btn = QPushButton("⏭ 跳过嵌入（仅保留外挂 SRT）")
+        skip_btn.setToolTip("不嵌入字幕，仅保留独立的 SRT 文件")
+        skip_btn.clicked.connect(lambda: _finish_pause("skip"))
+        btn_layout.addWidget(skip_btn)
+
+        embed_btn = QPushButton("✅ 确认嵌入")
+        embed_btn.setObjectName("startBtn")
+        embed_btn.setToolTip("将当前字幕嵌入 MKV 视频文件")
+        embed_btn.setDefault(True)
+        embed_btn.clicked.connect(lambda: _finish_pause("embed"))
+        btn_layout.addWidget(embed_btn)
+
+        layout.addLayout(btn_layout)
+
+        def _finish_pause(action: str):
+            resp.action = action
+            if action == "embed":
+                modified = editor.toPlainText()
+                if modified != text:
+                    resp.modified_text = modified
+            resp.event.set()
+            dialog.accept()
+
+        # 用户点击 X 关闭对话框时，默认跳过嵌入
+        dialog.rejected.connect(lambda: _finish_pause("skip"))
+
+        dialog.exec()
 
     def _handle_preview_append(self, e):
         self.preview_panel.append(e.get("message", ""))
