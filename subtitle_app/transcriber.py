@@ -146,7 +146,7 @@ class Transcriber:
                     m = time_pattern.search(line)
                     if m and duration > 0:
                         h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-                        last_progress_time = h * 3600 + mi * 60 + s + ms / 100
+                        last_progress_time = h * 3600 + mi * 60 + s + ms / 1000000
                         pct_inner = (last_progress_time / duration) * 100
                         post({"type": "progress", "percent": pct_inner, "stage": "提取音频",
                               "detail": f"音频提取 {fmt_duration(last_progress_time)}/{fmt_duration(duration)}"})
@@ -164,7 +164,7 @@ class Transcriber:
                             m = time_pattern.search(line)
                             if m and duration > 0:
                                 h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-                                last_progress_time = h * 3600 + mi * 60 + s + ms / 100
+                                last_progress_time = h * 3600 + mi * 60 + s + ms / 1000000
                         stderr_lines.clear()
                     break
 

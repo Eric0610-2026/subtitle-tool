@@ -145,7 +145,24 @@ class TranslationClient:
         unique_texts = list(text_to_gsid.keys())
         if not unique_texts:
             self._balance_after = self._balance_before
-            return [block.text for block in blocks]
+            # 所有句子都命中缓存/断点状态，直接组装译文
+            result_texts: List[str] = []
+            for bidx, block in enumerate(blocks):
+                block_sids = [entry[0] for entry in flat if entry[1] == bidx]
+                translated_sents = []
+                missing = False
+                for sid in block_sids:
+                    t = sent_trans.get(sid, "")
+                    if t:
+                        translated_sents.append(t)
+                    else:
+                        missing = True
+                if missing or not translated_sents:
+                    result_texts.append(block.text)
+                else:
+                    combined = _compose_sentences(translated_sents)
+                    result_texts.append(combined)
+            return result_texts
 
         # Step 3: 批量翻译（多线程并发 API 调用）
         total_batches = (len(unique_texts) + self.batch_size - 1) // self.batch_size

@@ -143,19 +143,21 @@ class TestRecursionProtection(unittest.TestCase):
             self.assertEqual(res, ["你好世界"])
 
     def test_translate_blocks_with_cache_all_hit(self):
-        """全部缓存命中时不调用 API"""
+        """全部缓存命中时不调用 API，且返回正确的译文而非原文"""
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello world")]
             mock = MagicMock(return_value=[{"id": 1, "zh": "你好世界"}])
             c._translate_batch = mock
-            c.translate_blocks(blocks, "en", is_bilingual=True)
+            res = c.translate_blocks(blocks, "en", is_bilingual=True)
             mock.assert_called_once()
-            # 第二次：缓存命中
+            self.assertEqual(res, ["你好世界"])
+            # 第二次：缓存命中，不再调用 _translate_batch，且返回译文
             mock.reset_mock()
-            c.translate_blocks(blocks, "en", is_bilingual=True)
+            res2 = c.translate_blocks(blocks, "en", is_bilingual=True)
             mock.assert_not_called()
+            self.assertEqual(res2, ["你好世界"])
 
 
 class TestSentenceSplitting(unittest.TestCase):

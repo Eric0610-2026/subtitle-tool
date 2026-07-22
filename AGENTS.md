@@ -10,22 +10,24 @@
 ## 测试
 
 ```powershell
-python -m unittest discover -s tests          # 全部
+python -m unittest discover -s tests          # 全部（129 例）
 python -m unittest tests.test_srt_utils        # 单文件
 python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 ```
 
 - 框架：`unittest`（无 pytest）
-- 当前 48 例，分布在 `test_srt_utils.py`（22）和 `test_translation.py`（26）
+- 7 个测试文件：`test_srt_utils.py`、`test_translation.py`、`test_translator.py`、`test_transcriber.py`、`test_pipeline.py`、`test_muxer.py`、`test_widgets.py`
+- 当前 129 例，分布在上述文件中
 - 无需网络或模型加载；API 调用用 `unittest.mock`
 
 ## 项目结构
 
-`subtitle_app/` 下 10 个源模块（不含 `__init__.py`）：
+`subtitle_app/` 下 11 个源模块（不含 `__init__.py`）：
 
 | 模块 | 职责 |
 |---|---|
 | `qt_app.py` | Qt 主窗口 UI、事件分发、主题、预览 |
+| `panels.py` | 进度/预览/日志面板 UI 组件 |
 | `widgets.py` | `DropListWidget`（拖放列表）、`LogEntry`（日志条目） |
 | `transcriber.py` | 音频提取 + faster-whisper 转写 |
 | `translation.py` | AI 翻译客户端、缓存、批处理、curl fallback |
@@ -47,6 +49,7 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 - **翻译加速**：`translation.py` 内部用 `ThreadPoolExecutor`（`concurrency_translate`，默认 3 线程）并行发送 API batch；`pipeline.py` 多文件并行翻译（同一线程池）
 - **断点续转/续翻**：`.partial.srt`（每 30 段写一次）+ `*.translate_state.json`
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验
+- **嵌入前暂停**：`translator.py` 中 `PauseResponse` 机制，支持用户预览/编辑字幕后再嵌入
 
 ## 配置与安全
 
@@ -59,7 +62,7 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 ## 代码惯例
 
 - 文件头：`#!/usr/bin/env python3` + `# -*- coding: utf-8 -*-`
-- 类型标注：推荐用但非强制——部分函数（`transcriber.py:75`）尚未标注
+- 类型标注：推荐用但非强制——多数函数已标注，部分历史遗留函数未标注
 - imports 风格：代码实际用 `from typing import List`（非 `list[str]`）
 - logging：多数模块有 `logger = logging.getLogger(__name__)`，但 `config.py` 和 `dialogs.py` 无
 - 字符串双引号、4 空格缩进
@@ -67,6 +70,6 @@ python -m unittest tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 ## 给 AI agent 的提示
 
 - Windows 搜索用 `Select-String`（`grep`/`rg` 不可用）
-- 10 个模块各司其职，避免引入新抽象
-- 改完运行全部 48 例测试
+- 11 个模块各司其职，避免引入新抽象
+- 改完运行全部 129 例测试
 - 不改 `config.json`；改配置模板应改 `config.example.json`
