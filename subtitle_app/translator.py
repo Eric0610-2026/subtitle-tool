@@ -96,7 +96,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                                  batch_size=opts.get("translation_batch_size", cfg.translation.batch_size),
                                  target_lang=opts.get("target_lang", "zh"))
         try:
-            detected_lang = language
             if need_translate_idx:
                 need_blocks = [blocks[i] for i in need_translate_idx]
                 is_bilingual = not translation_only
