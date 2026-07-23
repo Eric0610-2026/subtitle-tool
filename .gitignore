@@ -2,17 +2,16 @@
 __pycache__/
 *.pyc
 *.pyo
-.deps_installed
 
 # 大模型文件
-faster-whisper-large-v3-turbo/
+models/faster-whisper-large-v3-turbo/
 
 # 第三方二进制
-ffmpeg.exe
-ffprobe.exe
+tools/ffmpeg.exe
+tools/ffprobe.exe
 
 # 运行时缓存/进度文件
-.subtitle_*.json
+cache/
 *.partial.srt
 *.translate_state.json
 

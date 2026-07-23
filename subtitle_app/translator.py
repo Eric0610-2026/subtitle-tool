@@ -72,7 +72,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     cost_info: dict = {}
     if translate_enabled and api_url and api_key:
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
-        cache_path = work_dir / ".subtitle_translation_cache.json"
+        cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
         state_path = source_srt.with_name(source_srt.stem + ".translate_state.json")
         if state_path.exists():
             done = load_json(state_path, {}).get("done", {})
@@ -234,7 +234,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         post({"type": "log", "message": "正在整理输出文件...", "level": "INFO"})
         is_retry = opts.get("skip_completed", False)
         if not is_video:
-            out_dir = source_srt.parent
+            out_dir = output_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
         else:
             base_dir = source_srt.parent if is_retry else output_dir
             out_dir = base_dir / item_stem

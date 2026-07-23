@@ -95,11 +95,12 @@ class SubtitleWorker:
         self.stop_requested = True
         self._terminate_all_procs()
         self.transcriber.clear_cache()
+        # 不阻塞 UI 线程：thread 是 daemon 线程，进程退出时自动清理
+        # 用极短 timeout 尝试 join，但不阻塞等待
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=cfg.whisper.thread_join_timeout)
+            self.thread.join(timeout=0.5)
             if self.thread.is_alive():
-                logger.warning("worker 线程在 %ds 内未退出（daemon 将在进程退出时清理）",
-                               cfg.whisper.thread_join_timeout)
+                logger.info("worker 线程正在退出中（daemon 将在进程退出时清理）")
 
     def _run(self, jobs: List[Path], opts: dict) -> None:
         post = opts["post"]
@@ -116,7 +117,7 @@ class SubtitleWorker:
                 if not self.stop_requested:
                     post({"type": "done", "message": "所有任务处理完成！"})
                 else:
-                    post({"type": "log", "message": "用户已停止处理", "level": "INFO"})
+                    post({"type": "done", "message": "用户已停止处理"})
             except Exception as e:
                 tb = traceback.format_exc()
                 logger.error("处理出错: %s\n%s", e, tb)
@@ -134,6 +135,8 @@ class SubtitleWorker:
                     return
                 except queue.Full:
                     continue
+            if val is not None and val is not _STREAM_END:
+                logger.warning("停止时队列满，转写结果可能丢失: 文件索引 %s", getattr(val, "idx", "?"))
 
         def transcribe_worker():
             try:
@@ -156,48 +159,54 @@ class SubtitleWorker:
         trans_thread.start()
 
         translate_workers = max(1, getattr(cfg.translation, "concurrency_translate", 3))
+        tpool = ThreadPoolExecutor(max_workers=translate_workers)
         try:
-            with ThreadPoolExecutor(max_workers=translate_workers) as tpool:
-                translate_futures = []
-                while True:
-                    if self.stop_requested:
-                        break
-                    # 清理已完成 future
-                    translate_futures = [f for f in translate_futures if not f.done()]
+            translate_futures = []
+            while True:
+                if self.stop_requested:
+                    # 立即关闭线程池，不等待正在执行的翻译任务
+                    tpool.shutdown(wait=False, cancel_futures=True)
+                    break
+                # 清理已完成 future，检查异常（防止异常被静默吞没）
+                done_futures = [f for f in translate_futures if f.done()]
+                translate_futures = [f for f in translate_futures if not f.done()]
+                for f in done_futures:
                     try:
-                        result = tq.get(timeout=0.5)
-                    except queue.Empty:
-                        if not trans_thread.is_alive() and tq.empty():
-                            break
-                        continue
-                    if result is _STREAM_END:
-                        break
-                    if result is None:
-                        continue
-                    future = tpool.submit(self._translate_stage, result, opts, post)
-                    translate_futures.append(future)
-                # 等待所有翻译任务完成
-                for f in translate_futures:
-                    try:
-                        f.result(timeout=300)
+                        f.result()
                     except Exception as e:
-                        logger.error("翻译任务异常: %s", e)
+                        logger.error("翻译任务异常（流水线中捕获）: %s", e)
+                try:
+                    result = tq.get(timeout=0.5)
+                except queue.Empty:
+                    if not trans_thread.is_alive() and tq.empty():
+                        break
+                    continue
+                if result is _STREAM_END:
+                    break
+                if result is None:
+                    continue
+                future = tpool.submit(self._translate_stage, result, opts, post)
+                translate_futures.append(future)
         except Exception as e:
             tb = traceback.format_exc()
             logger.error("翻译阶段出错: %s\n%s", e, tb)
             self.stop_requested = True
             post({"type": "error", "message": f"处理出错: {e}", "trace": tb})
             return
+        finally:
+            # 正常退出时等待任务完成；停止路径中线程池已 shutdown(wait=False)
+            if not self.stop_requested:
+                tpool.shutdown(wait=True)
 
         if error_info:
             e, tb = error_info[0]
             post({"type": "error", "message": f"转写出错: {e}", "trace": tb})
             return
 
-        if not self.stop_requested:
-            post({"type": "done", "message": "所有任务处理完成！"})
+        if self.stop_requested:
+            post({"type": "done", "message": "用户已停止处理"})
         else:
-            post({"type": "log", "message": "用户已停止处理", "level": "INFO"})
+            post({"type": "done", "message": "所有任务处理完成！"})
 
     def _transcribe_stage(self, item: Path, idx: int, total: int, opts: dict) -> Optional[dict]:
         """转写阶段：跳过检查 → 音频提取 → Whisper 转写

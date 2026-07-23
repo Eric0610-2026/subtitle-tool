@@ -16,7 +16,7 @@
   },
 
   "whisper": {
-    "model_dir": "faster-whisper-large-v3-turbo",
+    "model_dir": "models/faster-whisper-large-v3-turbo",
     "language": "auto",
     "device": "cuda",
     "compute_type": "int8_float16",
