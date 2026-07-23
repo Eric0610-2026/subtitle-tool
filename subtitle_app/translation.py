@@ -217,14 +217,14 @@ class TranslationClient:
                     context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
                     context_text = "\n".join(context_lines) + "\n"
                 self.post_ui({
-                    "type": "progress", "percent": ((batch_id - 0.5) / max(total_batches, 1)) * 100,
-                    "stage": "翻译", "detail": f"翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
-                    "total": len(blocks), "cache": len(self.cache),
+                    "type": "log", "message": f"提交翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
+                    "level": "INFO",
                 })
                 future = executor.submit(self._translate_batch, batch, context_text, 0)
                 batch_futures.append((future, batch, text_to_gsid, batch_id, main_para))
 
             # 按提交顺序处理结果（保证段落上下文连续性）
+            completed_count = 0
             for future, batch, t2g, batch_id, main_para in batch_futures:
                 # 轮询等待，每隔 15s 发送心跳防止 UI 假死
                 while True:
@@ -234,9 +234,9 @@ class TranslationClient:
                     except TimeoutError:
                         self.post_ui({
                             "type": "progress",
-                            "percent": ((batch_id - 0.5) / max(total_batches, 1)) * 100,
+                            "percent": (completed_count / max(total_batches, 1)) * 100,
                             "stage": "翻译",
-                            "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（API 响应较慢）...",
+                            "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（API 响应较慢，已完成 {completed_count}/{total_batches} 批）",
                             "total": len(blocks), "cache": len(self.cache),
                         })
                 try:
@@ -281,6 +281,14 @@ class TranslationClient:
                         "originals": sent_originals,
                         "updated_at": datetime.now().isoformat(),
                     })
+                completed_count += 1
+                self.post_ui({
+                    "type": "progress",
+                    "percent": (completed_count / max(total_batches, 1)) * 100,
+                    "stage": "翻译",
+                    "detail": f"批次 {batch_id}/{total_batches} 完成，进度 {completed_count}/{total_batches}",
+                    "total": len(blocks), "cache": len(self.cache),
+                })
 
         # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
         self.post_ui({
