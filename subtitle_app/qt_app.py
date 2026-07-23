@@ -231,7 +231,7 @@ class SubtitleApp(QMainWindow):
         self.video_dir = QLineEdit()
         self.video_dir.setPlaceholderText("选择视频目录...")
         pr.addWidget(self.video_dir, 1)
-        pr.addWidget(self._make_btn("📂 选择", self._choose_video_dir))
+        pr.addWidget(self._make_btn("📂 浏览", self._choose_video_dir))
         pr.addWidget(self._make_btn("📌 默认", self._set_default_video_dir))
         pr.addSpacing(12)
         self.trans_cb = QCheckBox("🌍 开启 AI 翻译")
@@ -319,10 +319,11 @@ class SubtitleApp(QMainWindow):
     # ─── 交互 ───
 
     def _choose_video_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "选择视频目录", self.video_dir.text())
-        if d:
-            self.video_dir.setText(d)
-            self._scan_path(d, True)
+        """浏览并选择视频目录（类似 missav-downloader 的「保存到」风格）"""
+        path = QFileDialog.getExistingDirectory(self, "选择视频目录", self.video_dir.text())
+        if path:
+            self.video_dir.setText(path)
+            self._scan_path(path, True)
 
     def _set_default_video_dir(self):
         self.video_dir.setText(cfg.app.default_video_dir)
@@ -1252,7 +1253,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setAttribute(Qt.AA_DontUseNativeDialogs, True)
+    app.setStyle("Fusion")
     app.setApplicationName("本地字幕生成工具")
 
     window = SubtitleApp()
