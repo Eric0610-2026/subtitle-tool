@@ -902,9 +902,9 @@ class SubtitleApp(QMainWindow):
         if missing_essential:
             QMessageBox.warning(self, "缺少必需文件",
                 f"未找到 {', '.join(missing_essential)}，请放入项目根目录后重启应用。")
-        model_dir = APP_DIR / "models" / "faster-whisper-large-v3-turbo"
+        model_dir = APP_DIR / cfg.whisper.model_dir if (APP_DIR / cfg.whisper.model_dir).exists() else Path(cfg.whisper.model_dir)
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
-            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 models/faster-whisper-large-v3-turbo/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
+            self._add_log_entry(f"未找到 faster-whisper 模型，请下载后放入 {cfg.whisper.model_dir}/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
         s = self.settings_data
         if not s.get("api_url") or not s.get("api_key"):
             self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
