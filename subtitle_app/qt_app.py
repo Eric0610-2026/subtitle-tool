@@ -176,20 +176,19 @@ class SubtitleApp(QMainWindow):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         self.tabs = QTabWidget()
-        self.video_list = DropListWidget(is_video_tab=True)
-        self.video_list.itemClicked.connect(lambda item: self._load_preview(item, True))
-        self.video_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, True))
-        self.video_list.reordered.connect(lambda: self._sync_jobs_from_list(True))
-        self.video_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.video_list.customContextMenuRequested.connect(
-            lambda pos: self._show_file_context_menu(self.video_list, pos))
-        self.sub_list = DropListWidget(is_video_tab=False)
-        self.sub_list.itemClicked.connect(lambda item: self._load_preview(item, False))
-        self.sub_list.dropped.connect(lambda paths, is_v: self._add_paths(paths, False))
-        self.sub_list.reordered.connect(lambda: self._sync_jobs_from_list(False))
-        self.sub_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.sub_list.customContextMenuRequested.connect(
-            lambda pos: self._show_file_context_menu(self.sub_list, pos))
+
+        def _make_list(is_video: bool):
+            w = DropListWidget(is_video_tab=is_video)
+            w.itemClicked.connect(lambda item: self._load_preview(item, is_video))
+            w.dropped.connect(lambda paths, is_v: self._add_paths(paths, is_v))
+            w.reordered.connect(lambda: self._sync_jobs_from_list(is_video))
+            w.setContextMenuPolicy(Qt.CustomContextMenu)
+            w.customContextMenuRequested.connect(
+                lambda pos: self._show_file_context_menu(w, pos))
+            return w
+
+        self.video_list = _make_list(True)
+        self.sub_list = _make_list(False)
         self.tabs.addTab(self.video_list, "视频/音频生成字幕")
         self.tabs.addTab(self.sub_list, "已有字幕翻译")
         ll.addWidget(self.tabs)
@@ -961,16 +960,14 @@ class SubtitleApp(QMainWindow):
             p.translate_bar.setValue(100)
             p.translate_bar.setFormat("100%")
         _has_detail_above = stage in ("提取音频", "加载模型", "读取字幕", "转写中", "翻译")
-        if not _has_detail_above and detail and self._start_time and pct:
-            elapsed = time.time() - self._start_time
-            remain, finish = estimate_eta(self._start_time, pct / 100)
-            p.detail_label.setText(f"{detail} | 已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
-        elif not _has_detail_above and detail:
+        if _has_detail_above:
+            pass
+        elif detail and self._start_time and pct:
+            self._set_detail_with_eta(p, detail, pct)
+        elif detail:
             p.detail_label.setText(detail)
         elif self._start_time and pct:
-            elapsed = time.time() - self._start_time
-            remain, finish = estimate_eta(self._start_time, pct / 100)
-            p.detail_label.setText(f"已用 {fmt_duration(elapsed)} | 剩余 {remain} | 预计 {finish}")
+            self._set_detail_with_eta(p, "", pct)
         else:
             p.detail_label.setText("")
         idx = e.get("idx", 0)
@@ -1107,6 +1104,13 @@ class SubtitleApp(QMainWindow):
 
     def _handle_preview_append(self, e):
         self.preview_panel.append(e.get("message", ""))
+
+    def _set_detail_with_eta(self, p, detail: str, pct: float):
+        elapsed = time.time() - self._start_time
+        remain, finish = estimate_eta(self._start_time, pct / 100)
+        parts = [detail] if detail else []
+        parts.extend([f"已用 {fmt_duration(elapsed)}", f"剩余 {remain}", f"预计 {finish}"])
+        p.detail_label.setText(" | ".join(parts))
 
     def _check_subtitle_quality(self, path: Path):
         """检查字幕质量问题"""

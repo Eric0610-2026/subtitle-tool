@@ -124,6 +124,14 @@ class Transcriber:
         reader.start()
 
         time_pattern = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
+
+        def _parse_ffmpeg_time(line: str) -> Optional[float]:
+            m = time_pattern.search(line)
+            if m:
+                h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                return h * 3600 + mi * 60 + s + ms / 1000000
+            return None
+
         last_progress_time = 0.0
         last_report = 0.0
 
@@ -143,13 +151,12 @@ class Transcriber:
                     new_lines = list(stderr_lines)
                     stderr_lines.clear()
                 for line in new_lines:
-                    m = time_pattern.search(line)
-                    if m and duration > 0:
-                        h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-                        last_progress_time = h * 3600 + mi * 60 + s + ms / 1000000
-                        pct_inner = (last_progress_time / duration) * 100
-                        post({"type": "progress", "percent": pct_inner, "stage": "提取音频",
-                              "detail": f"音频提取 {fmt_duration(last_progress_time)}/{fmt_duration(duration)}"})
+                    t = _parse_ffmpeg_time(line)
+                    if t is not None and duration > 0:
+                        last_progress_time = t
+                        pct = (t / duration) * 100
+                        post({"type": "progress", "percent": pct, "stage": "提取音频",
+                              "detail": f"音频提取 {fmt_duration(t)}/{fmt_duration(duration)}"})
 
                 now = time.time()
                 if now - last_report > 0.5 and duration > 0 and last_progress_time > 0:
@@ -161,10 +168,9 @@ class Transcriber:
                 if stderr_done.is_set() and proc.poll() is not None:
                     with stderr_lock:
                         for line in stderr_lines:
-                            m = time_pattern.search(line)
-                            if m and duration > 0:
-                                h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-                                last_progress_time = h * 3600 + mi * 60 + s + ms / 1000000
+                            t = _parse_ffmpeg_time(line)
+                            if t is not None:
+                                last_progress_time = t
                         stderr_lines.clear()
                     break
 
@@ -383,7 +389,6 @@ class Transcriber:
                 # ── 从断点 segments 开始累积 ──
                 blocks: List[SubtitleBlock] = list(completed_blocks)
                 prev_end = resume_offset
-                srt_lines = []
                 for seg in segments:
                     if self.stop_check and self.stop_check():
                         # 中断前保存 checkpoint
@@ -418,12 +423,7 @@ class Transcriber:
                         except OSError as e:
                             logger.warning("断点写入失败: %s", e)
                 sanitize_blocks(blocks)
-                for block in blocks:
-                    srt_lines.append(str(block.index))
-                    srt_lines.append(block.timing)
-                    srt_lines.append(block.text)
-                    srt_lines.append("")
-                source_srt.write_text("\n".join(srt_lines), encoding="utf-8")
+                Transcriber._write_partial_srt(source_srt, blocks)
                 t_post({"type": "preview", "message": "\n".join(srt_lines)})
                 # ── 转写完成，清理断点文件 ──
                 if checkpoint_enabled and partial_srt and partial_srt.exists():
@@ -436,15 +436,7 @@ class Transcriber:
                         "detail": f"转写完成：{len(blocks)} 段字幕（{detected_lang}）"})
                 transcribe_elapsed = time.time() - transcribe_start
                 if duration > 0 and transcribe_elapsed > 0:
-                    observed_speed = transcribe_elapsed / duration
-                    name = model_dir.stem.lower() if model_dir else ""
-                    model_name = next((k for k in _MODEL_SPEED if k in name), None)
-                    if model_name:
-                        with _model_speed_lock:
-                            old = _MODEL_SPEED[model_name]
-                            new_speed = old * (1 - _ADAPT_ALPHA) + observed_speed * _ADAPT_ALPHA
-                            _MODEL_SPEED[model_name] = new_speed
-                        post({"type": "log", "message": f"速度因子调整：{old:.2f} → {new_speed:.2f}", "level": "INFO"})
+                    self._adapt_model_speed(model_dir, duration, transcribe_elapsed, post)
                 t_post({"type": "log", "message": f"转写完成：{len(blocks)} 段字幕（{detected_lang}）", "level": "INFO"})
                 return source_srt, detected_lang
             except Exception:
@@ -458,6 +450,19 @@ class Transcriber:
                     except Exception as save_err:
                         logger.warning("保存断点失败: %s", save_err)
                 raise
+
+    @staticmethod
+    def _adapt_model_speed(model_dir: Path, duration: float, elapsed: float, post: Callable) -> None:
+        """自适应调整模型速度因子"""
+        observed_speed = elapsed / duration
+        name = model_dir.stem.lower() if model_dir else ""
+        model_name = next((k for k in _MODEL_SPEED if k in name), None)
+        if model_name:
+            with _model_speed_lock:
+                old = _MODEL_SPEED[model_name]
+                new_speed = old * (1 - _ADAPT_ALPHA) + observed_speed * _ADAPT_ALPHA
+                _MODEL_SPEED[model_name] = new_speed
+            post({"type": "log", "message": f"速度因子调整：{old:.2f} → {new_speed:.2f}", "level": "INFO"})
 
     @staticmethod
     def _write_partial_srt(path: Path, blocks: List[SubtitleBlock]) -> None:

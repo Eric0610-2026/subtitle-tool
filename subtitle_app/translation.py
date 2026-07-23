@@ -169,26 +169,7 @@ class TranslationClient:
         unique_texts = list(text_to_gsid.keys())
         if not unique_texts:
             # 所有句子都命中缓存/断点状态，直接组装译文
-            # 先构建索引，O(n) 避免 O(n²)
-            gsid_to_bidx: Dict[int, List[int]] = {}
-            for gsid, bidx, _sent in flat:
-                gsid_to_bidx.setdefault(bidx, []).append(gsid)
-            result_texts: List[str] = []
-            for bidx, block in enumerate(blocks):
-                block_sids = gsid_to_bidx.get(bidx, [])
-                translated_sents = []
-                missing = False
-                for sid in block_sids:
-                    t = sent_trans.get(sid, "")
-                    if t:
-                        translated_sents.append(t)
-                    else:
-                        missing = True
-                if missing or not translated_sents:
-                    result_texts.append(block.text)
-                else:
-                    combined = _compose_sentences(translated_sents)
-                    result_texts.append(combined)
+            result_texts = _reassemble_blocks(blocks, flat, sent_trans)
             self.post_ui({
                 "type": "progress", "percent": 100,
                 "stage": "翻译", "detail": f"翻译完成（全部命中缓存，共 {len(blocks)} 条）",
@@ -297,26 +278,8 @@ class TranslationClient:
             "total": len(blocks), "cache": len(self.cache),
         })
 
-        # 拼回块（先构建索引，O(n) 避免 O(n²)）
-        gsid_to_bidx: Dict[int, List[int]] = {}
-        for gsid, bidx, _sent in flat:
-            gsid_to_bidx.setdefault(bidx, []).append(gsid)
-        result_texts: List[str] = []
-        for bidx, block in enumerate(blocks):
-            block_sids = gsid_to_bidx.get(bidx, [])
-            translated_sents = []
-            missing = False
-            for sid in block_sids:
-                t = sent_trans.get(sid, "")
-                if t:
-                    translated_sents.append(t)
-                else:
-                    missing = True
-            if missing or not translated_sents:
-                result_texts.append(block.text)
-            else:
-                combined = _compose_sentences(translated_sents)
-                result_texts.append(combined)
+        # 拼回块
+        result_texts = _reassemble_blocks(blocks, flat, sent_trans)
 
         # 后台 I/O（保存缓存、报告费用，用户已看到 100%）
         self._save_cache()
@@ -474,24 +437,16 @@ class TranslationClient:
         u = self._usage
         total_in = u["prompt_tokens"]
         total_out = u["completion_tokens"]
-        cache_hit = u["prompt_cache_hit_tokens"]
-        cache_miss = u["prompt_cache_miss_tokens"]
-        hit_rate = (cache_hit / total_in * 100) if total_in > 0 else 0
-
         if total_in == 0 and total_out == 0:
             self.post_ui({"type": "log", "message": "本次翻译全部命中缓存，未产生 API 费用", "level": "INFO"})
             return
-
+        info = _calc_cost_info(u)
         lines = [
-            f"翻译 Token 消耗: 输入 {total_in:,} (缓存命中 {cache_hit:,}/{cache_miss:,}, {hit_rate:.1f}%), 输出 {total_out:,}"
+            f"翻译 Token 消耗: 输入 {total_in:,} (缓存命中 {info['cache_hit_tokens']:,}/{info['cache_miss_tokens']:,}, "
+            f"{info['cache_hit_tokens'] / total_in * 100:.1f}%), 输出 {total_out:,}",
+            f"估算费用: ¥{sum(info[k] for k in ('input_cost','cache_cost','output_cost')):.4f} "
+            f"(输入 ¥{info['input_cost']:.4f} + 缓存 ¥{info['cache_cost']:.4f} + 输出 ¥{info['output_cost']:.4f})",
         ]
-        input_cost = (cache_miss / 1000) * cfg.pricing.input_per_1k
-        cache_cost = (cache_hit / 1000) * cfg.pricing.cache_hit_per_1k
-        output_cost = (total_out / 1000) * cfg.pricing.output_per_1k
-        estimated_cost = input_cost + cache_cost + output_cost
-        lines.append(
-            f"估算费用: ¥{estimated_cost:.4f} (输入 ¥{input_cost:.4f} + 缓存 ¥{cache_cost:.4f} + 输出 ¥{output_cost:.4f})"
-        )
         for line in lines:
             self.post_ui({"type": "log", "message": line, "level": "INFO"})
 
@@ -509,25 +464,7 @@ class TranslationClient:
         return len(self.cache)
 
     def get_cost_info(self) -> dict:
-        u = self._usage
-        total_in = u["prompt_tokens"]
-        total_out = u["completion_tokens"]
-        cache_hit = u["prompt_cache_hit_tokens"]
-        cache_miss = u["prompt_cache_miss_tokens"]
-        input_cost = (cache_miss / 1000) * cfg.pricing.input_per_1k
-        cache_cost = (cache_hit / 1000) * cfg.pricing.cache_hit_per_1k
-        output_cost = (total_out / 1000) * cfg.pricing.output_per_1k
-        return {
-            "prompt_tokens": total_in,
-            "completion_tokens": total_out,
-            "cache_hit_tokens": cache_hit,
-            "cache_miss_tokens": cache_miss,
-            "input_cost": round(input_cost, 6),
-            "cache_cost": round(cache_cost, 6),
-            "output_cost": round(output_cost, 6),
-            "total_cost": round(input_cost + cache_cost + output_cost, 6),
-
-        }
+        return _calc_cost_info(self._usage)
 
 
 # ── 安全的 subprocess.run 包装 ──
@@ -610,3 +547,40 @@ def _compose_sentences(sentences: List[str]) -> str:
         else:
             parts.append(s)
     return "".join(parts)
+
+
+def _reassemble_blocks(blocks: List[SubtitleBlock], flat: List[Tuple[int, int, str]],
+                       sent_trans: Dict[int, str]) -> List[str]:
+    """将句子级翻译结果拼回字幕块级"""
+    gsid_to_bidx: Dict[int, List[int]] = {}
+    for gsid, bidx, _sent in flat:
+        gsid_to_bidx.setdefault(bidx, []).append(gsid)
+    result: List[str] = []
+    for bidx, block in enumerate(blocks):
+        sids = gsid_to_bidx.get(bidx, [])
+        translated = [sent_trans[s] for s in sids if sent_trans.get(s)]
+        if translated and len(translated) == len(sids):
+            result.append(_compose_sentences(translated))
+        else:
+            result.append(block.text)
+    return result
+
+
+def _calc_cost_info(usage: Dict[str, int]) -> dict:
+    """计算费用信息（公用方法，供 _report_cost 和 get_cost_info 使用）"""
+    cache_miss = usage.get("prompt_cache_miss_tokens", 0)
+    cache_hit = usage.get("prompt_cache_hit_tokens", 0)
+    total_out = usage.get("completion_tokens", 0)
+    input_cost = (cache_miss / 1000) * cfg.pricing.input_per_1k
+    cache_cost = (cache_hit / 1000) * cfg.pricing.cache_hit_per_1k
+    output_cost = (total_out / 1000) * cfg.pricing.output_per_1k
+    return {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": total_out,
+        "cache_hit_tokens": cache_hit,
+        "cache_miss_tokens": cache_miss,
+        "input_cost": round(input_cost, 6),
+        "cache_cost": round(cache_cost, 6),
+        "output_cost": round(output_cost, 6),
+        "total_cost": round(input_cost + cache_cost + output_cost, 6),
+    }

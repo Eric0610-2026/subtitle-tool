@@ -30,18 +30,23 @@ def _silent_text_input(parent, title: str, label: str) -> tuple:
     layout.addWidget(QLabel(label))
     edit = QLineEdit()
     layout.addWidget(edit)
-    btn_row = QHBoxLayout()
-    btn_row.addStretch()
-    ok_btn = QPushButton("确定")
-    ok_btn.clicked.connect(dialog.accept)
-    btn_row.addWidget(ok_btn)
-    cancel_btn = QPushButton("取消")
-    cancel_btn.clicked.connect(dialog.reject)
-    btn_row.addWidget(cancel_btn)
-    layout.addLayout(btn_row)
+    layout.addLayout(_make_dialog_buttons(dialog))
     result = dialog.exec()
     text = edit.text().strip()
     return text, result == QDialog.Accepted
+
+
+def _make_dialog_buttons(dialog: QDialog) -> QHBoxLayout:
+    """创建确定/取消按钮行"""
+    row = QHBoxLayout()
+    row.addStretch()
+    ok_btn = QPushButton("确定")
+    ok_btn.clicked.connect(dialog.accept)
+    row.addWidget(ok_btn)
+    cancel_btn = QPushButton("取消")
+    cancel_btn.clicked.connect(dialog.reject)
+    row.addWidget(cancel_btn)
+    return row
 
 
 def _silent_double_input(parent, title: str, label: str,
@@ -58,15 +63,7 @@ def _silent_double_input(parent, title: str, label: str,
     spin.setDecimals(decimals)
     spin.setFixedWidth(120)
     layout.addWidget(spin)
-    btn_row = QHBoxLayout()
-    btn_row.addStretch()
-    ok_btn = QPushButton("确定")
-    ok_btn.clicked.connect(dialog.accept)
-    btn_row.addWidget(ok_btn)
-    cancel_btn = QPushButton("取消")
-    cancel_btn.clicked.connect(dialog.reject)
-    btn_row.addWidget(cancel_btn)
-    layout.addLayout(btn_row)
+    layout.addLayout(_make_dialog_buttons(dialog))
     result = dialog.exec()
     return spin.value(), result == QDialog.Accepted
 

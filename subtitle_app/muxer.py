@@ -285,39 +285,27 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
             _cleanup_file(sanitized)
             _cleanup_file(remux_temp)
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
-                dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
-                post({"type": "log", "message": f"内嵌超时但 MKV 已生成，{dur_msg}", "level": "WARNING"})
-                return mkv_path, dur_ok
+                return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
+                                          f"内嵌超时但 MKV 已生成", "WARNING")
             return None, False
 
         proc, stdout, stderr = result
 
         if proc.returncode == 0:
-            post({"type": "log", "message": f"内嵌字幕完成：{mkv_path.name}", "level": "INFO"})
-            dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
-            if dur_ok:
-                post({"type": "log", "message": dur_msg, "level": "INFO"})
-            else:
-                post({"type": "log", "message": f"⚠ {dur_msg}", "level": "WARNING"})
             _cleanup_file(sanitized)
             _cleanup_file(remux_temp)
-            return mkv_path, dur_ok
+            return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
+                                      f"内嵌字幕完成：{mkv_path.name}")
 
         # ── ffmpeg 返回非零 ──
         _log_ffmpeg_error(post, cmd_str, proc, stderr)
 
         # ffmpeg 返回非零但 MKV 已有效生成 → 容忍
         if mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
-            post({"type": "log", "message": f"MKV 文件已有效生成（{mkv_path.stat().st_size / 1024:.0f}KiB），仍视为成功",
-                  "level": "INFO"})
-            dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
-            if dur_ok:
-                post({"type": "log", "message": dur_msg, "level": "INFO"})
-            else:
-                post({"type": "log", "message": f"⚠ {dur_msg}", "level": "WARNING"})
             _cleanup_file(sanitized)
             _cleanup_file(remux_temp)
-            return mkv_path, dur_ok
+            return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
+                                      f"MKV 文件已有效生成（{mkv_path.stat().st_size / 1024:.0f}KiB），仍视为成功")
 
         # ── 降级重试：加 -fflags +genpts ──
         post({"type": "log", "message": "尝试降级命令重试（+genpts）...", "level": "INFO"})
@@ -335,27 +323,18 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
             _cleanup_file(sanitized)
             _cleanup_file(remux_temp)
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
-                dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
-                post({"type": "log", "message": f"降级重试超时但 MKV 已生成，{dur_msg}", "level": "WARNING"})
-                return mkv_path, dur_ok
+                return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
+                                          f"降级重试超时但 MKV 已生成", "WARNING")
             return None, False
 
         proc2, _, stderr2 = result2
         if proc2.returncode == 0 or (mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE):
-            if proc2.returncode == 0:
-                post({"type": "log", "message": f"降级命令内嵌完成：{mkv_path.name}", "level": "INFO"})
-            else:
+            if proc2.returncode != 0:
                 _log_ffmpeg_error(post, " ".join(str(a) for a in fallback_cmd), proc2, stderr2)
-                post({"type": "log", "message": f"MKV 文件已有效生成（{mkv_path.stat().st_size / 1024:.0f}KiB），仍视为成功",
-                      "level": "INFO"})
-            dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
-            if dur_ok:
-                post({"type": "log", "message": dur_msg, "level": "INFO"})
-            else:
-                post({"type": "log", "message": f"⚠ {dur_msg}", "level": "WARNING"})
             _cleanup_file(sanitized)
             _cleanup_file(remux_temp)
-            return mkv_path, dur_ok
+            return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
+                                      f"降级命令内嵌完成：{mkv_path.name}")
 
         # 两轮均失败且无有效输出 → 清理
         _log_ffmpeg_error(post, " ".join(str(a) for a in fallback_cmd), proc2, stderr2)
@@ -368,6 +347,16 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
     _cleanup_file(sanitized)
     _cleanup_file(remux_temp)
     return None, False
+
+
+def _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post, log_msg, level="INFO"):
+    """验证时长 + 清理临时文件 + 返回"""
+    dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
+    post({"type": "log", "message": log_msg, "level": level})
+    post({"type": "log", "message": dur_msg, "level": "INFO" if dur_ok else "WARNING"})
+    _cleanup_file(sanitized)
+    _cleanup_file(remux_temp)
+    return mkv_path, dur_ok
 
 
 def _cleanup_file(path) -> None:
