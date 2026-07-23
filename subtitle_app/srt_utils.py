@@ -141,14 +141,8 @@ def load_json(path: Path, default: Any = None) -> Any:
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        logger.warning("JSON 解析失败 %s: %s", path, e)
-        return default
-    except PermissionError as e:
-        logger.warning("无权限读取 %s: %s", path, e)
-        return default
-    except OSError as e:
-        logger.warning("读取文件失败 %s: %s", path, e)
+    except (json.JSONDecodeError, PermissionError, OSError) as e:
+        logger.warning("JSON 读取失败 %s: %s", path, e)
         return default
 
 
@@ -457,43 +451,22 @@ def fmt_job_display(path: Path) -> str:
 
 
 def has_chinese(text: str, source_lang: str = "") -> bool:
-    """判断字幕块是否已有中文翻译
-
-    source_lang: 可选的源语言提示（如 "ja"），辅助判定
-    """
+    """判断字幕块是否已有中文翻译"""
+    def _has_han(s: str) -> bool:
+        return any(0x4E00 <= ord(c) <= 0x9FFF for c in s)
 
     if "\n" in text:
         parts = text.split("\n", 1)
         second = parts[1].strip()
-        if not second:
-            return False
-        for ch in second:
-            if 0x4E00 <= ord(ch) <= 0x9FFF:
-                return True
-        first = parts[0]
-        for ch in first:
-            if 0x4E00 <= ord(ch) <= 0x9FFF:
-                return True
-        return False
+        return _has_han(second) or (not second and _has_han(parts[0]))
 
-    # 单行文本：检查是否含假名或日专有汉字
-    if source_lang and (source_lang.startswith("ja") or source_lang.startswith("jap")):
-        return False
-    has_kana = False
-    has_cjk = False
-    has_jp_specific = False
-    for ch in text:
-        cp = ord(ch)
-        if 0x3040 <= cp <= 0x30FF:  # 平假名/片假名
-            has_kana = True
-        elif 0x4E00 <= cp <= 0x9FFF:  # CJK 汉字
-            has_cjk = True
-        if ch in _JAPANESE_SPECIFIC_KANJI:
-            has_jp_specific = True
+    is_jp = source_lang and source_lang.startswith("ja")
+    has_kana = any(0x3040 <= ord(c) <= 0x30FF for c in text)
+    has_jp_specific = any(c in _JAPANESE_SPECIFIC_KANJI for c in text)
 
-    if has_kana or has_jp_specific:
+    if is_jp or has_kana or has_jp_specific:
         return False
-    return has_cjk
+    return _has_han(text)
 
 
 # ── 文件工具 ──
@@ -523,8 +496,7 @@ def make_post_mapper(post: Callable, start: float, end: float) -> Callable:
     return wrapped
 
 
-_TRANSCRIBE_STAGES = {"提取音频", "加载模型", "读取字幕", "转写中"}
-_SPLIT_STAGES = {"组织输出", "跳过", "完成"}
+
 
 
 class OverallProgress:
@@ -551,11 +523,11 @@ class OverallProgress:
         file_idx = idx - 1
         tw = self._file_weights[file_idx] if self._file_weights[file_idx] is not None else self.transcribe_weight
         tlw = 100.0 - tw
-        if stage in _TRANSCRIBE_STAGES:
+        if stage in {"提取音频", "加载模型", "读取字幕", "转写中"}:
             within = pct * tw / 100.0
         elif stage == "翻译":
             within = tw + pct * tlw / 100.0
-        elif stage in _SPLIT_STAGES:
+        elif stage in {"组织输出", "跳过", "完成"}:
             within = 100.0
         else:
             within = min(100.0, pct)
@@ -574,7 +546,6 @@ class OverallProgress:
         if self.start_ts is None:
             return "--:--", "--:--"
         fraction = sum(self._file_progress) / 100.0 / self.total
-        if fraction <= 0:
-            return "--:--", "--:--"
-        remain, finish = estimate_eta(self.start_ts, fraction)
-        return remain, finish
+        return estimate_eta(self.start_ts, fraction) if fraction > 0 else ("--:--", "--:--")
+
+

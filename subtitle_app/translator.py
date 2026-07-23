@@ -206,24 +206,9 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     post({"type": "output_path", "path": str(mkv_path.resolve())})
                     post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
                     # 清理临时文件
-                    for tmp_path, label in [
-                        (translated_srt, "翻译临时字幕"),
-                        (source_srt, "原文字幕"),
-                    ]:
-                        if tmp_path and tmp_path.exists():
-                            try:
-                                tmp_path.unlink()
-                                post({"type": "log", "message": f"{label}已删除: {tmp_path.name}", "level": "INFO"})
-                            except OSError as e:
-                                logger.warning("删除%s失败: %s", label, e)
-                                post({"type": "log", "message": f"警告：{label}删除失败: {e}", "level": "WARNING"})
+                    _cleanup_files(post, [(translated_srt, "翻译临时字幕"), (source_srt, "原文字幕")])
                     if video_path.exists():
-                        try:
-                            video_path.unlink()
-                            post({"type": "log", "message": "原视频已删除，保留 MKV", "level": "INFO"})
-                        except OSError as e:
-                            logger.error("删除原视频失败: %s", e)
-                            post({"type": "log", "message": f"警告：原视频删除失败: {e}", "level": "WARNING"})
+                        _safe_unlink(video_path, post, "原视频")
                 else:
                     post({"type": "log", "message": "⚠️ 内嵌异常，已保留原文件（时长验证未通过，回退外挂字幕）", "level": "ERROR"})
                     try:
@@ -285,3 +270,22 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         file_cost[abs_path] = cost_info
     save_json(progress_file, progress_data)
     post({"type": "language", "message": f"语言：{language}"})
+
+
+def _safe_unlink(path: Path, post: Callable = None, label: str = "") -> None:
+    """安全删除文件，带日志"""
+    try:
+        path.unlink(missing_ok=True)
+        if post and label:
+            post({"type": "log", "message": f"{label}已删除: {path.name}", "level": "INFO"})
+    except OSError as e:
+        logger.warning("删除%s失败: %s", label or path.name, e)
+        if post:
+            post({"type": "log", "message": f"警告：{label}删除失败: {e}", "level": "WARNING"})
+
+
+def _cleanup_files(post: Callable, paths: list) -> None:
+    """批量安全删除文件"""
+    for p, label in paths:
+        if p and p.exists():
+            _safe_unlink(p, post, label)
