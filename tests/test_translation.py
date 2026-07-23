@@ -73,7 +73,7 @@ class TestTranslationClient(unittest.TestCase):
 
     def test_default_batch_size(self):
         c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()), lambda *a: None)
-        self.assertEqual(c.batch_size, 50)
+        self.assertEqual(c.batch_size, 100)
 
     def test_translate_blocks_basic(self):
         with tempfile.TemporaryDirectory() as d:

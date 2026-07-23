@@ -89,10 +89,24 @@ class SettingsDialog(QDialog):
         g1.addLayout(opts_row, r, 0, 1, 3)
         layout.addWidget(sg1)
 
-        # ── AI 翻译 ──
+        # ── AI 翻译（多方案管理）──
         sg2 = QGroupBox("🌍 AI 翻译")
         g2 = QGridLayout(sg2)
         g2.setVerticalSpacing(8)
+
+        # ── 初始化方案数据 ──
+        self._presets = values.get("presets")
+        if not self._presets:
+            self._presets = [{
+                "id": "default",
+                "name": "默认方案",
+                "api_url": values.get("api_url", ""),
+                "api_key": values.get("api_key", ""),
+                "model": values.get("translation_model", ""),
+            }]
+        self._active_id = values.get("active_preset", self._presets[0]["id"])
+        self._updating = False  # 防止信号递归
+
         r = 0
         g2.addWidget(QLabel("目标语言"), r, 0)
         self.target_lang = QComboBox()
@@ -100,30 +114,70 @@ class SettingsDialog(QDialog):
         self.target_lang.setCurrentText(values.get("target_lang", "zh"))
         g2.addWidget(self.target_lang, r, 1, 1, 2)
         r += 1
-        g2.addWidget(QLabel("模型"), r, 0)
-        self.model_name = QLineEdit(values.get("translation_model", cfg.translation.model))
-        g2.addWidget(self.model_name, r, 1, 1, 2)
+
+        # ── 方案选择行 ──
+        g2.addWidget(QLabel("方案"), r, 0)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(4)
+        self.preset_combo = QComboBox()
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+        preset_row.addWidget(self.preset_combo, 1)
+        add_btn = QPushButton("+")
+        add_btn.setFixedWidth(32)
+        add_btn.setToolTip("添加新方案")
+        add_btn.setStyleSheet("font-size:18px; font-weight:bold;")
+        add_btn.clicked.connect(self._add_preset)
+        preset_row.addWidget(add_btn)
+        self.del_btn = QPushButton("-")
+        self.del_btn.setFixedWidth(32)
+        self.del_btn.setToolTip("删除当前方案")
+        self.del_btn.setStyleSheet("font-size:18px; font-weight:bold;")
+        self.del_btn.clicked.connect(self._del_preset)
+        preset_row.addWidget(self.del_btn)
+        preset_row.addStretch()
+        g2.addLayout(preset_row, r, 1, 1, 2)
         r += 1
+
+        # ── 当前方案的编辑字段 ──
+        g2.addWidget(QLabel("方案名称"), r, 0)
+        self.preset_name = QLineEdit()
+        self.preset_name.textChanged.connect(self._on_field_changed)
+        g2.addWidget(self.preset_name, r, 1, 1, 2)
+        r += 1
+
         g2.addWidget(QLabel("API URL"), r, 0)
-        self.api_url = QLineEdit(values.get("api_url", cfg.translation.api_url))
+        self.api_url = QLineEdit()
+        self.api_url.textChanged.connect(self._on_field_changed)
         g2.addWidget(self.api_url, r, 1, 1, 2)
         r += 1
+
         g2.addWidget(QLabel("API Key"), r, 0)
-        self.api_key = QLineEdit(values.get("api_key", cfg.translation.api_key))
+        self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.textChanged.connect(self._on_field_changed)
         g2.addWidget(self.api_key, r, 1, 1, 2)
         r += 1
+
+        g2.addWidget(QLabel("模型"), r, 0)
+        self.model_name = QLineEdit()
+        self.model_name.textChanged.connect(self._on_field_changed)
+        g2.addWidget(self.model_name, r, 1, 1, 2)
+        r += 1
+
+        # ── 其余选项 ──
         self.only_zh_cb = QCheckBox("只要译文（不生成双语）")
         self.only_zh_cb.setChecked(values.get("translation_only", False))
         g2.addWidget(self.only_zh_cb, r, 0, 1, 3)
         r += 1
+
         g2.addWidget(QLabel("批大小"), r, 0)
         self.batch_size = QSpinBox()
-        self.batch_size.setRange(10, 100)
+        self.batch_size.setRange(10, 200)
         self.batch_size.setSingleStep(5)
         self.batch_size.setValue(values.get("translation_batch_size", cfg.translation.batch_size))
         g2.addWidget(self.batch_size, r, 1, 1, 2)
         r += 1
+
         self.pause_embed_cb = QCheckBox("嵌入前暂停确认（可预览/编辑字幕后再嵌入）")
         self.pause_embed_cb.setChecked(values.get("pause_before_embed", False))
         self.pause_embed_cb.setToolTip("翻译完成后弹出对话框，确认或编辑字幕内容后再嵌入 MKV")
@@ -146,7 +200,135 @@ class SettingsDialog(QDialog):
         session_btn.clicked.connect(lambda: self.done(1))
         permanent_btn.clicked.connect(lambda: self.done(2))
 
+        # 填充方案下拉框
+        self._rebuild_combo()
+
+    # ── 方案管理方法 ──
+
+    def _get_preset(self, pid: str) -> dict:
+        for p in self._presets:
+            if p["id"] == pid:
+                return p
+        return self._presets[0]
+
+    def _get_current_preset(self) -> dict:
+        return self._get_preset(self._active_id)
+
+    def _save_current_preset(self):
+        """将当前 UI 字段值刷回方案字典"""
+        p = self._get_current_preset()
+        p["name"] = self.preset_name.text().strip() or "未命名方案"
+        p["api_url"] = self.api_url.text().strip()
+        p["api_key"] = self.api_key.text().strip()
+        p["model"] = self.model_name.text().strip()
+
+    def _load_preset_fields(self, preset: dict):
+        """将方案数据加载到 UI 编辑字段"""
+        self.preset_name.setText(preset["name"])
+        self.api_url.setText(preset.get("api_url", ""))
+        self.api_key.setText(preset.get("api_key", ""))
+        self.model_name.setText(preset.get("model", ""))
+
+    def _rebuild_combo(self):
+        """重建方案下拉框（添加/删除/切换后调用）"""
+        self._updating = True
+        self.preset_combo.clear()
+        for p in self._presets:
+            if p["id"] == self._active_id:
+                label = "● " + p["name"]
+            else:
+                label = "  " + p["name"]
+            self.preset_combo.addItem(label, p["id"])
+        # 选中激活的方案
+        for i in range(self.preset_combo.count()):
+            if self.preset_combo.itemData(i) == self._active_id:
+                self.preset_combo.setCurrentIndex(i)
+                break
+        self._load_preset_fields(self._get_current_preset())
+        self._updating = False
+        self.del_btn.setEnabled(len(self._presets) > 1)
+        self.del_btn.setStyleSheet("font-size:16px; font-weight:bold;")
+
+    def _refresh_combo_labels(self):
+        """更新下拉框文字上的星标（不重建控件）"""
+        self._updating = True
+        for i in range(self.preset_combo.count()):
+            pid = self.preset_combo.itemData(i)
+            p = self._get_preset(pid)
+            if p:
+                if pid == self._active_id:
+                    label = "● " + p["name"]
+                else:
+                    label = "  " + p["name"]
+                self.preset_combo.setItemText(i, label)
+        self._updating = False
+
+    def _on_preset_selected(self, idx: int):
+        """切换方案：保存当前修改，加载新方案"""
+        if self._updating or idx < 0:
+            return
+        self._save_current_preset()
+        pid = self.preset_combo.itemData(idx)
+        if pid and pid != self._active_id:
+            self._active_id = pid
+            self._updating = True
+            self._load_preset_fields(self._get_preset(pid))
+            self._refresh_combo_labels()
+            self._updating = False
+
+    def _on_field_changed(self):
+        """字段变化时自动保存到当前方案"""
+        if not self._updating:
+            self._save_current_preset()
+            # 更新方案名称到下拉框
+            idx = self.preset_combo.currentIndex()
+            if idx >= 0:
+                p = self._get_current_preset()
+                if p["id"] == self._active_id:
+                    label = "● " + p["name"]
+                else:
+                    label = "  " + p["name"]
+                self.preset_combo.setItemText(idx, label)
+
+    def _add_preset(self):
+        """添加空白新方案并选中"""
+        import time
+        self._save_current_preset()
+        new_id = f"preset_{int(time.time())}"
+        names = {p["name"] for p in self._presets}
+        name = "新方案"
+        if name in names:
+            i = 2
+            while f"{name}{i}" in names:
+                i += 1
+            name = f"{name}{i}"
+        self._presets.append({
+            "id": new_id, "name": name,
+            "api_url": "", "api_key": "", "model": "",
+        })
+        self._active_id = new_id
+        self._rebuild_combo()
+
+    def _del_preset(self):
+        """删除当前方案（至少保留一个）"""
+        if len(self._presets) <= 1:
+            QMessageBox.warning(self, "删除", "至少保留一个方案")
+            return
+        cur = self._get_current_preset()
+        box = QMessageBox(self)
+        box.setWindowTitle("删除方案")
+        box.setText(f"确定删除方案「{cur['name']}」？")
+        box.setIcon(QMessageBox.NoIcon)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        if box.exec() != QMessageBox.Yes:
+            return
+        self._presets = [p for p in self._presets if p["id"] != self._active_id]
+        self._active_id = self._presets[0]["id"]
+        self._rebuild_combo()
+
     def get_values(self) -> dict:
+        self._save_current_preset()
+        cur = self._get_current_preset()
         return {
             "model_dir": self.model_dir.text().strip(),
             "language": self.lang.currentText(),
@@ -155,13 +337,15 @@ class SettingsDialog(QDialog):
             "extract_audio": self.extract_cb.isChecked(),
             "vad_filter": self.vad_cb.isChecked(),
             "target_lang": self.target_lang.currentText(),
-            "translation_model": self.model_name.text().strip(),
-            "api_url": self.api_url.text().strip(),
-            "api_key": self.api_key.text().strip(),
+            "translation_model": cur["model"],
+            "api_url": cur["api_url"],
+            "api_key": cur["api_key"],
             "pipeline": self.pipeline_cb.isChecked(),
             "translation_only": self.only_zh_cb.isChecked(),
             "translation_batch_size": self.batch_size.value(),
             "pause_before_embed": self.pause_embed_cb.isChecked(),
+            "presets": self._presets,
+            "active_preset": self._active_id,
         }
 
 
@@ -181,23 +365,18 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
     dlg = QDialog(parent)
     dlg.setStyleSheet(_SCROLLBAR_STYLE)
     dlg.setWindowTitle(f"处理历史 ({len(done)} 已完成, {len(ignored)} 已忽略)")
-    dlg.resize(640, 480)
+    dlg.resize(600, 400)
     layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(8, 8, 8, 8)
+    layout.setSpacing(4)
     tabs = QTabWidget()
-    layout.addWidget(tabs)
-    btn_row = QHBoxLayout()
-    layout.addLayout(btn_row)
-    btn_row.addStretch()
-    close_btn = QPushButton("关闭")
-    close_btn.clicked.connect(dlg.accept)
-    btn_row.addWidget(close_btn)
+    layout.addWidget(tabs, 1)
 
     # ── 已完成标签页 ──
     done_widget = QWidget()
     done_layout = QVBoxLayout(done_widget)
-    hint = QLabel("选中条目后点击「删除选中」可移除记录（不影响已生成的字幕文件）")
-    hint.setStyleSheet("color:#64748b; font-size:11px;")
-    done_layout.addWidget(hint)
+    done_layout.setContentsMargins(4, 4, 4, 4)
+    done_layout.setSpacing(4)
     done_list = QListWidget()
     done_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
     done_list.setFont(QFont("Consolas", 9))
@@ -208,44 +387,45 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
             p = entry
         ci = file_cost.get(p, {})
         total = ci.get("total_cost", 0)
-        tokens_in = ci.get("prompt_tokens", 0)
         if total:
-            display = f"{p}   ¥{total:.4f}  ({tokens_in:,} tokens)"
+            display = f"¥{total:.4f}  {Path(p).name}"
         else:
-            display = p
+            display = Path(p).name
         item = QListWidgetItem(display)
         item.setData(Qt.UserRole, p)
         done_list.addItem(item)
     done_layout.addWidget(done_list, 1)
-    btn_row1 = QHBoxLayout()
     del_done_btn = QPushButton("🗑 删除选中")
     del_done_btn.setObjectName("stopBtn")
-    btn_row1.addWidget(del_done_btn)
-    btn_row1.addStretch()
-    done_layout.addLayout(btn_row1)
+    done_layout.addWidget(del_done_btn)
     tabs.addTab(done_widget, f"已完成 ({len(done)})")
 
     # ── 已忽略标签页 ──
     ignore_widget = QWidget()
     ignore_layout = QVBoxLayout(ignore_widget)
-    hint2 = QLabel("选中条目后点击「取消忽略」恢复文件")
-    hint2.setStyleSheet("color:#64748b; font-size:11px;")
-    ignore_layout.addWidget(hint2)
+    ignore_layout.setContentsMargins(4, 4, 4, 4)
+    ignore_layout.setSpacing(4)
     ignore_list = QListWidget()
     ignore_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
     ignore_list.setFont(QFont("Consolas", 9))
     for p in ignored:
-        item = QListWidgetItem(p)
+        item = QListWidgetItem(Path(p).name)
         item.setData(Qt.UserRole, p)
         ignore_list.addItem(item)
     ignore_layout.addWidget(ignore_list, 1)
-    btn_row2 = QHBoxLayout()
-    unignore_btn = QPushButton("↩ 取消忽略选中")
+    unignore_btn = QPushButton("↩ 恢复选中")
     unignore_btn.setObjectName("accentBtn")
-    btn_row2.addWidget(unignore_btn)
-    btn_row2.addStretch()
-    ignore_layout.addLayout(btn_row2)
+    ignore_layout.addWidget(unignore_btn)
     tabs.addTab(ignore_widget, f"已忽略 ({len(ignored)})")
+
+    # ── 底部关闭按钮 ──
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(4)
+    close_btn = QPushButton("关闭")
+    close_btn.clicked.connect(dlg.accept)
+    btn_row.addStretch()
+    btn_row.addWidget(close_btn)
+    layout.addLayout(btn_row)
 
     def _delete_done():
         sel = done_list.selectedItems()
