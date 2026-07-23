@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QListWidget,
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
-    QAbstractItemView, QTabWidget, QWidget,
+    QAbstractItemView, QTabWidget, QWidget, QFrame,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -383,3 +383,252 @@ def _clear_all(dlg, path, info_label, list_widget, log_callback):
     if info_label:
         info_label.setText("缓存条目：0 条　　缓存大小：0.0 KB")
     dlg.accept()
+
+
+# ─── 嵌入字幕对话框 ────────────────────────────────────────
+
+
+def _find_matching_subtitle(video_path: Path) -> Path:
+    """查找与视频同名的字幕文件，优先精确匹配，其次忽略语言标签"""
+    parent = video_path.parent
+    stem = video_path.stem
+    # 1. 精确匹配 {stem}.srt
+    exact = parent / f"{stem}.srt"
+    if exact.exists():
+        return exact
+    # 2. 匹配带语言标签的 {stem}.xx.srt / {stem}.xx-xx.srt
+    for f in sorted(parent.glob(f"{stem}.*.srt")):
+        return f
+    return None
+
+
+def _find_matching_video(subtitle_path: Path) -> Path:
+    """查找与字幕同名的视频文件，忽略字幕的语言标签"""
+    parent = subtitle_path.parent
+    stem = subtitle_path.stem
+    exts = cfg.srt.video_exts
+    # 1. 先用完整 stem 匹配
+    for ext in exts:
+        candidate = parent / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    # 2. stem 含点号（语言标签），去掉最后一段再试
+    if "." in stem:
+        base = stem.rsplit(".", 1)[0]
+        for ext in exts:
+            candidate = parent / f"{base}{ext}"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+class EmbedDialog(QDialog):
+    """嵌入字幕对话框：上下两行分别选视频和字幕，自动匹配同名文件，支持批量"""
+
+    def __init__(self, parent, default_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("📦 嵌入字幕")
+        self.setMinimumSize(620, 400)
+        self.resize(680, 460)
+        self._default_dir = default_dir
+        self._pairs = []  # [(video_path, subtitle_path), ...]
+        self._setup_ui()
+        self._apply_style()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # ── 标题 ──
+        title = QLabel("📦 嵌入字幕 — 将字幕嵌入视频文件为 MKV")
+        title.setStyleSheet("font-size:14px; font-weight:600;")
+        layout.addWidget(title)
+
+        # ── 嵌入列表 ──
+        list_label = QLabel("嵌入任务列表：")
+        list_label.setStyleSheet("font-weight:600;")
+        layout.addWidget(list_label)
+
+        self.table = QListWidget()
+        self.table.setAlternatingRowColors(True)
+        self.table.setMinimumHeight(120)
+        layout.addWidget(self.table, 1)
+
+        # ── 分隔线 ──
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep)
+
+        # ── 添加新任务 ──
+        add_label = QLabel("添加新任务：")
+        add_label.setStyleSheet("font-weight:600;")
+        layout.addWidget(add_label)
+
+        # 视频行
+        video_row = QHBoxLayout()
+        video_row.addWidget(QLabel("视频:"))
+        self.video_path = QLineEdit()
+        self.video_path.setPlaceholderText("选择视频文件...")
+        video_row.addWidget(self.video_path, 1)
+        video_btn = QPushButton("📂 浏览")
+        video_btn.clicked.connect(self._browse_video)
+        video_row.addWidget(video_btn)
+        layout.addLayout(video_row)
+
+        # 字幕行
+        srt_row = QHBoxLayout()
+        srt_row.addWidget(QLabel("字幕:"))
+        self.srt_path = QLineEdit()
+        self.srt_path.setPlaceholderText("选择字幕文件...")
+        srt_row.addWidget(self.srt_path, 1)
+        srt_btn = QPushButton("📂 浏览")
+        srt_btn.clicked.connect(self._browse_srt)
+        srt_row.addWidget(srt_btn)
+        layout.addLayout(srt_row)
+
+        # 操作按钮行
+        btn_row = QHBoxLayout()
+        add_pair_btn = QPushButton("➕ 添加任务")
+        add_pair_btn.clicked.connect(self._add_pair)
+        add_pair_btn.setObjectName("accentBtn")
+        btn_row.addWidget(add_pair_btn)
+        btn_row.addStretch()
+        self.clear_btn = QPushButton("🗑 清空列表")
+        self.clear_btn.clicked.connect(self._clear_list)
+        self.clear_btn.setObjectName("stopBtn")
+        btn_row.addWidget(self.clear_btn)
+        layout.addLayout(btn_row)
+
+        # ── 分隔线 ──
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep2)
+
+        # ── 底部按钮 ──
+        bottom_row = QHBoxLayout()
+        self.count_label = QLabel("共 0 个任务")
+        self.count_label.setStyleSheet("color:#64748b;")
+        bottom_row.addWidget(self.count_label)
+        bottom_row.addStretch()
+        self.start_btn = QPushButton("▶ 开始嵌入")
+        self.start_btn.setObjectName("startBtn")
+        self.start_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self._start_embed)
+        self.start_btn.setFixedHeight(36)
+        bottom_row.addWidget(self.start_btn)
+        close_btn = QPushButton("✕ 关闭")
+        close_btn.clicked.connect(self.reject)
+        close_btn.setFixedHeight(36)
+        bottom_row.addWidget(close_btn)
+        layout.addLayout(bottom_row)
+
+    def _browse_video(self):
+        """浏览视频文件，选中后自动查找同名字幕"""
+        exts = " ".join(f"*{e}" for e in cfg.srt.video_exts)
+        start = self.video_path.text() or self._default_dir
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择视频文件", start, f"视频文件 ({exts})")
+        if not path:
+            return
+        self.video_path.setText(path)
+        # 自动查找同名字幕
+        vp = Path(path)
+        matched = _find_matching_subtitle(vp)
+        if matched:
+            self.srt_path.setText(str(matched))
+        else:
+            # 可选：清空字幕行，让用户手动选择
+            self.srt_path.clear()
+
+    def _browse_srt(self):
+        """浏览字幕文件，选中后自动查找同名视频"""
+        start = self.srt_path.text() or self._default_dir
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择字幕文件", start, "字幕文件 (*.srt)")
+        if not path:
+            return
+        self.srt_path.setText(path)
+        # 自动查找同名视频
+        sp = Path(path)
+        matched = _find_matching_video(sp)
+        if matched and not self.video_path.text():
+            self.video_path.setText(str(matched))
+
+    def _add_pair(self):
+        """将当前视频+字幕添加到列表"""
+        v = self.video_path.text().strip()
+        s = self.srt_path.text().strip()
+        if not v or not s:
+            QMessageBox.warning(self, "提示", "请先选择视频和字幕文件")
+            return
+        vp = Path(v)
+        sp = Path(s)
+        if not vp.exists():
+            QMessageBox.warning(self, "提示", f"视频文件不存在：{v}")
+            return
+        if not sp.exists():
+            QMessageBox.warning(self, "提示", f"字幕文件不存在：{s}")
+            return
+        if sp.suffix.lower() != ".srt":
+            QMessageBox.warning(self, "提示", "字幕文件必须是 .srt 格式")
+            return
+        # 检查是否已添加
+        for existing_v, existing_s in self._pairs:
+            if existing_v == vp and existing_s == sp:
+                QMessageBox.warning(self, "提示", "该任务已存在")
+                return
+        self._pairs.append((vp, sp))
+        self._refresh_table()
+        self.video_path.clear()
+        self.srt_path.clear()
+
+    def _clear_list(self):
+        if not self._pairs:
+            return
+        self._pairs.clear()
+        self._refresh_table()
+
+    def _refresh_table(self):
+        self.table.clear()
+        for i, (v, s) in enumerate(self._pairs, 1):
+            item = QListWidgetItem(f"{i}.  {v.name}  →  {s.name}")
+            item.setData(Qt.UserRole, i - 1)
+            self.table.addItem(item)
+        count = len(self._pairs)
+        self.count_label.setText(f"共 {count} 个任务")
+        self.start_btn.setEnabled(count > 0)
+
+    def _start_embed(self):
+        """开始批量嵌入"""
+        if not self._pairs:
+            return
+        self.accept()
+
+    def get_pairs(self):
+        """返回所有 (视频路径, 字幕路径) 对"""
+        return self._pairs.copy()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QListWidget { font-size:12px; }
+            QListWidget::item { padding:4px 8px; }
+            QPushButton#startBtn {
+                background:#22c55e; color:white; border:none;
+                border-radius:6px; padding:8px 20px; font-weight:bold; font-size:13px;
+            }
+            QPushButton#startBtn:hover { background:#16a34a; }
+            QPushButton#startBtn:disabled { background:#94a3b8; }
+            QPushButton#accentBtn {
+                background:#6366f1; color:white; border:none;
+                border-radius:4px; padding:6px 14px;
+            }
+            QPushButton#accentBtn:hover { background:#4f46e5; }
+            QPushButton#stopBtn {
+                background:#ef4444; color:white; border:none;
+                border-radius:4px; padding:6px 14px;
+            }
+            QPushButton#stopBtn:hover { background:#dc2626; }
+            QLineEdit { padding:4px 6px; border:1px solid #e2e8f0; border-radius:4px; }
+        """)

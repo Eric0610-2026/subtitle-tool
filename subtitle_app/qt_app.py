@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QLabel, QTabWidget, QSplitter, QGroupBox,
     QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
-    QMenu,
+    QMenu, QDialog,
 )
 from PySide6.QtGui import QFont, QColor, QFontMetrics
 
@@ -29,7 +29,7 @@ from .srt_utils import (
     OverallProgress, find_tool, IGNORE_FILE,
 )
 from .config import cfg
-from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog
+from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog
 from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
 from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
@@ -794,51 +794,52 @@ class SubtitleApp(QMainWindow):
     # ─── 手动嵌入 ───
 
     def _manual_embed(self):
-        """手动选择视频与字幕文件，软内嵌为 MKV"""
+        """打开嵌入字幕对话框，支持批量选择视频+字幕嵌入为 MKV"""
         ffmpeg = find_tool("ffmpeg.exe", APP_DIR) or find_tool("ffmpeg", APP_DIR)
         if not ffmpeg:
             QMessageBox.warning(self, "错误", "未找到 ffmpeg，请放在应用目录下")
             return
 
-        video_exts = " ".join(f"*{e}" for e in cfg.srt.video_exts)
-        video_str, _ = QFileDialog.getOpenFileName(
-            self, "选择视频文件", self.video_dir.text(), f"视频文件 ({video_exts})")
-        if not video_str:
-            return
-        video = Path(video_str)
-
-        srt_str, _ = QFileDialog.getOpenFileName(
-            self, "选择字幕文件(SRT)", str(video.parent), "字幕文件 (*.srt)")
-        if not srt_str:
-            return
-        srt = Path(srt_str)
-
-        if not video.exists() or not srt.exists():
+        dlg = EmbedDialog(self, self.video_dir.text())
+        if dlg.exec() != QDialog.Accepted:
             return
 
-        if not self._confirm("确认嵌入",
-                f"视频: {video.name}\n字幕: {srt.name}\n输出: {video.with_suffix('.mkv').name}\n\n确定要嵌入？"):
+        pairs = dlg.get_pairs()
+        if not pairs:
             return
 
-        def post(msg):
-            if msg.get("type") == "log":
-                self._add_log_entry(msg.get("message", ""), msg.get("level", "INFO"))
+        total = len(pairs)
+        success = 0
+        for i, (video, srt) in enumerate(pairs, 1):
+            if not self._confirm("确认嵌入",
+                    f"[{i}/{total}] 视频: {video.name}\n字幕: {srt.name}\n输出: {video.with_suffix('.mkv').name}\n\n确定要嵌入？"):
+                continue
 
-        self._add_log_entry(f"📦 手动嵌入: {video.name} + {srt.name}")
-        QApplication.processEvents()
-        mkv, _ = embed_subtitles_to_video(video, srt, ffmpeg, post)
-        if mkv and mkv.exists():
-            self._add_log_entry(f"✅ 手动嵌入完成: {mkv.name}")
-            if str(mkv.resolve()) not in self._output_paths:
-                self._output_paths.append(str(mkv.resolve()))
-            try:
-                video.unlink()
-                srt.unlink()
-                self._add_log_entry(f"已删除原文件: {video.name}, {srt.name}")
-            except OSError as e:
-                self._add_log_entry(f"删除原文件失败: {e}", "WARNING")
+            def post(msg):
+                if msg.get("type") == "log":
+                    self._add_log_entry(msg.get("message", ""), msg.get("level", "INFO"))
+
+            self._add_log_entry(f"📦 [{i}/{total}] 嵌入: {video.name} + {srt.name}")
+            QApplication.processEvents()
+            mkv, _ = embed_subtitles_to_video(video, srt, ffmpeg, post)
+            if mkv and mkv.exists():
+                success += 1
+                self._add_log_entry(f"✅ [{i}/{total}] 嵌入完成: {mkv.name}")
+                if str(mkv.resolve()) not in self._output_paths:
+                    self._output_paths.append(str(mkv.resolve()))
+                try:
+                    video.unlink()
+                    srt.unlink()
+                    self._add_log_entry(f"已删除原文件: {video.name}, {srt.name}")
+                except OSError as e:
+                    self._add_log_entry(f"删除原文件失败: {e}", "WARNING")
+            else:
+                self._add_log_entry(f"❌ [{i}/{total}] 嵌入失败: {video.name}", "WARNING")
+
+        if success:
+            QMessageBox.information(self, "嵌入完成", f"成功嵌入 {success}/{total} 个文件")
         else:
-            self._add_log_entry("❌ 手动嵌入失败", "WARNING")
+            QMessageBox.warning(self, "嵌入失败", "所有文件嵌入失败，请查看日志")
 
     def _add_log_entry(self, message: str, level: str = "INFO", trace: str = None) -> None:
         # 持久化到日志文件
