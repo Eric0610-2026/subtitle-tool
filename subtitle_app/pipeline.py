@@ -232,7 +232,7 @@ class SubtitleWorker:
             if matched_video:
                 output_dir = matched_video.parent / safe_stem(matched_video.name)
             else:
-                output_dir = item.parent / safe_stem(item.name)
+                output_dir = item.parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
         final_srt = output_dir / f"{safe_stem(item.name)}.srt"

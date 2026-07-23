@@ -70,6 +70,20 @@ class SubtitleApp(QMainWindow):
         # ── 信号桥（替代 queue.Queue + QTimer 轮询）──
         self.signal_bridge = SignalBridge()
         self.signal_bridge.event_received.connect(self._handle_event)
+        # ── 构建多方案配置（含向后兼容）──
+        _presets_raw = getattr(cfg.translation, "presets", None)
+        if _presets_raw:
+            _presets = [
+                {"id": p.id, "name": p.name,
+                 "api_url": p.api_url, "api_key": p.api_key, "model": p.model}
+                for p in _presets_raw]
+        else:
+            _presets = [{"id": "default", "name": "默认方案",
+                         "api_url": cfg.translation.api_url,
+                         "api_key": cfg.translation.api_key,
+                         "model": cfg.translation.model}]
+        _active_preset_id = getattr(cfg.translation, "active_preset", _presets[0]["id"])
+        _active_preset = next((p for p in _presets if p["id"] == _active_preset_id), _presets[0])
         # 默认配置（来自 config.json）
         self.settings_data = {
             "model_dir": str(APP_DIR / cfg.whisper.model_dir) if (APP_DIR / cfg.whisper.model_dir).exists() else cfg.whisper.model_dir,
@@ -79,13 +93,15 @@ class SubtitleApp(QMainWindow):
             "extract_audio": cfg.whisper.extract_audio,
             "vad_filter": cfg.whisper.vad_filter,
             "target_lang": cfg.translation.target_lang,
-            "translation_model": cfg.translation.model,
-            "api_url": cfg.translation.api_url,
-            "api_key": cfg.translation.api_key,
+            "translation_model": _active_preset["model"],
+            "api_url": _active_preset["api_url"],
+            "api_key": _active_preset["api_key"],
             "pipeline": cfg.translation.pipeline,
             "translation_only": False,
             "translation_batch_size": cfg.translation.batch_size,
             "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
+            "presets": _presets,
+            "active_preset": _active_preset_id,
         }
         self._build_ui()
         self._apply_style()
@@ -354,13 +370,19 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["compute_type"] = values.get("compute_type", "int8_float16")
         raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
         raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
-        raw.setdefault("translation", {})["target_lang"] = values.get("target_lang", "zh")
-        raw["translation"]["model"] = values.get("translation_model", "")
-        raw["translation"]["api_url"] = values.get("api_url", "")
-        raw["translation"]["api_key"] = values.get("api_key", "")
-        raw["translation"]["pipeline"] = values.get("pipeline", True)
-        raw["translation"]["batch_size"] = values.get("translation_batch_size", 50)
-        raw["translation"]["pause_before_embed"] = values.get("pause_before_embed", False)
+        trans = raw.setdefault("translation", {})
+        trans["target_lang"] = values.get("target_lang", "zh")
+        trans["model"] = values.get("translation_model", "")
+        trans["api_url"] = values.get("api_url", "")
+        trans["api_key"] = values.get("api_key", "")
+        trans["pipeline"] = values.get("pipeline", True)
+        trans["batch_size"] = values.get("translation_batch_size", 50)
+        trans["pause_before_embed"] = values.get("pause_before_embed", False)
+        # 保存多方案配置
+        presets = values.get("presets")
+        if presets:
+            trans["presets"] = presets
+        trans["active_preset"] = values.get("active_preset", "default")
         path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         cfg.reload()
 

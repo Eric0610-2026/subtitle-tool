@@ -60,7 +60,17 @@
     "embed_subtitle_lang": "chi",
     "embed_timeout": 300,
     "ffprobe_timeout": 30,
-    "pause_before_embed": false
+    "pause_before_embed": false,
+    "active_preset": "default",
+    "presets": [
+      {
+        "id": "default",
+        "name": "默认方案",
+        "api_url": "",
+        "api_key": "",
+        "model": ""
+      }
+    ]
   },
 
   "translation_lang_names": {

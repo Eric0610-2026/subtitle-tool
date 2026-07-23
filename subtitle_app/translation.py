@@ -40,14 +40,14 @@ LANG_NAMES = {k: v for k, v in cfg.translation_lang_names.__dict__.items()}
 def make_prompt(target_lang: str) -> str:
     lang_name = LANG_NAMES.get(target_lang, "简体中文")
     return (
-        f"你是严谨的字幕翻译器。将以下 JSON 中的字幕文本翻译为{lang_name}。"
+        f"你是严谨的字幕翻译器。将以下数组中的字幕文本逐条翻译为{lang_name}。"
         "要求：\n"
         "1. 保留原文语义和语气\n"
         f"2. 译文符合{lang_name}表达习惯，自然流畅\n"
         "3. 注意上下文连贯\n"
         "4. 专有名词保留原文\n"
-        "5. 返回格式严格为 JSON，键名为 items，值数组每个元素包含 id 和 zh\n"
-        '示例：{"items": [{"id": 1, "zh": "你好"}, {"id": 2, "zh": "世界"}]}'
+        "5. 返回格式严格为 JSON 数组，保持顺序，每个元素为对应译文\n"
+        '示例：["你好", "世界"]'
     )
 
 # ── 自定义异常 ──
@@ -79,9 +79,7 @@ class TranslationClient:
         self.post_ui = post_ui
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0,
                        "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
-        self._balance_url = api_url.replace("/chat/completions", "/user/balance")
-        self._balance_before = None
-        self._balance_after = None
+
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
                          is_bilingual: bool, state_path: Optional[Path] = None,
@@ -111,11 +109,6 @@ class TranslationClient:
         if not flat:
             return [block.text for block in blocks]
 
-        # 查询翻译前余额
-        self._balance_before = self._query_balance()
-        if self._balance_before is not None:
-            self.post_ui({"type": "log", "message": f"翻译前余额: ¥{self._balance_before:.4f}", "level": "INFO"})
-
         # Step 2: 缓存命中 + 断点恢复
         sent_trans: Dict[int, str] = {}
         state: Dict = {}
@@ -144,11 +137,14 @@ class TranslationClient:
             text_to_gsid.setdefault(sent, []).append(gsid)
         unique_texts = list(text_to_gsid.keys())
         if not unique_texts:
-            self._balance_after = self._balance_before
             # 所有句子都命中缓存/断点状态，直接组装译文
+            # 先构建索引，O(n) 避免 O(n²)
+            gsid_to_bidx: Dict[int, List[int]] = {}
+            for gsid, bidx, _sent in flat:
+                gsid_to_bidx.setdefault(bidx, []).append(gsid)
             result_texts: List[str] = []
             for bidx, block in enumerate(blocks):
-                block_sids = [entry[0] for entry in flat if entry[1] == bidx]
+                block_sids = gsid_to_bidx.get(bidx, [])
                 translated_sents = []
                 missing = False
                 for sid in block_sids:
@@ -162,6 +158,11 @@ class TranslationClient:
                 else:
                     combined = _compose_sentences(translated_sents)
                     result_texts.append(combined)
+            self.post_ui({
+                "type": "progress", "percent": 100,
+                "stage": "翻译", "detail": f"翻译完成（全部命中缓存，共 {len(blocks)} 条）",
+                "total": len(blocks), "cache": len(self.cache),
+            })
             return result_texts
 
         # Step 3: 批量翻译（多线程并发 API 调用）
@@ -186,7 +187,7 @@ class TranslationClient:
                     context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
                     context_text = "\n".join(context_lines) + "\n"
                 self.post_ui({
-                    "type": "progress", "percent": (batch_id / max(total_batches, 1)) * 100,
+                    "type": "progress", "percent": ((batch_id - 0.5) / max(total_batches, 1)) * 100,
                     "stage": "翻译", "detail": f"翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
                     "total": len(blocks), "cache": len(self.cache),
                 })
@@ -195,6 +196,19 @@ class TranslationClient:
 
             # 按提交顺序处理结果（保证段落上下文连续性）
             for future, batch, t2g, batch_id, main_para in batch_futures:
+                # 轮询等待，每隔 15s 发送心跳防止 UI 假死
+                while True:
+                    try:
+                        translations = future.result(timeout=15)
+                        break
+                    except TimeoutError:
+                        self.post_ui({
+                            "type": "progress",
+                            "percent": ((batch_id - 0.5) / max(total_batches, 1)) * 100,
+                            "stage": "翻译",
+                            "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（API 响应较慢）...",
+                            "total": len(blocks), "cache": len(self.cache),
+                        })
                 try:
                     translations = future.result()
                 except RuntimeError:
@@ -203,6 +217,9 @@ class TranslationClient:
                         save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
                     raise
                 for item in translations:
+                    # 兼容混元：混元常把译文放 en 而非 zh 字段
+                    if not item.get("zh") and item.get("en"):
+                        item["zh"] = item["en"]
                     sid = item.get("id", 0)
                     zh_text = item.get("zh", "")
                     if 1 <= sid <= len(batch):
@@ -226,14 +243,21 @@ class TranslationClient:
                                 para_context[para] = para_context[para][-CONTEXT_WINDOW:]
                 if state_path:
                     save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
-        self._balance_after = self._query_balance()
-        self._report_cost()
-        self._save_cache()
 
-        # Step 4: 拼回块
+        # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
+        self.post_ui({
+            "type": "progress", "percent": 100,
+            "stage": "翻译", "detail": f"翻译完成（共 {len(blocks)} 条）",
+            "total": len(blocks), "cache": len(self.cache),
+        })
+
+        # 拼回块（先构建索引，O(n) 避免 O(n²)）
+        gsid_to_bidx: Dict[int, List[int]] = {}
+        for gsid, bidx, _sent in flat:
+            gsid_to_bidx.setdefault(bidx, []).append(gsid)
         result_texts: List[str] = []
         for bidx, block in enumerate(blocks):
-            block_sids = [entry[0] for entry in flat if entry[1] == bidx]
+            block_sids = gsid_to_bidx.get(bidx, [])
             translated_sents = []
             missing = False
             for sid in block_sids:
@@ -247,12 +271,15 @@ class TranslationClient:
             else:
                 combined = _compose_sentences(translated_sents)
                 result_texts.append(combined)
+
+        # 后台 I/O（保存缓存、报告费用，用户已看到 100%）
+        self._save_cache()
+        self._report_cost()
         return result_texts
 
     def _translate_batch(self, texts: List[str], context: str = "", depth: int = 0) -> List[Dict]:
         """批量翻译，带递归深度限制防止栈溢出"""
-        items = [{"id": i + 1, "en": text} for i, text in enumerate(texts)]
-        prompt_text = json.dumps({"items": items}, ensure_ascii=False)
+        prompt_text = json.dumps(texts, ensure_ascii=False)
         if context:
             prompt_text = context + prompt_text
         payload = {
@@ -370,7 +397,10 @@ class TranslationClient:
             if content:
                 parsed = _extract_json(content)
                 if parsed:
-                    items = parsed.get("items") or parsed.get("translations") or parsed.get("result") or parsed
+                    if isinstance(parsed, list):
+                        items = parsed
+                    else:
+                        items = parsed.get("items") or parsed.get("translations") or parsed.get("result") or parsed
         except Exception as e:
             logger.warning("解析翻译响应内容失败: %s", e)
         if items is None:
@@ -382,36 +412,13 @@ class TranslationClient:
                 result = []
                 for item in items:
                     id_val = item.get("id", len(result) + 1)
-                    zh_val = item.get("zh") or item.get("text") or item.get("translation") or ""
+                    zh_val = item.get("zh") or item.get("text") or item.get("translation") or item.get("en") or ""
                     result.append({"id": id_val, "zh": zh_val})
                 return result
         if items is None:
             logger.error("无法解析翻译响应: %s", json.dumps(resp_data, ensure_ascii=False)[:300])
             raise RuntimeError("无法解析翻译响应（请检查 API Key 和模型名称）")
         return items if isinstance(items, list) else []
-
-    def _query_balance(self) -> Optional[float]:
-        """查询 DeepSeek 账户余额（元），失败返回 None"""
-        if not self._balance_url.startswith("http"):
-            logger.debug("余额查询跳过：非标准 API URL")
-            return None
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            req = urllib.request.Request(self._balance_url, headers=headers)
-        except ValueError:
-            logger.warning("余额查询 URL 无效: %s", self._balance_url)
-            return None
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                infos = data.get("balance_infos", [])
-                for info in infos:
-                    if info.get("currency") == "CNY":
-                        return float(info.get("total_balance", 0))
-                return sum(float(i.get("total_balance", 0)) for i in infos)
-        except Exception as e:
-            logger.warning("查询余额失败: %s", e)
-            return None
 
     def _report_cost(self) -> None:
         """报告本次翻译的 token 消耗和费用估算"""
@@ -436,14 +443,6 @@ class TranslationClient:
         lines.append(
             f"估算费用: ¥{estimated_cost:.4f} (输入 ¥{input_cost:.4f} + 缓存 ¥{cache_cost:.4f} + 输出 ¥{output_cost:.4f})"
         )
-        if self._balance_before is not None and self._balance_after is not None:
-            diff = self._balance_before - self._balance_after
-            if abs(diff) > 0.0001:
-                lines.append(f"余额变化: ¥{self._balance_before:.4f} → ¥{self._balance_after:.4f} (消耗 ¥{diff:.4f})")
-            else:
-                lines.append(f"当前余额: ¥{self._balance_before:.4f}")
-        elif self._balance_before is not None:
-            lines.append(f"翻译前余额: ¥{self._balance_before:.4f}")
         for line in lines:
             self.post_ui({"type": "log", "message": line, "level": "INFO"})
 
@@ -477,8 +476,7 @@ class TranslationClient:
             "cache_cost": round(cache_cost, 6),
             "output_cost": round(output_cost, 6),
             "total_cost": round(input_cost + cache_cost + output_cost, 6),
-            "balance_before": self._balance_before,
-            "balance_after": self._balance_after,
+
         }
 
 
@@ -506,17 +504,28 @@ def subprocess_run_safe(cmd: List[str], timeout: int) -> Any:
 def _extract_json(text: str) -> Optional[dict]:
     text = text.strip()
     if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+        # 尝试提取第一个完整的 JSON 对象（处理混元偶发的双 JSON 回显）
+        depth = 0
+        start = -1
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if start < 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except json.JSONDecodeError:
+                        break
     m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-    m = re.search(r"(\{.*\})", text, re.DOTALL)
+    m = re.search(r"(\{.*?\})", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
