@@ -205,8 +205,18 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     mkv_ok = True
                     post({"type": "output_path", "path": str(mkv_path.resolve())})
                     post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
-                    # 保留 SRT 文件（用户可能后续修改后重新嵌入）
-                    post({"type": "log", "message": "已保留字幕文件以便后续修改", "level": "INFO"})
+                    # 清理临时文件
+                    for tmp_path, label in [
+                        (translated_srt, "翻译临时字幕"),
+                        (source_srt, "原文字幕"),
+                    ]:
+                        if tmp_path and tmp_path.exists():
+                            try:
+                                tmp_path.unlink()
+                                post({"type": "log", "message": f"{label}已删除: {tmp_path.name}", "level": "INFO"})
+                            except OSError as e:
+                                logger.warning("删除%s失败: %s", label, e)
+                                post({"type": "log", "message": f"警告：{label}删除失败: {e}", "level": "WARNING"})
                     if video_path.exists():
                         try:
                             video_path.unlink()
