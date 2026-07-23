@@ -58,14 +58,14 @@ pip install -r tools/requirements.txt
 # 4. 下载模型到 models/faster-whisper-large-v3-turbo/ 目录
 
 # 5. 配置 API
-copy subtitle_app\config.example.json subtitle_app\config.json
+cp subtitle_app/config.example.json subtitle_app/config.json
 # 编辑 config.json，填入 translation.api_key 和 translation.api_url
 
 # 6. 启动
 python subtitle_app/subtitle_app.py
 ```
 
-或双击 `启动字幕工具.bat`（自动安装依赖 + 以 pythonw.exe 无控制台启动）。
+> **💡 提示**：Windows 用户也可将 `subtitle_app\config.example.json` 复制一份重命名为 `config.json`。
 
 > **⚠ 首次启动较慢**：PySide6 和 torch 加载需要 20-30 秒，期间界面不会立即弹出，请耐心等待，不要反复点击。
 
@@ -73,8 +73,8 @@ python subtitle_app/subtitle_app.py
 
 应用启动后会自动检测以下项目，缺少的项目会以黄色警告显示在日志区，ffmpeg/ffprobe 缺失还会弹出对话框：
 
-- ✅ ffmpeg.exe 是否存在（项目根目录或 tools/ 目录）
-- ✅ 语音识别模型是否已下载
+- ✅ ffmpeg.exe / ffprobe.exe 是否存在（项目根目录或 tools/ 目录）
+- ✅ 语音识别模型是否已下载（默认路径 `models/faster-whisper-large-v3-turbo/`）
 - ✅ API 地址和密钥是否已配置
 
 如未配置翻译 API，程序仍可正常使用转写功能，仅翻译功能不可用。
@@ -111,11 +111,9 @@ python subtitle_app/subtitle_app.py
 │   ├── config.py          # 配置加载
 │   ├── config.example.json # 配置模板
 │   └── subtitle_app.py     # 入口
-├── cache/                 # 运行时缓存文件
+├── cache/                 # 运行时缓存（自动生成）
 ├── models/                # Whisper 语音模型
-├── tools/                 # 第三方工具 + 测试（ffmpeg / ffprobe / tests）
-├── subtitle_app/          # 源码包（含入口 subtitle_app.py）
-└── 启动字幕工具.bat       # 快速启动
+└── tools/                 # 第三方工具 + 测试（ffmpeg / ffprobe / tests）
 ```
 
 ## 测试
