@@ -24,21 +24,21 @@
 
 ### ① 语音识别模型（必需，约 1.6 GB）
 
-从以下地址下载整个 `faster-whisper-large-v3-turbo` 文件夹（包含 `model.bin`、`tokenizer.json`、`vocabulary.json`、`config.json` 等文件），放入项目根目录：
+从以下地址下载整个 `faster-whisper-large-v3-turbo` 文件夹（包含 `model.bin`、`tokenizer.json`、`vocabulary.json`、`config.json` 等文件），放入 `models/` 目录（即 `models/faster-whisper-large-v3-turbo/`）：
 
 https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary
 
 ### ② ffmpeg.exe / ffprobe.exe（必需）
 
-从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 版本（选择 **Windows → Windows Builds → ffmpeg-release-full** 或 **gyan.dev** 的完整构建），将解压后 `bin/` 目录下的 `ffmpeg.exe` 和 `ffprobe.exe` 放入项目根目录。**两个文件缺一不可**。
+从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 版本（选择 **Windows → Windows Builds → ffmpeg-release-full** 或 **gyan.dev** 的完整构建），将解压后 `bin/` 目录下的 `ffmpeg.exe` 和 `ffprobe.exe` 放入项目根目录下的 `tools/` 目录。**两个文件缺一不可**。
 
 ### ③ GPU 加速（可选，强烈推荐）
 
-默认 `pip install -r requirements.txt` 安装的是 CPU 版 torch，转写非常慢。如需 GPU 加速，请先运行以下命令安装 CUDA 版 torch，再安装其他依赖：
+默认 `pip install -r tools/requirements.txt` 安装的是 CPU 版 torch，转写非常慢。如需 GPU 加速，请先运行以下命令安装 CUDA 版 torch，再安装其他依赖：
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
+pip install -r tools/requirements.txt
 ```
 
 前提条件：NVIDIA 显卡 + [CUDA 12.x](https://developer.nvidia.com/cuda-downloads) + [cuDNN](https://developer.nvidia.com/cudnn)。
@@ -51,18 +51,18 @@ git clone https://github.com/Eric0610-2026/subtitle-tool.git
 cd subtitle-tool
 
 # 2. 安装依赖
-pip install -r requirements.txt
+pip install -r tools/requirements.txt
 
-# 3. 放置 ffmpeg.exe 和 ffprobe.exe（必需）到项目根目录
+# 3. 放置 ffmpeg.exe 和 ffprobe.exe（必需）到 tools/ 目录
 
-# 4. 下载模型到 faster-whisper-large-v3-turbo/ 目录
+# 4. 下载模型到 models/faster-whisper-large-v3-turbo/ 目录
 
 # 5. 配置 API
 copy subtitle_app\config.example.json subtitle_app\config.json
 # 编辑 config.json，填入 translation.api_key 和 translation.api_url
 
 # 6. 启动
-python subtitle_app.py
+python subtitle_app/subtitle_app.py
 ```
 
 或双击 `启动字幕工具.bat`（自动安装依赖 + 以 pythonw.exe 无控制台启动）。
@@ -73,7 +73,7 @@ python subtitle_app.py
 
 应用启动后会自动检测以下项目，缺少的项目会以黄色警告显示在日志区，ffmpeg/ffprobe 缺失还会弹出对话框：
 
-- ✅ ffmpeg.exe 是否存在
+- ✅ ffmpeg.exe 是否存在（项目根目录或 tools/ 目录）
 - ✅ 语音识别模型是否已下载
 - ✅ API 地址和密钥是否已配置
 
@@ -109,22 +109,25 @@ python subtitle_app.py
 │   ├── muxer.py           # MKV 软内嵌
 │   ├── dialogs.py         # 设置/历史对话框
 │   ├── config.py          # 配置加载
-│   └── config.example.json # 配置模板
-├── tests/                 # 单元测试
-├── subtitle_app.py        # 入口
+│   ├── config.example.json # 配置模板
+│   └── subtitle_app.py     # 入口
+├── cache/                 # 运行时缓存文件
+├── models/                # Whisper 语音模型
+├── tools/                 # 第三方工具 + 测试（ffmpeg / ffprobe / tests）
+├── subtitle_app/          # 源码包（含入口 subtitle_app.py）
 └── 启动字幕工具.bat       # 快速启动
 ```
 
 ## 测试
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tools/tests
 ```
 
 ## 注意事项
 
-- 模型需手动从 modelscope 下载（约 1.6 GB），放入项目根目录的 `faster-whisper-large-v3-turbo/`
-- 翻译缓存文件 `.subtitle_translation_cache.json` 超过 10000 条时会自动裁剪
+- 模型需手动从 modelscope 下载（约 1.6 GB），放入 `models/faster-whisper-large-v3-turbo/`
+- 翻译缓存文件 `cache/.subtitle_translation_cache.json` 超过 10000 条时会自动裁剪
 
 ## 技术栈
 

@@ -7,8 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-_APP_DIR = Path(__file__).resolve().parent
-_MARKER = _APP_DIR / ".deps_installed"
+_APP_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_APP_DIR))
+_MARKER = _APP_DIR / "cache" / ".deps_installed"
 
 
 def _msgbox(title, text):
@@ -20,15 +21,19 @@ def _msgbox(title, text):
 def _ensure_deps() -> bool:
     if _MARKER.exists():
         return True
-    req = _APP_DIR / "requirements.txt"
+    req = _APP_DIR / "tools" / "requirements.txt"
     if not req.exists():
         _msgbox("错误", f"未找到 {req}")
         return False
     python = sys.executable.replace("pythonw.exe", "python.exe")
-    proc = subprocess.run(
-        [python, "-m", "pip", "install", "-r", str(req), "-q"],
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pip", "install", "-r", str(req), "-q"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        _msgbox("依赖安装超时", "pip install 超过 5 分钟未完成，请检查网络连接")
+        return False
     if proc.returncode != 0:
         _msgbox("依赖安装失败", proc.stderr[:500])
         return False

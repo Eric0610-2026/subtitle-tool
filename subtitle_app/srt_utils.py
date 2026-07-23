@@ -28,7 +28,7 @@ INPUT_EXTS = VIDEO_EXTS | AUDIO_EXTS | SUB_EXTS
 MAX_FILENAME_STEM = cfg.srt.max_filename_stem
 
 _ABBREVIATIONS = set(cfg.srt.abbreviations)
-IGNORE_FILE = ".subtitle_ignore.json"
+IGNORE_FILE = "cache/.subtitle_ignore.json"
 
 # 扩充的繁简转换表（常用繁体字）
 _SIMPLE_T2S = {
@@ -155,6 +155,7 @@ def load_json(path: Path, default: Any = None) -> Any:
 def save_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             tmp.replace(path)
@@ -498,7 +499,11 @@ def has_chinese(text: str, source_lang: str = "") -> bool:
 # ── 文件工具 ──
 
 def find_tool(name: str, base_dir: Path) -> Optional[str]:
+    # 先在 base_dir 下查找，再在 base_dir/tools 下查找
     p = base_dir / name
+    if p.exists():
+        return str(p)
+    p = base_dir / "tools" / name
     return str(p) if p.exists() else None
 
 

@@ -1,8 +1,8 @@
  # 字幕生成与双语翻译工具 - Python 依赖
- # 安装: pip install -r requirements.txt
+ # 安装: pip install -r tools/requirements.txt
  # GPU 加速（需 CUDA 12.x + cuDNN）：
  #   pip install torch --index-url https://download.pytorch.org/whl/cu121
- #   然后再执行: pip install -r requirements.txt
+ #   然后再执行: pip install -r tools/requirements.txt
 
  torch>=2.0
  PySide6>=6.5

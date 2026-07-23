@@ -559,7 +559,12 @@ class LogPanel(QWidget):
 
     def trim_to(self, max_lines: int):
         while self.log_list.count() > max_lines:
-            self.log_list.takeItem(0)
+            item = self.log_list.takeItem(0)
+            if item:
+                widget = self.log_list.itemWidget(item)
+                if widget:
+                    widget.deleteLater()
+                del item
 
     def count(self) -> int:
         return self.log_list.count()

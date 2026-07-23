@@ -30,7 +30,16 @@ class Config:
         self._data = self._load()
 
     def _load(self) -> SimpleNamespace:
-        raw = json.loads(self._path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise RuntimeError(f"配置文件不存在: {self._path}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"配置文件 JSON 格式错误 ({self._path}): {e}")
+        except PermissionError as e:
+            raise RuntimeError(f"配置文件无权限读取 ({self._path}): {e}")
+        except OSError as e:
+            raise RuntimeError(f"配置文件读取失败 ({self._path}): {e}")
         return _dict_to_ns(raw)
 
     def reload(self) -> None:

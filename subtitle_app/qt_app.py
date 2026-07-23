@@ -517,10 +517,9 @@ class SubtitleApp(QMainWindow):
 
     def _scan_dir(self):
         is_video = self.tabs.currentIndex() == 0
-        path = self.video_dir.text() if is_video else self.work_dir
-        self._scan_path(path, is_video)
-        if not is_video and not self.video_dir.text():
-            self._scan_path(self.work_dir, False)
+        path = self.video_dir.text()
+        if path:
+            self._scan_path(path, is_video)
 
     def _remove_selected(self):
         is_video = self.tabs.currentIndex() == 0
@@ -903,9 +902,9 @@ class SubtitleApp(QMainWindow):
         if missing_essential:
             QMessageBox.warning(self, "缺少必需文件",
                 f"未找到 {', '.join(missing_essential)}，请放入项目根目录后重启应用。")
-        model_dir = APP_DIR / "faster-whisper-large-v3-turbo"
+        model_dir = APP_DIR / "models" / "faster-whisper-large-v3-turbo"
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
-            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 faster-whisper-large-v3-turbo/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
+            self._add_log_entry("未找到 faster-whisper 模型，请下载后放入 models/faster-whisper-large-v3-turbo/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
         s = self.settings_data
         if not s.get("api_url") or not s.get("api_key"):
             self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")

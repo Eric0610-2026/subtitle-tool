@@ -481,7 +481,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
 
 def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
     """显示翻译缓存弹窗，支持逐条删除和全部清空"""
-    path = Path(work_dir) / ".subtitle_translation_cache.json"
+    path = Path(work_dir) / "cache" / ".subtitle_translation_cache.json"
     cache = load_json(path, {})
     size = path.stat().st_size if path.exists() else 0
     dlg = QDialog(parent)

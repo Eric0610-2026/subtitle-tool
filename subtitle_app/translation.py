@@ -58,6 +58,32 @@ class ApiForbiddenError(RuntimeError):
     pass
 
 
+def _normalize_response(resp: dict) -> dict:
+    """标准化不同厂商 API 响应为 OpenAI 兼容格式。
+
+    处理两种常见兼容性问题：
+    1. 商汤等：choices/usage 包裹在 data 字段下（非标准 OpenAPI）
+    2. 商汤等：choices[i].message 是字符串而非 {"content": "..."}
+    """
+    resp = dict(resp)  # 不修改原始 dict
+    # 1) 当顶层无 choices 但 data 中有时，提升到顶层
+    if "choices" not in resp and "data" in resp and isinstance(resp["data"], dict):
+        data = resp["data"]
+        if "choices" in data:
+            resp["choices"] = data["choices"]
+        if "usage" in data and "usage" not in resp:
+            resp["usage"] = data["usage"]
+        if "id" in data and "id" not in resp:
+            resp["id"] = data["id"]
+    # 2) 标准化 choices[i].message 为对象格式
+    for choice in resp.get("choices", []):
+        if isinstance(choice, dict):
+            msg = choice.get("message")
+            if isinstance(msg, str):
+                choice["message"] = {"content": msg}
+    return resp
+
+
 # ── TranslationClient ──
 
 
@@ -79,6 +105,7 @@ class TranslationClient:
         self.post_ui = post_ui
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0,
                        "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
+        self._cache_lock = Lock()
 
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
@@ -111,14 +138,18 @@ class TranslationClient:
 
         # Step 2: 缓存命中 + 断点恢复
         sent_trans: Dict[int, str] = {}
+        # 构建原文映射（用于断点恢复时的内容校验）
+        sent_originals: Dict[str, str] = {str(gsid): sent for gsid, _, sent in flat}
         state: Dict = {}
         if state_path and state_path.exists():
             state = load_json(state_path, {})
             done = state.get("done", {})
+            saved_originals = state.get("originals", {})
             for entry in flat:
                 gsid = entry[0]
-                if str(gsid) in done:
-                    sent_trans[gsid] = done[str(gsid)]
+                gsid_str = str(gsid)
+                if gsid_str in done and saved_originals.get(gsid_str) == sent_originals.get(gsid_str):
+                    sent_trans[gsid] = done[gsid_str]
 
         to_translate: List[Tuple[int, str]] = []
         for gsid, bidx, sent in flat:
@@ -168,7 +199,6 @@ class TranslationClient:
         # Step 3: 批量翻译（多线程并发 API 调用）
         total_batches = (len(unique_texts) + self.batch_size - 1) // self.batch_size
         para_context: Dict[int, List[str]] = {}
-        _cache_lock = Lock()
 
         with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
             batch_futures: List[tuple] = []
@@ -214,7 +244,11 @@ class TranslationClient:
                 except RuntimeError:
                     self._save_cache()
                     if state_path:
-                        save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
+                        save_json(state_path, {
+                            "done": sent_trans,
+                            "originals": sent_originals,
+                            "updated_at": datetime.now().isoformat(),
+                        })
                     raise
                 for item in translations:
                     # 兼容混元：混元常把译文放 en 而非 zh 字段
@@ -225,7 +259,7 @@ class TranslationClient:
                     if 1 <= sid <= len(batch):
                         orig_text = batch[sid - 1]
                         key = sentence_cache_key(orig_text, self.model, True)
-                        with _cache_lock:
+                        with self._cache_lock:
                             self.cache[key] = zh_text
                         for gsid in t2g.get(orig_text, []):
                             sent_trans[gsid] = zh_text
@@ -242,7 +276,11 @@ class TranslationClient:
                                 para_context.setdefault(para, []).append(zh_text)
                                 para_context[para] = para_context[para][-CONTEXT_WINDOW:]
                 if state_path:
-                    save_json(state_path, {"done": sent_trans, "updated_at": datetime.now().isoformat()})
+                    save_json(state_path, {
+                        "done": sent_trans,
+                        "originals": sent_originals,
+                        "updated_at": datetime.now().isoformat(),
+                    })
 
         # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
         self.post_ui({
@@ -327,7 +365,8 @@ class TranslationClient:
         for attempt in range(1, API_RETRY_COUNT + 1):
             try:
                 with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    resp_json = json.loads(resp.read().decode("utf-8"))
+                    return _normalize_response(resp_json)
             except urllib.error.HTTPError as e:
                 if e.code == 403:
                     raise ApiForbiddenError("API 返回 403")
@@ -347,7 +386,9 @@ class TranslationClient:
                 delay = API_RETRY_BASE * (2 ** (attempt - 1))
                 logger.info("等待 %.1f 秒后重试...", delay)
                 time.sleep(delay)
-        raise last_err  # type: ignore[misc]
+        if last_err is None:
+            last_err = RuntimeError("API 请求失败（无具体错误）")
+        raise last_err
 
     def _curl_fallback(self, payload: dict, headers: dict) -> dict:
         curl = shutil.which("curl.exe") or shutil.which("curl")
@@ -364,7 +405,7 @@ class TranslationClient:
             result = subprocess_run_safe(cmd, timeout=API_TIMEOUT + 10)
             if result.returncode != 0:
                 raise RuntimeError(f"curl failed: {result.stderr[:200]}")
-            return json.loads(result.stdout)
+            return _normalize_response(json.loads(result.stdout))
         finally:
             try:
                 tmp_file.unlink(missing_ok=True)
@@ -447,13 +488,14 @@ class TranslationClient:
             self.post_ui({"type": "log", "message": line, "level": "INFO"})
 
     def _save_cache(self) -> None:
-        if len(self.cache) > MAX_CACHE_ENTRIES:
-            # FIFO 裁剪：移除最旧条目，保留最新的 MAX_CACHE_ENTRIES//2 条
-            excess = len(self.cache) - MAX_CACHE_ENTRIES // 2
-            keys_to_remove = list(self.cache.keys())[:excess]
-            for k in keys_to_remove:
-                del self.cache[k]
-        save_json(self.cache_path, self.cache)
+        with self._cache_lock:
+            if len(self.cache) > MAX_CACHE_ENTRIES:
+                # FIFO 裁剪：移除最旧条目，保留最新的 MAX_CACHE_ENTRIES//2 条
+                excess = len(self.cache) - MAX_CACHE_ENTRIES // 2
+                keys_to_remove = list(self.cache.keys())[:excess]
+                for k in keys_to_remove:
+                    del self.cache[k]
+            save_json(self.cache_path, self.cache)
 
     def get_cache_size(self) -> int:
         return len(self.cache)
@@ -501,31 +543,42 @@ def subprocess_run_safe(cmd: List[str], timeout: int) -> Any:
 
 # ── JSON 提取辅助 ──
 
-def _extract_json(text: str) -> Optional[dict]:
+def _extract_json(text: str) -> Optional[Any]:
+    """从文本中提取并解析 JSON（支持对象和数组）"""
     text = text.strip()
-    if text.startswith("{"):
-        # 尝试提取第一个完整的 JSON 对象（处理混元偶发的双 JSON 回显）
-        depth = 0
-        start = -1
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if start < 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    try:
-                        return json.loads(text[start:i+1])
-                    except json.JSONDecodeError:
-                        break
+    # 同时尝试解析 JSON 对象（{...}）和 JSON 数组（[...]）
+    for prefix, close in [("{", "}"), ("[", "]")]:
+        if text.startswith(prefix):
+            depth = 0
+            start = -1
+            for i, ch in enumerate(text):
+                if ch == prefix:
+                    if start < 0:
+                        start = i
+                    depth += 1
+                elif ch == close:
+                    depth -= 1
+                    if depth == 0 and start >= 0:
+                        try:
+                            return json.loads(text[start:i+1])
+                        except json.JSONDecodeError:
+                            break
+    # 尝试代码块中的 JSON
     m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
+    # 尝试正则提取对象
     m = re.search(r"(\{.*?\})", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 尝试正则提取数组
+    m = re.search(r"(\[.*?\])", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))

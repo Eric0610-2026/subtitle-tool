@@ -209,9 +209,13 @@ def _remux_ts_to_mkv(ffmpeg_bin: str, ts_path: Path, post: Callable,
 def _run_ffmpeg(cmd: list[str], post: Callable, timeout: int,
                 register_proc=None, unregister_proc=None):
     """执行 ffmpeg，返回 (proc, stdout, stderr) 或 None（超时/异常）"""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace",
-                            creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, ValueError) as e:
+        post({"type": "log", "message": f"启动 ffmpeg 失败: {e}", "level": "ERROR"})
+        return None
     if register_proc:
         register_proc(proc)
     try:
