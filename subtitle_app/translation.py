@@ -61,27 +61,69 @@ class ApiForbiddenError(RuntimeError):
 def _normalize_response(resp: dict) -> dict:
     """标准化不同厂商 API 响应为 OpenAI 兼容格式。
 
-    处理两种常见兼容性问题：
+    处理常见兼容性问题：
     1. 商汤等：choices/usage 包裹在 data 字段下（非标准 OpenAPI）
-    2. 商汤等：choices[i].message 是字符串而非 {"content": "..."}
+    2. 部分厂商 data 是列表直接包含 choices/结果
+    3. choices[i].message 是字符串而非 {"content": "..."}
     """
     resp = dict(resp)  # 不修改原始 dict
+
+    # 0) 检测顶层 error 字段并直接返回（让调用方提取错误消息）
+    if "error" in resp:
+        return resp
+
     # 1) 当顶层无 choices 但 data 中有时，提升到顶层
-    if "choices" not in resp and "data" in resp and isinstance(resp["data"], dict):
+    if "choices" not in resp and "data" in resp:
         data = resp["data"]
-        if "choices" in data:
-            resp["choices"] = data["choices"]
-        if "usage" in data and "usage" not in resp:
-            resp["usage"] = data["usage"]
-        if "id" in data and "id" not in resp:
-            resp["id"] = data["id"]
+        if isinstance(data, dict):
+            if "choices" in data:
+                resp["choices"] = data["choices"]
+            if "usage" in data and "usage" not in resp:
+                resp["usage"] = data["usage"]
+            if "id" in data and "id" not in resp:
+                resp["id"] = data["id"]
+        elif isinstance(data, list):
+            # 部分厂商 data 是列表：看列表元素是否包含 message/choices
+            if data and isinstance(data[0], dict):
+                first = data[0]
+                if "message" in first or "content" in first or "text" in first:
+                    # data 本身就是 choices 列表
+                    resp["choices"] = data
+                elif "choices" in first:
+                    resp["choices"] = first["choices"]
     # 2) 标准化 choices[i].message 为对象格式
     for choice in resp.get("choices", []):
         if isinstance(choice, dict):
             msg = choice.get("message")
             if isinstance(msg, str):
                 choice["message"] = {"content": msg}
+            # 部分厂商直接把内容放在 choice.text 而非 message.content
+            if "message" not in choice and "text" in choice:
+                choice["message"] = {"content": choice["text"]}
     return resp
+
+
+def _extract_error(resp: dict) -> str:
+    """从 API 响应中提取错误消息"""
+    # 标准 OpenAI 错误格式：{"error": {"message": "..."}}
+    err = resp.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message", "") or err.get("msg", "") or str(err)
+        if msg:
+            return msg
+    elif isinstance(err, str) and err:
+        return err
+    # 部分国产 API 用 code/message 表示错误
+    code = resp.get("code")
+    msg = resp.get("message", "") or resp.get("msg", "")
+    # code 为 0 或省略表示成功
+    if code is not None and code != 0 and code != "0" and msg:
+        return f"[{code}] {msg}"
+    # 部分 API 把错误放在 detail 字段
+    detail = resp.get("detail")
+    if isinstance(detail, str) and detail:
+        return detail
+    return ""
 
 
 # ── TranslationClient ──
@@ -322,12 +364,27 @@ class TranslationClient:
                 # 单句失败，尝试纯文本模式
                 logger.warning("单句翻译失败，尝试纯文本模式: %s", e)
                 return self._call_api_single_plain(texts[0])
-        usage = resp_data.get("usage", {})
-        self._usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-        self._usage["completion_tokens"] += usage.get("completion_tokens", 0)
-        self._usage["prompt_cache_hit_tokens"] += usage.get("prompt_cache_hit_tokens", 0)
-        self._usage["prompt_cache_miss_tokens"] += usage.get("prompt_cache_miss_tokens", 0)
-        return self._parse_translation_response(resp_data)
+
+        # 响应解析（独立 try，确保解析失败也触发递归拆分）
+        try:
+            usage = resp_data.get("usage", {})
+            self._usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            self._usage["completion_tokens"] += usage.get("completion_tokens", 0)
+            self._usage["prompt_cache_hit_tokens"] += usage.get("prompt_cache_hit_tokens", 0)
+            self._usage["prompt_cache_miss_tokens"] += usage.get("prompt_cache_miss_tokens", 0)
+            return self._parse_translation_response(resp_data)
+        except Exception as e:
+            logger.warning("翻译响应解析失败（深度 %d），拆分为小批次重试: %s", depth, e)
+            if len(texts) > 1 and depth < MAX_RECURSION_DEPTH:
+                mid = len(texts) // 2
+                return (self._translate_batch(texts[:mid], context, depth + 1) +
+                        self._translate_batch(texts[mid:], context, depth + 1))
+            elif depth >= MAX_RECURSION_DEPTH:
+                logger.error("翻译响应解析失败，超过递归深度限制 %d，返回原文", MAX_RECURSION_DEPTH)
+                return [{"id": i + 1, "zh": t} for i, t in enumerate(texts)]
+            else:
+                logger.warning("单句翻译响应解析失败，尝试纯文本模式: %s", e)
+                return self._call_api_single_plain(texts[0])
 
     def _call_api(self, payload: dict, headers: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")
@@ -339,8 +396,12 @@ class TranslationClient:
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     return _normalize_response(resp_json)
             except urllib.error.HTTPError as e:
-                if e.code == 403:
-                    raise ApiForbiddenError("API 返回 403")
+                if e.code in (401, 402, 403, 407):
+                    body = e.read().decode("utf-8", errors="replace")
+                    err_detail = body[:200]
+                    if e.code == 403:
+                        raise ApiForbiddenError(f"API 返回 403: {err_detail}")
+                    raise RuntimeError(f"API 认证错误 (HTTP {e.code}): {err_detail}")
                 body = e.read().decode("utf-8", errors="replace")
                 last_err = RuntimeError(f"HTTP {e.code}: {body[:200]}")
                 logger.warning("API HTTP 错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.code)
@@ -395,17 +456,35 @@ class TranslationClient:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         try:
             resp_data = self._call_api(payload, headers)
-            content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                return [{"id": 1, "zh": content.strip()}]
+            # 先检测 API 错误
+            error_msg = _extract_error(resp_data)
+            if error_msg:
+                logger.warning("纯文本翻译 API 返回错误: %s", error_msg)
+            else:
+                choices = resp_data.get("choices")
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    content = choices[0].get("message", {}).get("content", "")
+                    if content:
+                        return [{"id": 1, "zh": content.strip()}]
         except Exception as e:
             logger.warning("纯文本单句翻译也失败: %s，返回原文", e)
         return [{"id": 1, "zh": text}]
 
     def _parse_translation_response(self, resp_data: dict) -> List[Dict]:
         items = None
+
+        # 先检测 API 错误响应
+        error_msg = _extract_error(resp_data)
+        if error_msg:
+            logger.error("API 返回错误: %s", error_msg)
+            raise RuntimeError(f"翻译 API 返回错误: {error_msg}")
+
         try:
-            content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            choices = resp_data.get("choices")
+            if choices and isinstance(choices, list) and len(choices) > 0:
+                content = choices[0].get("message", {}).get("content", "")
+            else:
+                content = ""
             if content:
                 parsed = _extract_json(content)
                 if parsed:
@@ -416,7 +495,7 @@ class TranslationClient:
         except Exception as e:
             logger.warning("解析翻译响应内容失败: %s", e)
         if items is None:
-            items = resp_data.get("items") or resp_data.get("translations") or resp_data.get("result")
+            items = resp_data.get("items") or resp_data.get("translations") or resp_data.get("result") or resp_data.get("data")
         if isinstance(items, list):
             if items and isinstance(items[0], str):
                 return [{"id": i + 1, "zh": t} for i, t in enumerate(items)]
@@ -428,7 +507,8 @@ class TranslationClient:
                     result.append({"id": id_val, "zh": zh_val})
                 return result
         if items is None:
-            logger.error("无法解析翻译响应: %s", json.dumps(resp_data, ensure_ascii=False)[:300])
+            logger.error("无法解析翻译响应: %s",
+                         json.dumps(resp_data, ensure_ascii=False, indent=2)[:1000])
             raise RuntimeError("无法解析翻译响应（请检查 API Key 和模型名称）")
         return items if isinstance(items, list) else []
 
@@ -496,8 +576,20 @@ def _extract_json(text: str) -> Optional[Any]:
         if text.startswith(prefix):
             depth = 0
             start = -1
-            for i, ch in enumerate(text):
-                if ch == prefix:
+            i = 0
+            while i < len(text):
+                ch = text[i]
+                # 跳过字符串字面量（避免括号嵌套在字符串中干扰计数）
+                if ch == '"':
+                    i += 1
+                    while i < len(text):
+                        if text[i] == '\\':
+                            i += 2  # 跳过转义字符
+                            continue
+                        if text[i] == '"':
+                            break
+                        i += 1
+                elif ch == prefix:
                     if start < 0:
                         start = i
                     depth += 1
@@ -508,6 +600,7 @@ def _extract_json(text: str) -> Optional[Any]:
                             return json.loads(text[start:i+1])
                         except json.JSONDecodeError:
                             break
+                i += 1
     # 尝试代码块中的 JSON
     m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if m:
