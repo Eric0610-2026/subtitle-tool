@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .config import cfg
 from .srt_utils import (
     make_post_mapper, safe_stem, fmt_duration, seconds_to_srt_time,
-    SubtitleBlock, sanitize_blocks, parse_srt,
+    SubtitleBlock, sanitize_blocks, parse_srt, split_sentences,
 )
 
 logger = logging.getLogger(__name__)
@@ -403,8 +403,14 @@ class Transcriber:
                     seg_end = seg.end + resume_offset
                     gap = seg_start - prev_end
                     if gap > cfg.whisper.silence_gap_seconds and blocks:
+                        # 延长前一块字幕到下一段开始前 0.3 秒，
+                        # 但限制延长不超过 silence_gap_seconds，防止长静音造出超长字幕
+                        new_end = seg_start - 0.3
+                        max_end = blocks[-1].end + cfg.whisper.silence_gap_seconds
+                        if new_end > max_end:
+                            new_end = max_end
                         blocks[-1] = SubtitleBlock(blocks[-1].index, blocks[-1].start,
-                                                   seg_start - 0.3, blocks[-1].text)
+                                                   new_end, blocks[-1].text)
                     blocks.append(SubtitleBlock(len(blocks) + 1, seg_start, seg_end, seg.text.strip()))
                     prev_end = seg_end
                     pct_inner = (seg_end / duration) * 100 if duration > 0 else 0
@@ -423,8 +429,16 @@ class Transcriber:
                         except OSError as e:
                             logger.warning("断点写入失败: %s", e)
                 sanitize_blocks(blocks)
+                blocks = split_long_blocks(blocks)
                 Transcriber._write_partial_srt(source_srt, blocks)
-                t_post({"type": "preview", "message": "\n".join(srt_lines)})
+                # 构建 SRT 完整预览
+                preview_lines = []
+                for b in blocks:
+                    preview_lines.append(str(b.index))
+                    preview_lines.append(b.timing)
+                    preview_lines.append(b.text)
+                    preview_lines.append("")
+                t_post({"type": "preview", "message": "\n".join(preview_lines)})
                 # ── 转写完成，清理断点文件 ──
                 if checkpoint_enabled and partial_srt and partial_srt.exists():
                     try:
@@ -503,3 +517,69 @@ class Transcriber:
             if proc is not None and self._unregister_proc:
                 self._unregister_proc(proc)
         return 0.0
+
+
+# ── 后处理：拆分超长字幕块 ──
+
+MAX_BLOCK_DURATION = 15.0  # 单条字幕最大时长（秒）
+
+
+def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLOCK_DURATION) -> List[SubtitleBlock]:
+    """将时长超过 max_duration 的块按句子切分为多条。
+
+    句子长度占比决定时间分配，确保每条 >= 0.5s。
+    """
+    result: List[SubtitleBlock] = []
+    for block in blocks:
+        dur = block.end - block.start
+        if dur <= max_duration:
+            result.append(block)
+            continue
+        sents = split_sentences(block.text)
+        if len(sents) <= 1:
+            # 无法按句子切分，按 max_duration 等长强制定长切分，
+            # 防止单条字幕时长过长
+            n = max(2, int((dur + max_duration - 0.001) // max_duration))
+            chunk_dur = dur / n
+            cur_start = block.start
+            text = block.text
+            total_chars = max(len(text), 1)
+            chars_per_chunk = total_chars // n
+            allocated = []
+            for i in range(n):
+                chunk_end = cur_start + chunk_dur
+                if i == n - 1:
+                    chunk_end = block.end
+                    chunk_text = text[i * chars_per_chunk:]
+                else:
+                    chunk_text = text[i * chars_per_chunk:(i + 1) * chars_per_chunk]
+                allocated.append(SubtitleBlock(len(result) + len(allocated) + 1,
+                                               cur_start, chunk_end, chunk_text.strip()))
+                cur_start = chunk_end
+            result.extend(allocated)
+            continue
+        # 按字符长度比例分配时间
+        char_lens = [max(len(s), 1) for s in sents]
+        total_chars = sum(char_lens)
+        allocated = []
+        cur_start = block.start
+        for i, sent in enumerate(sents):
+            share = char_lens[i] / total_chars
+            raw_end = cur_start + dur * share
+            # 确保每条至少有 0.5s
+            seg_dur = max(raw_end - cur_start, 0.5)
+            seg_end = cur_start + seg_dur
+            if i == len(sents) - 1:
+                seg_end = block.end  # 最后一段用原始结束时间保证对齐
+            allocated.append(SubtitleBlock(len(result) + len(allocated) + 1,
+                                           cur_start, seg_end, sent.strip()))
+            cur_start = seg_end
+        # 如果切片后总时长不足，拉伸最后一段
+        if allocated and allocated[-1].end < block.end:
+            allocated[-1] = SubtitleBlock(allocated[-1].index, allocated[-1].start,
+                                          block.end, allocated[-1].text)
+        result.extend(allocated)
+    # 重编号
+    for i, b in enumerate(result):
+        b.index = i + 1
+    return result
