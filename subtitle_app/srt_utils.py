@@ -93,12 +93,15 @@ _JAPANESE_SPECIFIC_KANJI = {
 def seconds_to_srt_time(sec: float) -> str:
     if sec is None or sec < 0:
         return "00:00:00,000"
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = int(sec % 60)
-    ms = int(round((sec - int(sec)) * 1000))
-    if ms >= 1000:
-        ms = 999
+    total_ms = int(round(sec * 1000))
+    h = total_ms // 3600000
+    total_ms %= 3600000
+    m = total_ms // 60000
+    total_ms %= 60000
+    s = total_ms // 1000
+    ms = total_ms % 1000
+    # ms 理论上绝不会超出 0-999，钳位仅作防御
+    ms = 999 if ms > 999 else (0 if ms < 0 else ms)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -217,9 +220,14 @@ def sanitize_blocks(blocks: List[SubtitleBlock],
                      min_duration: float = 0.5) -> List[SubtitleBlock]:
     """就地修正字幕块时间戳，保证：start>=0、时间单调不回退、end>start 且至少 min_duration。
 
+    同时过滤掉空文本的 block，并重编号。
     这能避免转写结果中偶发的 end<=start / 时间回退导致 SRT 非法、进而 ffmpeg 内嵌失败。"""
     prev_end = 0.0
+    result: List[SubtitleBlock] = []
     for b in blocks:
+        text = b.text.strip()
+        if not text:
+            continue  # 跳过空文本
         start = max(0.0, b.start)
         if start < prev_end:
             start = prev_end
@@ -228,18 +236,22 @@ def sanitize_blocks(blocks: List[SubtitleBlock],
             end = start + min_duration
         if end < prev_end:
             end = prev_end + 0.01
-        b.start, b.end = start, end
+        result.append(SubtitleBlock(len(result) + 1, start, end, text))
         prev_end = end
+    blocks.clear()
+    blocks.extend(result)
     return blocks
 
 
 def write_srt(path: Path, blocks: List[SubtitleBlock], texts: List[str]) -> None:
     lines = []
-    for i, (block, text) in enumerate(zip(blocks, texts), 1):
+    idx = 0
+    for block, text in zip(blocks, texts):
         text = text.strip()
         if not text:
-            text = " "
-        lines.append(str(i))
+            continue  # 跳过空文本条目
+        idx += 1
+        lines.append(str(idx))
         lines.append(block.timing)
         lines.append(text)
         lines.append("")
