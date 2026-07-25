@@ -180,7 +180,7 @@ class SubtitleApp(QMainWindow):
         def _make_list(is_video: bool):
             w = DropListWidget(is_video_tab=is_video)
             w.itemClicked.connect(lambda item: self._load_preview(item, is_video))
-            w.dropped.connect(lambda paths, is_v: self._add_paths(paths, is_v))
+            w.dropped.connect(lambda paths, is_v: self._add_paths(paths, is_v, check_done=False))
             w.reordered.connect(lambda: self._sync_jobs_from_list(is_video))
             w.setContextMenuPolicy(Qt.CustomContextMenu)
             w.customContextMenuRequested.connect(
@@ -393,7 +393,7 @@ class SubtitleApp(QMainWindow):
             self, "选择文件", self.video_dir.text(),
             f"媒体文件 ({ext_str})")
         if files:
-            self._add_paths([Path(f) for f in files], is_video)
+            self._add_paths([Path(f) for f in files], is_video, check_done=False)
 
     def _add_folder(self, is_video: bool):
         d = QFileDialog.getExistingDirectory(self, "选择文件夹", self.video_dir.text())
@@ -403,7 +403,7 @@ class SubtitleApp(QMainWindow):
             for f in sorted(Path(d).iterdir()):
                 if f.suffix.lower() in exts:
                     paths.append(f)
-            self._add_paths(paths, is_video)
+            self._add_paths(paths, is_video, check_done=False)
             self._add_log_entry(f"已扫描文件夹：{d}")
 
     def _load_done_set(self):
@@ -477,12 +477,12 @@ class SubtitleApp(QMainWindow):
             item.setForeground(QColor())
             item.setFont(font)
 
-    def _add_paths(self, paths: List[Path], is_video: bool):
+    def _add_paths(self, paths: List[Path], is_video: bool, check_done: bool = True):
         lb = self.video_list if is_video else self.sub_list
         jobs = self.video_jobs if is_video else self.subtitle_jobs
         exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
         existing = {str(p.resolve()) for p in jobs}
-        done, done_stems = self._load_done_set()
+        done, done_stems = self._load_done_set() if check_done else (set(), set())
         added = 0
         skipped = 0
         for p in paths:
@@ -491,7 +491,7 @@ class SubtitleApp(QMainWindow):
             resolved = str(p.resolve())
             if resolved in existing:
                 continue
-            if resolved in done or p.stem in done_stems or str(p) in done:
+            if check_done and (resolved in done or p.stem in done_stems or str(p) in done):
                 skipped += 1
                 continue
             jobs.append(p)
@@ -613,7 +613,7 @@ class SubtitleApp(QMainWindow):
 
     def _on_preview_file_dropped(self, path: str):
         """拖入字幕到预览区时，同时加入已有字幕翻译列表"""
-        self._add_paths([Path(path)], is_video=False)
+        self._add_paths([Path(path)], is_video=False, check_done=False)
         self.tabs.setCurrentIndex(1)
         resolved = str(Path(path).resolve())
         for i in range(self.sub_list.count()):

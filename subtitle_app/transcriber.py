@@ -398,6 +398,10 @@ class Transcriber:
                             except OSError as e:
                                 logger.warning("停止时断点写入失败: %s", e)
                         raise RuntimeError("用户停止")
+                    # ── 跳过空文本的 segment（Whisper 在长静音段偶发输出空 seg）──
+                    text = seg.text.strip()
+                    if not text:
+                        continue
                     # ── 偏移时间戳 ──
                     seg_start = seg.start + resume_offset
                     seg_end = seg.end + resume_offset
@@ -411,7 +415,7 @@ class Transcriber:
                             new_end = max_end
                         blocks[-1] = SubtitleBlock(blocks[-1].index, blocks[-1].start,
                                                    new_end, blocks[-1].text)
-                    blocks.append(SubtitleBlock(len(blocks) + 1, seg_start, seg_end, seg.text.strip()))
+                    blocks.append(SubtitleBlock(len(blocks) + 1, seg_start, seg_end, text))
                     prev_end = seg_end
                     pct_inner = (seg_end / duration) * 100 if duration > 0 else 0
                     seg_time_str = seconds_to_srt_time(seg_start).split(",")[0]
@@ -480,13 +484,18 @@ class Transcriber:
 
     @staticmethod
     def _write_partial_srt(path: Path, blocks: List[SubtitleBlock]) -> None:
-        """原子写入部分 SRT 文件（用于断点续转）"""
+        """原子写入部分 SRT 文件（用于断点续转），自动过滤空文本条目并重编号"""
         tmp = path.with_suffix(path.suffix + ".tmp")
         lines = []
+        idx = 0
         for b in blocks:
-            lines.append(str(b.index))
+            text = b.text.strip()
+            if not text:
+                continue
+            idx += 1
+            lines.append(str(idx))
             lines.append(b.timing)
-            lines.append(b.text)
+            lines.append(text)
             lines.append("")
         tmp.write_text("\n".join(lines), encoding="utf-8")
         try:

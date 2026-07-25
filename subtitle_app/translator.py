@@ -5,7 +5,6 @@
 （注意：翻译客户端本身位于 translation.py，本模块仅负责 worker 侧流程编排）
 """
 import logging
-import os
 import shutil
 import threading
 from datetime import datetime
@@ -14,7 +13,7 @@ from typing import Callable, Optional
 
 from .config import cfg
 from .srt_utils import (
-    safe_stem, parse_srt, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
+    safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
     load_json, save_json, IGNORE_FILE,
 )
 from .translation import TranslationClient
@@ -63,6 +62,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     post({"type": "log", "message": f"解析字幕: {source_srt.name}", "level": "INFO"})
     blocks = parse_srt(source_srt)
+    sanitize_blocks(blocks)  # 过滤空文本条目
     post({"type": "counter", "generated": idx, "translated": 0, "total": total})
 
     if is_stopped and is_stopped():
@@ -151,12 +151,46 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         final_texts = [block.text for block in blocks]
         preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts, 1)]
         post({"type": "preview", "message": "\n".join(preview_lines)})
+        # 即使不翻译，也生成临时字幕文件用于嵌入 MKV
+        post({"type": "log", "message": "AI 翻译已关闭，使用原文字幕嵌入", "level": "INFO"})
+        translated_srt = source_srt.with_name(f"{safe_stem(item.name)}.translated.tmp.srt")
+        write_srt(translated_srt, blocks, final_texts)
 
     if is_stopped and is_stopped():
         return
 
     item_stem = safe_stem(item.name)
     is_video = item.suffix.lower() in set(cfg.srt.video_exts)
+
+    # ── 将原文字幕统一备份到 srt_backup 文件夹 ──
+    if source_srt and source_srt.exists():
+        backup_dir = output_dir / "srt_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        bak_dest = backup_dir / source_srt.name
+        if bak_dest.exists():
+            stem = source_srt.stem
+            suffix = source_srt.suffix
+            bak_dest = backup_dir / f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+        try:
+            shutil.copy2(str(source_srt), str(bak_dest))
+            post({"type": "log", "message": f"原文字幕已备份至 srt_backup/{bak_dest.name}", "level": "INFO"})
+        except OSError as e:
+            logger.warning("备份原文字幕失败: %s", e)
+
+    # ── 将翻译后的字幕也统一备份到 srt_backup 文件夹 ──
+    if translated_srt and translated_srt.exists():
+        backup_dir = output_dir / "srt_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        # 用有意义的文件名区分原文和译文：视频名.translated.srt
+        bak_name = f"{item_stem}.translated.srt"
+        bak_dest = backup_dir / bak_name
+        if bak_dest.exists():
+            bak_dest = backup_dir / f"{item_stem}.translated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
+        try:
+            shutil.copy2(str(translated_srt), str(bak_dest))
+            post({"type": "log", "message": f"翻译字幕已备份至 srt_backup/{bak_dest.name}", "level": "INFO"})
+        except OSError as e:
+            logger.warning("备份翻译字幕失败: %s", e)
 
     # ── 嵌入前暂停，供用户预览/编辑 ──
     pause_resp: Optional[PauseResponse] = None
@@ -237,16 +271,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             out_dir.mkdir(parents=True, exist_ok=True)
         final_srt = out_dir / f"{item_stem}.srt"
 
-        if source_srt and source_srt.exists() and source_srt.resolve() != final_srt.resolve():
-            bak_name = f"{item_stem}_bak.srt"
-            bak_path = out_dir / bak_name
-            if bak_path.exists():
-                bak_path = out_dir / f"{item_stem}_bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
-            try:
-                os.rename(str(source_srt), str(bak_path))
-                post({"type": "log", "message": f"原文已备份为: {bak_path.name}", "level": "INFO"})
-            except OSError as e:
-                logger.warning("备份原文字幕失败: %s", e)
 
         if translated_srt and translated_srt.exists():
             shutil.copy2(str(translated_srt), str(final_srt))
