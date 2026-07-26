@@ -145,8 +145,6 @@ class TranslationClient:
         self.cache: Dict[str, str] = load_json(cache_path, {})
         self.cache_path = cache_path
         self.post_ui = post_ui
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0,
-                       "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
         self._cache_lock = Lock()
 
 
@@ -178,11 +176,10 @@ class TranslationClient:
         if not flat:
             return [block.text for block in blocks]
 
-        # Step 2: 缓存命中 + 断点恢复
+        # Step 2: 缓存命中 + 断点恢复（空串不算已完成，避免永久漏翻）
         sent_trans: Dict[int, str] = {}
         # 构建原文映射（用于断点恢复时的内容校验）
         sent_originals: Dict[str, str] = {str(gsid): sent for gsid, _, sent in flat}
-        state: Dict = {}
         if state_path and state_path.exists():
             state = load_json(state_path, {})
             done = state.get("done", {})
@@ -190,17 +187,27 @@ class TranslationClient:
             for entry in flat:
                 gsid = entry[0]
                 gsid_str = str(gsid)
-                if gsid_str in done and saved_originals.get(gsid_str) == sent_originals.get(gsid_str):
-                    sent_trans[gsid] = done[gsid_str]
+                zh_done = done.get(gsid_str, "")
+                if (
+                    isinstance(zh_done, str)
+                    and zh_done.strip()
+                    and saved_originals.get(gsid_str) == sent_originals.get(gsid_str)
+                ):
+                    sent_trans[gsid] = zh_done.strip()
 
         to_translate: List[Tuple[int, str]] = []
         for gsid, bidx, sent in flat:
-            if gsid in sent_trans:
+            if gsid in sent_trans and str(sent_trans[gsid]).strip():
                 continue
             key = sentence_cache_key(sent, self.model, True)
-            if key in self.cache:
-                sent_trans[gsid] = self.cache[key]
+            cached = self.cache.get(key)
+            if isinstance(cached, str) and cached.strip():
+                sent_trans[gsid] = cached.strip()
             else:
+                # 空缓存 / 无效缓存：重新翻译
+                if key in self.cache and not (isinstance(cached, str) and cached.strip()):
+                    with self._cache_lock:
+                        self.cache.pop(key, None)
                 sent_trans[gsid] = ""
                 to_translate.append((gsid, sent))
 
@@ -268,39 +275,24 @@ class TranslationClient:
                     self._save_cache()
                     if state_path:
                         save_json(state_path, {
-                            "done": sent_trans,
+                            "done": _nonempty_done(sent_trans),
                             "originals": sent_originals,
                             "updated_at": datetime.now().isoformat(),
                         })
                     raise
-                for item in translations:
-                    # 兼容混元：混元常把译文放 en 而非 zh 字段
-                    if not item.get("zh") and item.get("en"):
-                        item["zh"] = item["en"]
-                    sid = item.get("id", 0)
-                    zh_text = item.get("zh", "")
-                    if 1 <= sid <= len(batch):
-                        orig_text = batch[sid - 1]
-                        key = sentence_cache_key(orig_text, self.model, True)
-                        with self._cache_lock:
-                            self.cache[key] = zh_text
-                        for gsid in t2g.get(orig_text, []):
-                            sent_trans[gsid] = zh_text
-                for item in translations:
-                    zh_text = item.get("zh", "")
+                applied = _apply_batch_translations(
+                    batch, translations, t2g, sent_trans, self.cache, self._cache_lock, self.model)
+                for orig_text, zh_text in applied:
                     if not zh_text:
                         continue
-                    sid = item.get("id", 0)
-                    if 1 <= sid <= len(batch):
-                        orig_text = batch[sid - 1]
-                        for gsid in t2g.get(orig_text, []):
-                            if gsid < len(gsid_to_para):
-                                para = gsid_to_para[gsid]
-                                para_context.setdefault(para, []).append(zh_text)
-                                para_context[para] = para_context[para][-CONTEXT_WINDOW:]
+                    for gsid in t2g.get(orig_text, []):
+                        if gsid < len(gsid_to_para):
+                            para = gsid_to_para[gsid]
+                            para_context.setdefault(para, []).append(zh_text)
+                            para_context[para] = para_context[para][-CONTEXT_WINDOW:]
                 if state_path:
                     save_json(state_path, {
-                        "done": sent_trans,
+                        "done": _nonempty_done(sent_trans),
                         "originals": sent_originals,
                         "updated_at": datetime.now().isoformat(),
                     })
@@ -313,6 +305,69 @@ class TranslationClient:
                     "total": len(blocks), "cache": len(self.cache),
                 })
 
+        # Step 3b: 漏译句子单条补翻（空 zh / 未回填）
+        missing = [(gsid, sent) for gsid, bidx, sent in flat
+                   if not str(sent_trans.get(gsid, "")).strip()]
+        if missing:
+            self.post_ui({
+                "type": "log",
+                "message": f"检测到 {len(missing)} 句未译成功，开始单条补翻…",
+                "level": "WARNING",
+            })
+            # 按原文去重后逐条补
+            miss_map: Dict[str, List[int]] = {}
+            for gsid, sent in missing:
+                miss_map.setdefault(sent, []).append(gsid)
+            for i, (orig, gsids) in enumerate(miss_map.items(), 1):
+                try:
+                    items = self._translate_batch([orig], "", 0)
+                    zh = ""
+                    if items:
+                        it = items[0]
+                        if not it.get("zh") and it.get("en"):
+                            it["zh"] = it["en"]
+                        zh = str(it.get("zh") or "").strip()
+                    if not zh:
+                        # 最后兜底：纯文本单句
+                        plain = self._call_api_single_plain(orig)
+                        if plain:
+                            zh = str(plain[0].get("zh") or "").strip()
+                    if zh and zh != orig:
+                        key = sentence_cache_key(orig, self.model, True)
+                        with self._cache_lock:
+                            self.cache[key] = zh
+                        for gsid in gsids:
+                            sent_trans[gsid] = zh
+                    elif zh:
+                        # 与原文相同也写入，避免反复补翻同一句；双语组装层会处理
+                        for gsid in gsids:
+                            sent_trans[gsid] = zh
+                    else:
+                        logger.warning("单条补翻仍无结果: %r", orig[:80])
+                except Exception as e:
+                    logger.warning("单条补翻失败 %r: %s", orig[:80], e)
+                if i % 10 == 0 or i == len(miss_map):
+                    self.post_ui({
+                        "type": "progress",
+                        "percent": 95 + 5 * (i / max(len(miss_map), 1)),
+                        "stage": "翻译",
+                        "detail": f"补翻进度 {i}/{len(miss_map)}",
+                        "total": len(blocks), "cache": len(self.cache),
+                    })
+            if state_path:
+                save_json(state_path, {
+                    "done": _nonempty_done(sent_trans),
+                    "originals": sent_originals,
+                    "updated_at": datetime.now().isoformat(),
+                })
+            still = sum(1 for gsid, _, _ in flat if not str(sent_trans.get(gsid, "")).strip())
+            if still:
+                self.post_ui({
+                    "type": "log",
+                    "message": f"补翻后仍有 {still} 句无译文（将尽量用已有部分组装）",
+                    "level": "WARNING",
+                })
+
         # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
         self.post_ui({
             "type": "progress", "percent": 100,
@@ -320,12 +375,11 @@ class TranslationClient:
             "total": len(blocks), "cache": len(self.cache),
         })
 
-        # 拼回块
+        # 拼回块（允许部分句成功时仍输出已有译文，不再整块丢弃）
         result_texts = _reassemble_blocks(blocks, flat, sent_trans)
 
-        # 后台 I/O（保存缓存、报告费用，用户已看到 100%）
+        # 后台 I/O（保存缓存，用户已看到 100%）
         self._save_cache()
-        self._report_cost()
         return result_texts
 
     def _translate_batch(self, texts: List[str], context: str = "", depth: int = 0) -> List[Dict]:
@@ -367,11 +421,6 @@ class TranslationClient:
 
         # 响应解析（独立 try，确保解析失败也触发递归拆分）
         try:
-            usage = resp_data.get("usage", {})
-            self._usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            self._usage["completion_tokens"] += usage.get("completion_tokens", 0)
-            self._usage["prompt_cache_hit_tokens"] += usage.get("prompt_cache_hit_tokens", 0)
-            self._usage["prompt_cache_miss_tokens"] += usage.get("prompt_cache_miss_tokens", 0)
             return self._parse_translation_response(resp_data)
         except Exception as e:
             logger.warning("翻译响应解析失败（深度 %d），拆分为小批次重试: %s", depth, e)
@@ -512,24 +561,6 @@ class TranslationClient:
             raise RuntimeError("无法解析翻译响应（请检查 API Key 和模型名称）")
         return items if isinstance(items, list) else []
 
-    def _report_cost(self) -> None:
-        """报告本次翻译的 token 消耗和费用估算"""
-        u = self._usage
-        total_in = u["prompt_tokens"]
-        total_out = u["completion_tokens"]
-        if total_in == 0 and total_out == 0:
-            self.post_ui({"type": "log", "message": "本次翻译全部命中缓存，未产生 API 费用", "level": "INFO"})
-            return
-        info = _calc_cost_info(u)
-        lines = [
-            f"翻译 Token 消耗: 输入 {total_in:,} (缓存命中 {info['cache_hit_tokens']:,}/{info['cache_miss_tokens']:,}, "
-            f"{info['cache_hit_tokens'] / total_in * 100:.1f}%), 输出 {total_out:,}",
-            f"估算费用: ¥{sum(info[k] for k in ('input_cost','cache_cost','output_cost')):.4f} "
-            f"(输入 ¥{info['input_cost']:.4f} + 缓存 ¥{info['cache_cost']:.4f} + 输出 ¥{info['output_cost']:.4f})",
-        ]
-        for line in lines:
-            self.post_ui({"type": "log", "message": line, "level": "INFO"})
-
     def _save_cache(self) -> None:
         with self._cache_lock:
             if len(self.cache) > MAX_CACHE_ENTRIES:
@@ -542,9 +573,6 @@ class TranslationClient:
 
     def get_cache_size(self) -> int:
         return len(self.cache)
-
-    def get_cost_info(self) -> dict:
-        return _calc_cost_info(self._usage)
 
 
 # ── 安全的 subprocess.run 包装 ──
@@ -642,38 +670,115 @@ def _compose_sentences(sentences: List[str]) -> str:
     return "".join(parts)
 
 
+def _nonempty_done(sent_trans: Dict[int, str]) -> Dict[str, str]:
+    """断点 state 只持久化非空译文，避免空串污染后续续翻。"""
+    return {
+        str(k): v.strip()
+        for k, v in sent_trans.items()
+        if isinstance(v, str) and v.strip()
+    }
+
+
+def _apply_batch_translations(
+    batch: List[str],
+    translations: List[Dict],
+    t2g: Dict[str, List[int]],
+    sent_trans: Dict[int, str],
+    cache: dict,
+    cache_lock: Lock,
+    model: str,
+) -> List[Tuple[str, str]]:
+    """把一批 API 结果写回 sent_trans / cache。
+
+    优先用 id 对齐；若 id 缺失或错乱，按返回顺序对齐 batch。
+    空译文不写缓存、不覆盖已有非空结果。返回成功应用的 (原文, 译文) 列表。
+    """
+    applied: List[Tuple[str, str]] = []
+    if not translations:
+        return applied
+
+    # 规范化字段
+    norm: List[Dict] = []
+    for item in translations:
+        if not isinstance(item, dict):
+            continue
+        it = dict(item)
+        if not it.get("zh") and it.get("en"):
+            it["zh"] = it["en"]
+        if not it.get("zh") and it.get("text"):
+            it["zh"] = it["text"]
+        if not it.get("zh") and it.get("translation"):
+            it["zh"] = it["translation"]
+        norm.append(it)
+
+    # id → 原文
+    by_id: Dict[int, str] = {}
+    for it in norm:
+        sid = it.get("id", 0)
+        try:
+            sid = int(sid)
+        except (TypeError, ValueError):
+            continue
+        zh = str(it.get("zh") or "").strip()
+        if 1 <= sid <= len(batch) and zh:
+            by_id[sid] = zh
+
+    # 顺序回退：当 id 覆盖不足时，按列表顺序补齐
+    ordered_zh: List[str] = []
+    for it in norm:
+        ordered_zh.append(str(it.get("zh") or "").strip())
+
+    for i, orig_text in enumerate(batch):
+        zh = by_id.get(i + 1, "")
+        if not zh and i < len(ordered_zh):
+            zh = ordered_zh[i]
+        if not zh:
+            continue
+        key = sentence_cache_key(orig_text, model, True)
+        with cache_lock:
+            cache[key] = zh
+        for gsid in t2g.get(orig_text, []):
+            # 不覆盖已有更好结果
+            if not str(sent_trans.get(gsid, "")).strip():
+                sent_trans[gsid] = zh
+            elif sent_trans.get(gsid) == orig_text and zh != orig_text:
+                sent_trans[gsid] = zh
+        applied.append((orig_text, zh))
+    return applied
+
+
 def _reassemble_blocks(blocks: List[SubtitleBlock], flat: List[Tuple[int, int, str]],
                        sent_trans: Dict[int, str]) -> List[str]:
-    """将句子级翻译结果拼回字幕块级"""
+    """将句子级翻译结果拼回字幕块级。
+
+    规则：
+    - 全部句有非空译文 → 拼合译文
+    - 部分句有译文 → 有译用译、无译保留该句原文再拼合（不再整块丢弃）
+    - 全部无译文 → 回退整块原文
+    """
     gsid_to_bidx: Dict[int, List[int]] = {}
-    for gsid, bidx, _sent in flat:
+    gsid_to_orig: Dict[int, str] = {}
+    for gsid, bidx, sent in flat:
         gsid_to_bidx.setdefault(bidx, []).append(gsid)
+        gsid_to_orig[gsid] = sent
     result: List[str] = []
     for bidx, block in enumerate(blocks):
         sids = gsid_to_bidx.get(bidx, [])
-        translated = [sent_trans[s] for s in sids if sent_trans.get(s)]
-        if translated and len(translated) == len(sids):
-            result.append(_compose_sentences(translated))
+        if not sids:
+            result.append(block.text)
+            continue
+        pieces: List[str] = []
+        any_zh = False
+        for s in sids:
+            zh = str(sent_trans.get(s, "") or "").strip()
+            if zh:
+                pieces.append(zh)
+                if zh != gsid_to_orig.get(s, ""):
+                    any_zh = True
+            else:
+                pieces.append(gsid_to_orig.get(s, ""))
+        if any_zh or (pieces and all(str(sent_trans.get(s, "")).strip() for s in sids)):
+            result.append(_compose_sentences(pieces))
         else:
             result.append(block.text)
     return result
-
-
-def _calc_cost_info(usage: Dict[str, int]) -> dict:
-    """计算费用信息（公用方法，供 _report_cost 和 get_cost_info 使用）"""
-    cache_miss = usage.get("prompt_cache_miss_tokens", 0)
-    cache_hit = usage.get("prompt_cache_hit_tokens", 0)
-    total_out = usage.get("completion_tokens", 0)
-    input_cost = (cache_miss / 1000) * cfg.pricing.input_per_1k
-    cache_cost = (cache_hit / 1000) * cfg.pricing.cache_hit_per_1k
-    output_cost = (total_out / 1000) * cfg.pricing.output_per_1k
-    return {
-        "prompt_tokens": usage.get("prompt_tokens", 0),
-        "completion_tokens": total_out,
-        "cache_hit_tokens": cache_hit,
-        "cache_miss_tokens": cache_miss,
-        "input_cost": round(input_cost, 6),
-        "cache_cost": round(cache_cost, 6),
-        "output_cost": round(output_cost, 6),
-        "total_cost": round(input_cost + cache_cost + output_cost, 6),
-    }

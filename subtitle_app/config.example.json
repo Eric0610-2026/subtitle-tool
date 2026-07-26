@@ -98,12 +98,6 @@
     "transcribe_weight": 80
   },
 
-  "pricing": {
-    "input_per_1k": 0.00014,
-    "cache_hit_per_1k": 0.00007,
-    "output_per_1k": 0.00028
-  },
-
   "theme": {
     "light": {
       "bg": "#f4f5f7", "card": "#ffffff", "header": "#1a1a2e",

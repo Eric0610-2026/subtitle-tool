@@ -160,12 +160,16 @@ class ProgressPanel(QGroupBox):
         self.detail_label.setText(text)
 
     def set_sub_progress(self, stage: str, pct: float, detail: str = ""):
-        if stage in ("提取音频", "加载模型", "读取字幕", "转写中"):
-            self.transcribe_bar.setValue(int(pct))
-            self.transcribe_bar.setFormat(f"{int(pct)}%")
+        if stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成"):
+            bar_pct = 100 if stage == "转写完成" else int(pct)
+            self.transcribe_bar.setValue(bar_pct)
+            self.transcribe_bar.setFormat(f"{bar_pct}%")
             if detail:
                 self.transcribe_detail.setText(detail)
         elif stage == "翻译":
+            if self.transcribe_bar.value() < 100:
+                self.transcribe_bar.setValue(100)
+                self.transcribe_bar.setFormat("100%")
             self.translate_bar.setValue(int(pct))
             self.translate_bar.setFormat(f"{int(pct)}%")
             if detail:
