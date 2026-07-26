@@ -27,6 +27,7 @@ from .srt_utils import (
     load_json, save_json, estimate_eta,
     seconds_to_srt_time, srt_time_to_seconds, parse_srt,
     OverallProgress, find_tool, IGNORE_FILE,
+    analyze_subtitle_file, format_quality_report,
 )
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog
@@ -64,6 +65,7 @@ class SubtitleApp(QMainWindow):
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
         self._stats: Dict[str, any] = {}  # 处理统计
+        self._quality_reports: List[dict] = []  # 本轮字幕质量报告
         self._overall = None  # 跨文件总进度跟踪
         self._settings_path = Path.home() / ".subtitle_tool_settings.json"
 
@@ -733,6 +735,8 @@ class SubtitleApp(QMainWindow):
         self._start_time = time.time()
         self._stats = {"files": len(jobs), "cache_hits": 0, "translated_segments": 0,
                        "transcribed_segments": 0, "start": self._start_time}
+        self._quality_reports = []
+        self._output_paths = []
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._reset_progress()
@@ -946,20 +950,28 @@ class SubtitleApp(QMainWindow):
         pct = e.get("percent", 0)
         stage = e.get("stage", "")
         detail = e.get("detail", "")
-        if stage in ("提取音频", "加载模型", "读取字幕", "转写中"):
-            p.transcribe_bar.setValue(int(pct))
-            p.transcribe_bar.setFormat(f"{int(pct)}%")
-            p.transcribe_detail.setText(detail)
+        # 转写相关 stage：含「转写完成」（旧逻辑只认「转写中」，完成事件 percent=100 被丢弃，
+        # 条会停在最后一段 seg_end/duration，并行流水线里翻译已开始时更明显）
+        if stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成"):
+            bar_pct = 100 if stage == "转写完成" else int(pct)
+            p.transcribe_bar.setValue(bar_pct)
+            p.transcribe_bar.setFormat(f"{bar_pct}%")
+            if detail:
+                p.transcribe_detail.setText(detail)
         elif stage == "翻译":
+            # 进入翻译说明当前文件转写已结束；若条未满则补到 100%
+            if p.transcribe_bar.value() < 100:
+                p.transcribe_bar.setValue(100)
+                p.transcribe_bar.setFormat("100%")
             p.translate_bar.setValue(int(pct))
             p.translate_bar.setFormat(f"{int(pct)}%")
             p.translate_detail.setText(detail)
-        elif stage == "组织输出":
+        elif stage in ("组织输出", "完成", "跳过"):
             p.transcribe_bar.setValue(100)
             p.transcribe_bar.setFormat("100%")
             p.translate_bar.setValue(100)
             p.translate_bar.setFormat("100%")
-        _has_detail_above = stage in ("提取音频", "加载模型", "读取字幕", "转写中", "翻译")
+        _has_detail_above = stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成", "翻译")
         if _has_detail_above:
             pass
         elif detail and self._start_time and pct:
@@ -998,7 +1010,12 @@ class SubtitleApp(QMainWindow):
         elapsed = time.time() - self._start_time if self._start_time else 0
         stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
-        self._notify("字幕工具", f"{msg}\n{stats_msg}")
+        quality_summary = self._summarize_quality_reports()
+        notify_body = f"{msg}\n{stats_msg}"
+        if quality_summary:
+            self._add_log_entry(quality_summary, "WARNING" if "雷" in quality_summary else "INFO")
+            notify_body = f"{notify_body}\n{quality_summary}"
+        self._notify("字幕工具", notify_body)
 
     def _handle_error(self, e):
         msg = e.get("message", "错误")
@@ -1026,6 +1043,7 @@ class SubtitleApp(QMainWindow):
                 f"缓存 {e.get('cache',0)}"),
             "language": lambda e: self.progress_panel.lang_label.setText(f"语言：{e.get('message','')}"),
             "output_path": self._handle_output_path,
+            "quality_report": self._handle_quality_report,
             "pause_before_embed": self._handle_pause_before_embed,
             "preview": lambda e: self.preview_panel.set_text(e.get("message", "")),
             "preview_clear": lambda e: self.preview_panel.clear(),
@@ -1041,7 +1059,56 @@ class SubtitleApp(QMainWindow):
         p = Path(e.get("path", ""))
         self._output_paths.append(str(p))
         self._last_output_dir = p.parent
-        self._check_subtitle_quality(p)
+        # MKV 内嵌路径不跑 SRT 检查；SRT 输出若流水线未发 quality_report 则兜底检查
+        if p.suffix.lower() == ".srt":
+            already = any(
+                (r.get("path") and Path(r["path"]).resolve() == p.resolve())
+                or (r.get("name") == p.name)
+                for r in self._quality_reports
+            )
+            if not already:
+                self._check_subtitle_quality(p)
+
+    def _handle_quality_report(self, e):
+        """收集 worker 推送的结构化质量报告，供完成摘要使用。"""
+        report = {
+            "path": e.get("path", ""),
+            "name": e.get("name", ""),
+            "total_cues": e.get("total_cues", 0),
+            "total_issues": e.get("total_issues", 0),
+            "counts": dict(e.get("counts") or {}),
+            "samples": list(e.get("samples") or []),
+        }
+        if e.get("backup_path"):
+            report["backup_path"] = e["backup_path"]
+        self._quality_reports.append(report)
+
+    def _summarize_quality_reports(self) -> str:
+        """本轮质量汇总：计数 + 是否有雷（样例已在单文件日志里）。"""
+        reports = self._quality_reports
+        if not reports:
+            return ""
+        files_with_issues = [r for r in reports if int(r.get("total_issues") or 0) > 0]
+        total_issues = sum(int(r.get("total_issues") or 0) for r in reports)
+        if not files_with_issues:
+            return f"字幕质量：全部通过（{len(reports)} 个文件）"
+        # 汇总各类计数
+        merged = {"empty": 0, "too_short": 0, "too_long": 0, "overlap": 0, "gap": 0}
+        for r in files_with_issues:
+            for k in merged:
+                merged[k] += int((r.get("counts") or {}).get(k) or 0)
+        labels = {
+            "empty": "空字幕", "too_short": "过短", "too_long": "过长",
+            "overlap": "重叠", "gap": "间隙过长",
+        }
+        parts = [f"{labels[k]} {n}" for k, n in merged.items() if n]
+        backup_hint = ""
+        if any(r.get("backup_path") for r in files_with_issues):
+            backup_hint = "；SRT 备份见 srt_backup/"
+        return (
+            f"字幕质量：{len(files_with_issues)}/{len(reports)} 个文件有雷，"
+            f"共 {total_issues} 处（" + "，".join(parts) + f"）{backup_hint}"
+        )
 
     def _handle_pause_before_embed(self, e):
         """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕"""
@@ -1113,36 +1180,15 @@ class SubtitleApp(QMainWindow):
         p.detail_label.setText(" | ".join(parts))
 
     def _check_subtitle_quality(self, path: Path):
-        """检查字幕质量问题"""
-        if not path.suffix == ".srt" or not path.exists():
+        """检查字幕质量问题（兜底路径：仅当 worker 未推送 quality_report 时）"""
+        if path.suffix.lower() != ".srt" or not path.exists():
             return
-        try:
-            blocks = parse_srt(path)
-        except Exception as e:
-            logger.debug("字幕质量检查解析失败 %s: %s", path.name, e)
+        report = analyze_subtitle_file(path)
+        if report is None:
             return
-        issues = []
-        for i, b in enumerate(blocks):
-            dur = b.end - b.start
-            if dur < 0.3 and b.text.strip():
-                issues.append(f"  #{b.index} 时长过短 ({dur:.1f}s): {b.text[:40]}")
-            if dur > 15:
-                issues.append(f"  #{b.index} 时长过长 ({dur:.1f}s): {b.text[:40]}")
-            if i > 0:
-                prev_end = blocks[i - 1].end
-                if b.start < prev_end:
-                    issues.append(f"  #{blocks[i-1].index}->#{b.index} 时间重叠 ({prev_end:.1f}s->{b.start:.1f}s)")
-                gap = b.start - prev_end
-                if gap > 10:
-                    issues.append(f"  #{blocks[i-1].index}->#{b.index} 间隙过长 ({gap:.1f}s)")
-        if issues:
-            self._add_log_entry(f"⚠ 字幕质量提醒 ({path.name}):")
-            for issue in issues[:10]:
-                self._add_log_entry(issue)
-            if len(issues) > 10:
-                self._add_log_entry(f"  ... 共 {len(issues)} 个问题")
-        else:
-            self._add_log_entry(f"✓ 字幕质量检查通过: {path.name}")
+        self._quality_reports.append(report)
+        for line in format_quality_report(report):
+            self._add_log_entry(line, "WARNING" if report.get("total_issues") else "INFO")
 
     def _open_output_dir(self):
         """打开输出目录——优先使用 worker 回传的精确路径"""

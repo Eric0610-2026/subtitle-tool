@@ -11,6 +11,7 @@ from subtitle_app.srt_utils import (
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
     load_json, save_json, fmt_job_display, find_existing_subtitle,
     match_video_for_subtitle, VIDEO_EXTS, SUB_EXTS,
+    analyze_subtitle_quality, analyze_subtitle_file, format_quality_report,
 )
 
 
@@ -154,6 +155,59 @@ class TestFindSubtitle(unittest.TestCase):
             sub = d / "movie.srt"
             sub.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
             self.assertEqual(match_video_for_subtitle(sub, d), vid)
+
+
+class TestAnalyzeSubtitleQuality(unittest.TestCase):
+    """质量报告：计数 + 样例，覆盖空条/过长/间隙等硬伤"""
+
+    def test_clean_blocks_zero_issues(self):
+        blocks = [
+            SubtitleBlock(1, 0.0, 2.0, "Hello"),
+            SubtitleBlock(2, 2.5, 4.0, "World"),
+        ]
+        report = analyze_subtitle_quality(blocks)
+        self.assertEqual(report["total_issues"], 0)
+        self.assertEqual(report["total_cues"], 2)
+        self.assertTrue(all(v == 0 for v in report["counts"].values()))
+        lines = format_quality_report(report)
+        self.assertTrue(any("通过" in ln for ln in lines))
+
+    def test_detects_empty_long_gap_overlap(self):
+        blocks = [
+            SubtitleBlock(1, 0.0, 20.0, "long cue"),          # too_long
+            SubtitleBlock(2, 20.0, 21.0, "   "),              # empty
+            SubtitleBlock(3, 40.0, 41.0, "after gap"),        # gap > 10
+            SubtitleBlock(4, 40.5, 41.5, "overlap"),          # overlap with #3
+            SubtitleBlock(5, 42.0, 42.1, "tiny"),             # too_short
+        ]
+        report = analyze_subtitle_quality(blocks, sample_limit=10)
+        c = report["counts"]
+        self.assertGreaterEqual(c["too_long"], 1)
+        self.assertGreaterEqual(c["empty"], 1)
+        self.assertGreaterEqual(c["gap"], 1)
+        self.assertGreaterEqual(c["overlap"], 1)
+        self.assertGreaterEqual(c["too_short"], 1)
+        self.assertGreater(report["total_issues"], 0)
+        self.assertTrue(report["samples"])
+        lines = format_quality_report(report)
+        self.assertTrue(any("质量提醒" in ln for ln in lines))
+
+    def test_analyze_subtitle_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "q.srt"
+            # 人工写入含空文本的块：parse 后 text 为空字符串
+            p.write_text(
+                "1\n00:00:00,000 --> 00:00:20,000\nlong text here\n\n"
+                "2\n00:00:40,000 --> 00:00:41,000\n\n",
+                encoding="utf-8",
+            )
+            report = analyze_subtitle_file(p)
+            self.assertIsNotNone(report)
+            self.assertEqual(report["name"], "q.srt")
+            self.assertGreaterEqual(report["counts"]["too_long"], 1)
+            # 第 2 条 content 为空 → empty
+            self.assertGreaterEqual(report["counts"]["empty"], 1)
+            self.assertGreaterEqual(report["counts"]["gap"], 1)
 
 
 if __name__ == "__main__":

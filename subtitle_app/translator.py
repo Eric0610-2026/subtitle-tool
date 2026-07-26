@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
-    load_json, save_json, IGNORE_FILE,
+    load_json, save_json, IGNORE_FILE, analyze_subtitle_file, format_quality_report,
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
@@ -69,7 +69,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         return
 
     translated_srt: Optional[Path] = None
-    cost_info: dict = {}
     if translate_enabled and api_url and api_key:
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
@@ -102,7 +101,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
                                                      is_bilingual, state_path,
                                                      translation_concurrency=trans_concurrency)
-                cost_info = client.get_cost_info()
                 zh_texts = [""] * len(blocks)
                 for j, i in enumerate(need_translate_idx):
                     zh_texts[i] = need_texts[j]
@@ -119,11 +117,28 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             final_texts = zh_texts
         elif not is_chinese_source:
             final_texts = []
+            missing_zh = 0
             for block, zh in zip(blocks, zh_texts):
-                if zh.strip() and zh.strip() != block.text.strip():
-                    final_texts.append(f"{block.text}\n{zh}")
+                z = (zh or "").strip()
+                src = block.text.strip()
+                if z and z != src:
+                    # 正常双语
+                    final_texts.append(f"{block.text}\n{z}")
+                elif z and z == src:
+                    # 译文与原文相同（极短语气词等）——仍写两行，避免看起来像「没翻」
+                    final_texts.append(f"{block.text}\n{z}")
+                elif z:
+                    final_texts.append(f"{block.text}\n{z}")
                 else:
+                    # 仍无译文：保留原文，并计数
+                    missing_zh += 1
                     final_texts.append(block.text)
+            if missing_zh:
+                post({
+                    "type": "log",
+                    "message": f"⚠ 仍有 {missing_zh}/{len(blocks)} 条字幕无有效译文（已保留原文）",
+                    "level": "WARNING",
+                })
         else:
             final_texts = zh_texts
 
@@ -178,6 +193,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             logger.warning("备份原文字幕失败: %s", e)
 
     # ── 将翻译后的字幕也统一备份到 srt_backup 文件夹 ──
+    # 策略：始终保留 srt_backup 中的副本；工作区临时 SRT 仍可按原规则清理
+    translated_backup_path: Optional[Path] = None
     if translated_srt and translated_srt.exists():
         backup_dir = output_dir / "srt_backup"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -188,9 +205,26 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             bak_dest = backup_dir / f"{item_stem}.translated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
         try:
             shutil.copy2(str(translated_srt), str(bak_dest))
+            translated_backup_path = bak_dest
             post({"type": "log", "message": f"翻译字幕已备份至 srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)
+
+    # ── 嵌入前质量检查（计数+样例；不阻断自动嵌入）──
+    srt_for_quality = None
+    if translated_srt and translated_srt.exists():
+        srt_for_quality = translated_srt
+    elif source_srt and source_srt.exists():
+        srt_for_quality = source_srt
+    if srt_for_quality is not None:
+        report = analyze_subtitle_file(srt_for_quality)
+        if report is not None:
+            if translated_backup_path is not None:
+                report["backup_path"] = str(translated_backup_path.resolve())
+            post({"type": "quality_report", **report})
+            for line in format_quality_report(report):
+                level = "WARNING" if report.get("total_issues") else "INFO"
+                post({"type": "log", "message": line, "level": level})
 
     # ── 嵌入前暂停，供用户预览/编辑 ──
     pause_resp: Optional[PauseResponse] = None
@@ -289,9 +323,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     abs_path = str(item.resolve())
     if abs_path not in done_list:
         done_list.append(abs_path)
-    if cost_info:
-        file_cost = progress_data.setdefault("file_cost", {})
-        file_cost[abs_path] = cost_info
+    # 清理历史里遗留的费用字段（功能已移除）
+    progress_data.pop("file_cost", None)
     save_json(progress_file, progress_data)
     post({"type": "language", "message": f"语言：{language}"})
 

@@ -354,7 +354,6 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
     data = load_json(path, {})
     done = data.get("done", [])
     ignored = data.get("ignored", [])
-    file_cost = data.get("file_cost", {})
     if not done and not ignored:
         box = QMessageBox(parent)
         box.setWindowTitle("处理历史")
@@ -385,13 +384,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
             p = entry.get("path", "")
         else:
             p = entry
-        ci = file_cost.get(p, {})
-        total = ci.get("total_cost", 0)
-        if total:
-            display = f"¥{total:.4f}  {Path(p).name}"
-        else:
-            display = Path(p).name
-        item = QListWidgetItem(display)
+        item = QListWidgetItem(Path(p).name)
         item.setData(Qt.UserRole, p)
         done_list.addItem(item)
     done_layout.addWidget(done_list, 1)
@@ -446,11 +439,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
             p = item.data(Qt.UserRole) or item.text()
             remaining.append(p)
         data["done"] = remaining
-        costs = data.get("file_cost", {})
-        remaining_set = set(remaining)
-        for k in list(costs.keys()):
-            if k not in remaining_set:
-                del costs[k]
+        data.pop("file_cost", None)
         save_json(path, data)
         tabs.setTabText(0, f"已完成 ({len(remaining)})")
         dlg.setWindowTitle(f"处理历史 ({len(remaining)} 已完成, {len(ignored)} 已忽略)")

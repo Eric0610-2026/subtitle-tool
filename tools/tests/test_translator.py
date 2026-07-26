@@ -185,7 +185,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             else:
                 # 返回翻译文本
                 client.translate_blocks.return_value = [f"{b.text}（中文）" for b in blocks]
-            client.get_cost_info.return_value = {"input_tokens": 10, "cost": 0.001}
             client.get_cache_size.return_value = 5
             return client
 
@@ -250,7 +249,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         with patch("subtitle_app.translator.TranslationClient") as MockClient:
             client = MagicMock()
             client.translate_blocks.return_value = ["Hello"]
-            client.get_cost_info.return_value = {}
             client.get_cache_size.return_value = 0
             MockClient.return_value = client
 
@@ -308,7 +306,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         with patch("subtitle_app.translator.TranslationClient") as MockClient:
             client = MagicMock()
             client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
-            client.get_cost_info.return_value = {}
             client.get_cache_size.return_value = 0
             MockClient.return_value = client
 

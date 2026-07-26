@@ -159,6 +159,62 @@ class TestRecursionProtection(unittest.TestCase):
             mock.assert_not_called()
             self.assertEqual(res2, ["你好世界"])
 
+    def test_empty_cache_does_not_skip_translate(self):
+        """缓存里的空串不应阻止重新翻译"""
+        from subtitle_app.srt_utils import sentence_cache_key
+        with tempfile.TemporaryDirectory() as d:
+            c = TranslationClient("url", "key", "m",
+                                  Path(d) / "cache.json", lambda *a: None, batch_size=10)
+            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
+            key = sentence_cache_key("Hello", c.model, True)
+            c.cache[key] = ""
+            c._translate_batch = lambda texts, context="", depth=0: [
+                {"id": 1, "zh": "你好"}]
+            res = c.translate_blocks(blocks, "en", is_bilingual=True)
+            self.assertEqual(res, ["你好"])
+
+    def test_empty_state_done_retried(self):
+        """断点 state 中的空 done 应被忽略并重新翻译"""
+        with tempfile.TemporaryDirectory() as d:
+            c = TranslationClient("url", "key", "m",
+                                  Path(d) / "cache.json", lambda *a: None, batch_size=10)
+            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
+            state = Path(d) / "t.translate_state.json"
+            state.write_text(
+                '{"done":{"0":""},"originals":{"0":"Hello"}}',
+                encoding="utf-8",
+            )
+            c._translate_batch = lambda texts, context="", depth=0: [
+                {"id": 1, "zh": "你好"}]
+            res = c.translate_blocks(blocks, "en", is_bilingual=True, state_path=state)
+            self.assertEqual(res, ["你好"])
+
+    def test_partial_batch_missing_id_order_fallback(self):
+        """API 漏 id 时按顺序回填，不整块丢弃"""
+        with tempfile.TemporaryDirectory() as d:
+            c = TranslationClient("url", "key", "m",
+                                  Path(d) / "cache.json", lambda *a: None, batch_size=10)
+            blocks = [
+                SubtitleBlock(index=1, start=0, end=1, text="Hello"),
+                SubtitleBlock(index=2, start=1, end=2, text="World"),
+            ]
+            # 无 id，仅按顺序返回
+            c._translate_batch = lambda texts, context="", depth=0: [
+                {"zh": f"译{t}"} for t in texts]
+            res = c.translate_blocks(blocks, "en", is_bilingual=True)
+            self.assertEqual(res, ["译Hello", "译World"])
+
+    def test_reassemble_partial_sentences(self):
+        """多句块中部分成功时，应拼合「译文+未译原文」而非整块回退"""
+        from subtitle_app.translation import _reassemble_blocks
+        blocks = [SubtitleBlock(1, 0, 2, "Hello. World.")]
+        flat = [(0, 0, "Hello."), (1, 0, "World.")]
+        sent_trans = {0: "你好。", 1: ""}  # 第二句未译
+        out = _reassemble_blocks(blocks, flat, sent_trans)
+        self.assertEqual(len(out), 1)
+        self.assertIn("你好。", out[0])
+        self.assertIn("World.", out[0])
+
 
 class TestSentenceSplitting(unittest.TestCase):
     """句子拆分扩展测试"""
