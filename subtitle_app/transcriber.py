@@ -434,10 +434,14 @@ class Transcriber:
                             logger.warning("断点写入失败: %s", e)
                 sanitize_blocks(blocks)
                 blocks = split_long_blocks(blocks)
+                # split 可能在强制切分路径上再生空块，再净化一次
+                sanitize_blocks(blocks)
                 Transcriber._write_partial_srt(source_srt, blocks)
-                # 构建 SRT 完整预览
+                # 构建 SRT 完整预览（跳过空文本，避免预览/保存出现空时间轴）
                 preview_lines = []
                 for b in blocks:
+                    if not b.text.strip():
+                        continue
                     preview_lines.append(str(b.index))
                     preview_lines.append(b.timing)
                     preview_lines.append(b.text)
@@ -537,34 +541,60 @@ def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLO
     """将时长超过 max_duration 的块按句子切分为多条。
 
     句子长度占比决定时间分配，确保每条 >= 0.5s。
+    强制切分时保证每段都有非空文本，避免产出只有时间轴的空字幕。
     """
     result: List[SubtitleBlock] = []
     for block in blocks:
+        text = block.text.strip()
+        if not text:
+            continue
         dur = block.end - block.start
         if dur <= max_duration:
-            result.append(block)
+            if text != block.text:
+                result.append(SubtitleBlock(block.index, block.start, block.end, text))
+            else:
+                result.append(block)
             continue
-        sents = split_sentences(block.text)
+        sents = [s.strip() for s in split_sentences(text) if s and s.strip()]
         if len(sents) <= 1:
-            # 无法按句子切分，按 max_duration 等长强制定长切分，
-            # 防止单条字幕时长过长
+            # 无法按句子切分：按字符均分到不超过 n 段，且段数不超过字符数，
+            # 杜绝 chars_per_chunk==0 时产生空 text 的 15s 占位条。
             n = max(2, int((dur + max_duration - 0.001) // max_duration))
-            chunk_dur = dur / n
-            cur_start = block.start
-            text = block.text
-            total_chars = max(len(text), 1)
-            chars_per_chunk = total_chars // n
+            n = min(n, len(text))
+            if n <= 1:
+                # 文本太短无法再切：保留原文，但把显示时长压到 max_duration
+                result.append(SubtitleBlock(
+                    len(result) + 1, block.start,
+                    min(block.end, block.start + max_duration), text))
+                continue
             allocated = []
+            cur_start = block.start
+            # 每段目标时长不超过 max_duration，且总覆盖不超过原 end
+            chunk_dur = min(max_duration, dur / n)
             for i in range(n):
-                chunk_end = cur_start + chunk_dur
+                # 整数边界切分，保证每段至少 1 个字符
+                a = i * len(text) // n
+                b = (i + 1) * len(text) // n
+                chunk_text = text[a:b].strip()
+                if not chunk_text:
+                    continue
+                chunk_end = min(block.end, cur_start + chunk_dur)
                 if i == n - 1:
-                    chunk_end = block.end
-                    chunk_text = text[i * chars_per_chunk:]
+                    # 最后一段可收到原 end，但仍限制不超过 max_duration
+                    chunk_end = min(block.end, max(chunk_end, cur_start + 0.5))
+                    if chunk_end - cur_start > max_duration:
+                        chunk_end = cur_start + max_duration
                 else:
-                    chunk_text = text[i * chars_per_chunk:(i + 1) * chars_per_chunk]
+                    chunk_end = max(chunk_end, cur_start + 0.5)
+                    if chunk_end > block.end:
+                        chunk_end = block.end
+                if chunk_end <= cur_start:
+                    chunk_end = min(block.end, cur_start + 0.5)
                 allocated.append(SubtitleBlock(len(result) + len(allocated) + 1,
-                                               cur_start, chunk_end, chunk_text.strip()))
+                                               cur_start, chunk_end, chunk_text))
                 cur_start = chunk_end
+                if cur_start >= block.end:
+                    break
             result.extend(allocated)
             continue
         # 按字符长度比例分配时间
@@ -573,6 +603,9 @@ def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLO
         allocated = []
         cur_start = block.start
         for i, sent in enumerate(sents):
+            sent = sent.strip()
+            if not sent:
+                continue
             share = char_lens[i] / total_chars
             raw_end = cur_start + dur * share
             # 确保每条至少有 0.5s
@@ -581,7 +614,7 @@ def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLO
             if i == len(sents) - 1:
                 seg_end = block.end  # 最后一段用原始结束时间保证对齐
             allocated.append(SubtitleBlock(len(result) + len(allocated) + 1,
-                                           cur_start, seg_end, sent.strip()))
+                                           cur_start, seg_end, sent))
             cur_start = seg_end
         # 如果切片后总时长不足，拉伸最后一段
         if allocated and allocated[-1].end < block.end:

@@ -249,7 +249,9 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
     6. 时长验证并返回可信度
     """
     if not video_path.exists() or not srt_path.exists():
-        return None
+        # 与其它失败路径一致，返回二元组，避免调用方
+        # `mkv_path, mkv_trusted = embed_subtitles_to_video(...)` 解包 TypeError
+        return None, False
 
     sanitized = None
     remux_temp = None
