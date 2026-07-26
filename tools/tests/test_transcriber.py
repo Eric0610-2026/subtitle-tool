@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock, call
 
-from subtitle_app.transcriber import Transcriber, _MODEL_SPEED, _model_speed_lock, _model_load_lock
+from subtitle_app.transcriber import (
+    Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
+    _MODEL_SPEED, _model_speed_lock, _model_load_lock,
+)
+from subtitle_app.srt_utils import SubtitleBlock
 
 
 class TestTranscriberInit(unittest.TestCase):
@@ -133,7 +137,6 @@ class TestWritePartialSrt(unittest.TestCase):
 
     def test_writes_atomically(self):
         with tempfile.TemporaryDirectory() as d:
-            from subtitle_app.srt_utils import SubtitleBlock
             blocks = [
                 SubtitleBlock(1, 0.0, 1.0, "Hello"),
                 SubtitleBlock(2, 1.0, 2.0, "World"),
@@ -145,6 +148,58 @@ class TestWritePartialSrt(unittest.TestCase):
             self.assertIn("Hello", content)
             self.assertIn("World", content)
             self.assertIn("00:00:00,000 --> 00:00:01,000", content)
+
+    def test_skips_empty_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            blocks = [
+                SubtitleBlock(1, 0.0, 1.0, "Hello"),
+                SubtitleBlock(2, 1.0, 16.0, "   "),
+                SubtitleBlock(3, 16.0, 17.0, "World"),
+            ]
+            path = Path(d) / "test.partial.srt"
+            Transcriber._write_partial_srt(path, blocks)
+            content = path.read_text(encoding="utf-8")
+            self.assertEqual(content.count("-->"), 2)
+            self.assertIn("Hello", content)
+            self.assertIn("World", content)
+            # 序号应重编号为 1、2，中间空文本条目被丢掉
+            self.assertIn("1\n", content)
+            self.assertIn("2\n", content)
+
+
+class TestSplitLongBlocks(unittest.TestCase):
+    """split_long_blocks 不应产出空文本时间轴"""
+
+    def test_short_text_long_duration_no_empty_cues(self):
+        # 旧逻辑：1 字符 + ~45s → 连续两条 ~15s 空 cue + 一条有字
+        blocks = [SubtitleBlock(1, 6000.293, 6045.154, "x")]
+        out = split_long_blocks(blocks)
+        self.assertTrue(out)
+        self.assertTrue(all(b.text.strip() for b in out))
+        self.assertTrue(all(b.end - b.start <= MAX_BLOCK_DURATION + 1e-6 for b in out))
+
+    def test_two_char_forced_split_has_text_each(self):
+        blocks = [SubtitleBlock(1, 100.0, 145.0, "Hi")]
+        out = split_long_blocks(blocks)
+        self.assertEqual(len(out), 2)
+        self.assertEqual("".join(b.text for b in out), "Hi")
+        self.assertTrue(all(b.text.strip() for b in out))
+
+    def test_empty_input_dropped(self):
+        blocks = [
+            SubtitleBlock(1, 0.0, 30.0, "   "),
+            SubtitleBlock(2, 30.0, 35.0, "ok"),
+        ]
+        out = split_long_blocks(blocks)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].text, "ok")
+        self.assertEqual(out[0].index, 1)
+
+    def test_sentence_split_keeps_text(self):
+        blocks = [SubtitleBlock(1, 0.0, 30.0, "Hello world. How are you? I am fine.")]
+        out = split_long_blocks(blocks)
+        self.assertGreaterEqual(len(out), 2)
+        self.assertTrue(all(b.text.strip() for b in out))
 
 
 class TestModelSpeedLock(unittest.TestCase):

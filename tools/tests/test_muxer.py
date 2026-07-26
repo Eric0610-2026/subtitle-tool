@@ -276,5 +276,35 @@ class TestLogFfmpegError(unittest.TestCase):
         self.assertIn("无错误输出", posts[1]["message"])
 
 
+class TestEmbedSubtitlesMissingFiles(unittest.TestCase):
+    """embed_subtitles_to_video 缺文件时必须返回 (None, False)，避免解包崩溃"""
+
+    def test_missing_video_returns_tuple(self):
+        from subtitle_app.muxer import embed_subtitles_to_video
+        with tempfile.TemporaryDirectory() as d:
+            srt = Path(d) / "a.srt"
+            srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
+            video = Path(d) / "missing.mp4"
+            posts = []
+            result = embed_subtitles_to_video(video, srt, "ffmpeg.exe", posts.append)
+            self.assertIsInstance(result, tuple)
+            self.assertEqual(len(result), 2)
+            mkv_path, trusted = result
+            self.assertIsNone(mkv_path)
+            self.assertFalse(trusted)
+
+    def test_missing_srt_returns_tuple(self):
+        from subtitle_app.muxer import embed_subtitles_to_video
+        with tempfile.TemporaryDirectory() as d:
+            video = Path(d) / "a.mp4"
+            video.write_bytes(b"dummy")
+            srt = Path(d) / "missing.srt"
+            posts = []
+            mkv_path, trusted = embed_subtitles_to_video(
+                video, srt, "ffmpeg.exe", posts.append)
+            self.assertIsNone(mkv_path)
+            self.assertFalse(trusted)
+
+
 if __name__ == "__main__":
     unittest.main()
