@@ -30,6 +30,10 @@ class PauseResponse:
         self.modified_text: Optional[str] = None  # None 表示未修改
 
 
+# ── 备份目录：统一存到 logs/srt_backup（相对于项目根目录）──
+_BACKUP_DIR = Path(__file__).resolve().parent.parent / "logs" / "srt_backup"
+
+
 def translate_stage(result: dict, opts: dict, post: Callable) -> None:
     """翻译阶段入口：消费转写结果，执行翻译+整理输出"""
     post({"type": "translate_status", "file": result["item"].name,
@@ -179,7 +183,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     # ── 将原文字幕统一备份到 srt_backup 文件夹 ──
     if source_srt and source_srt.exists():
-        backup_dir = output_dir / "srt_backup"
+        backup_dir = _BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
         bak_dest = backup_dir / source_srt.name
         if bak_dest.exists():
@@ -188,7 +192,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             bak_dest = backup_dir / f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
         try:
             shutil.copy2(str(source_srt), str(bak_dest))
-            post({"type": "log", "message": f"原文字幕已备份至 srt_backup/{bak_dest.name}", "level": "INFO"})
+            post({"type": "log", "message": f"原文字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份原文字幕失败: %s", e)
 
@@ -196,7 +200,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     # 策略：始终保留 srt_backup 中的副本；工作区临时 SRT 仍可按原规则清理
     translated_backup_path: Optional[Path] = None
     if translated_srt and translated_srt.exists():
-        backup_dir = output_dir / "srt_backup"
+        backup_dir = _BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
         # 用有意义的文件名区分原文和译文：视频名.translated.srt
         bak_name = f"{item_stem}.translated.srt"
@@ -206,7 +210,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         try:
             shutil.copy2(str(translated_srt), str(bak_dest))
             translated_backup_path = bak_dest
-            post({"type": "log", "message": f"翻译字幕已备份至 srt_backup/{bak_dest.name}", "level": "INFO"})
+            post({"type": "log", "message": f"翻译字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)
 
