@@ -3,6 +3,7 @@
 """transcriber.py 单元测试"""
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -37,7 +38,22 @@ class TestTranscriberInit(unittest.TestCase):
 
 
 class TestTranscriberClearCache(unittest.TestCase):
-    """clear_cache"""
+    """clear_cache / release_model / is_loaded"""
+
+    # 用 MagicMock 替代 torch，避免触发 CUDA 初始化（~3.8s 开销）
+    _SENTINEL = object()
+
+    def setUp(self):
+        self._real_torch = sys.modules.get("torch", self._SENTINEL)
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        sys.modules["torch"] = mock_torch
+
+    def tearDown(self):
+        if self._real_torch is not self._SENTINEL:
+            sys.modules["torch"] = self._real_torch
+        else:
+            sys.modules.pop("torch", None)
 
     def test_clear_cache_empty(self):
         t = Transcriber()
@@ -72,10 +88,8 @@ class TestTranscriberClearCache(unittest.TestCase):
     def test_clear_cache_no_torch_crash(self):
         """即使 torch 不可用也不崩溃"""
         t = Transcriber()
-        # 模拟 torch 未安装的情况
-        with patch.object(t, "clear_cache", wraps=t.clear_cache):
-            t.clear_cache()
-            # 不崩溃即通过
+        t.clear_cache()
+        # 不崩溃即通过
 
 
 class TestReadStderrLoop(unittest.TestCase):
