@@ -44,12 +44,30 @@ class TestTranscriberClearCache(unittest.TestCase):
         t.clear_cache()
         self.assertEqual(t._model_cache, {})
 
-    def test_clear_cache_with_models(self):
+    def test_clear_cache_keeps_models(self):
+        """clear_cache() 不再卸载模型，仅释放 CUDA 缓存"""
         t = Transcriber()
         mock_model = MagicMock()
         t._model_cache["key1"] = ("cpu", "int8", mock_model)
         t.clear_cache()
+        # 模型缓存应保留
+        self.assertIn("key1", t._model_cache)
+        self.assertIs(t._model_cache["key1"][2], mock_model)
+
+    def test_release_model_empties_cache(self):
+        t = Transcriber()
+        mock_model = MagicMock()
+        t._model_cache["key1"] = ("cpu", "int8", mock_model)
+        t.release_model()
         self.assertEqual(t._model_cache, {})
+
+    def test_is_loaded(self):
+        t = Transcriber()
+        self.assertFalse(t.is_loaded())
+        t._model_cache["key1"] = ("cpu", "int8", MagicMock())
+        self.assertTrue(t.is_loaded())
+        t.release_model()
+        self.assertFalse(t.is_loaded())
 
     def test_clear_cache_no_torch_crash(self):
         """即使 torch 不可用也不崩溃"""

@@ -94,7 +94,8 @@ class SubtitleWorker:
     def stop(self) -> None:
         self.stop_requested = True
         self._terminate_all_procs()
-        self.transcriber.clear_cache()
+        # 模型持久驻留，不再在此处释放显存
+        # 如需手动卸载，请调用 self.transcriber.release_model()
         # 不阻塞 UI 线程：thread 是 daemon 线程，进程退出时自动清理
         # 用极短 timeout 尝试 join，但不阻塞等待
         if self.thread and self.thread.is_alive():
