@@ -70,8 +70,12 @@ class Transcriber:
         self._register_proc = register
         self._unregister_proc = unregister
 
-    def clear_cache(self) -> None:
-        """清理模型缓存，尝试释放显存（stop 时调用）"""
+    def is_loaded(self) -> bool:
+        """检查模型是否已加载到缓存中"""
+        return len(self._model_cache) > 0
+
+    def release_model(self) -> None:
+        """手动卸载模型，释放显存。供 UI 手工卸载按钮和 app 退出时调用。"""
         for key in list(self._model_cache.keys()):
             try:
                 _, _, model = self._model_cache[key]
@@ -79,6 +83,18 @@ class Transcriber:
             except (KeyError, AttributeError):
                 pass
         self._model_cache.clear()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
+        except (ImportError, RuntimeError):
+            pass
+        logger.info("Whisper 模型已卸载，显存已释放")
+
+    def clear_cache(self) -> None:
+        """轻量级清理：仅清空 CUDA 缓存，不卸载模型（模型在批次间持久驻留）。
+        模型生命周期现由 release_model() 管理（手工卸载 / app 退出时自动释放）。"""
         try:
             import torch
             if torch.cuda.is_available():
@@ -212,13 +228,22 @@ class Transcriber:
                 return model
 
             WhisperModel = _get_whisper_model()
+            # 清除不同 key 的旧模型以释放显存，但不影响正在缓存中的模型
             with self._cache_lock:
-                self.clear_cache()
+                old_keys = [k for k in self._model_cache if k != model_key]
+                for k in old_keys:
+                    try:
+                        _, _, m = self._model_cache.pop(k)
+                        del m
+                    except (KeyError, AttributeError):
+                        pass
             try:
                 model = WhisperModel(str(model_dir), device=device, compute_type=compute_type)
                 with self._cache_lock:
                     self._model_cache[model_key] = (device, compute_type, model)
                 post({"type": "progress", "percent": 100, "stage": "加载模型", "detail": "模型加载完成"})
+                post({"type": "log", "message": "Whisper 模型加载完成，已缓存到显存", "level": "INFO"})
+                post({"type": "model_loaded"})
             except Exception as e:
                 if "CUDA" in str(e) or "cuda" in str(e):
                     post({"type": "log", "message": (

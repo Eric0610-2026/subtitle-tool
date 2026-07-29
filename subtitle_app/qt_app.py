@@ -273,6 +273,14 @@ class SubtitleApp(QMainWindow):
         self.stop_btn = self._make_btn("⏹ 停止", self._stop, object_name="stopBtn")
         self.stop_btn.setEnabled(False)
         ar.addWidget(self.stop_btn)
+        # ── 模型状态与卸载按钮 ──
+        self.model_status = QLabel("🧠 模型：未加载")
+        self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
+        ar.addWidget(self.model_status)
+        self.unload_model_btn = self._make_btn("✕ 卸载模型", self._unload_model, object_name="bottomBtn",
+                                     tooltip="手动卸载 Whisper 模型，释放显存")
+        self.unload_model_btn.setEnabled(False)
+        ar.addWidget(self.unload_model_btn)
         ar.addWidget(self._make_btn("🔄 重试", self._retry, object_name="bottomBtn",
                            stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
                                       "QPushButton:hover { background:#4f46e5; }"))
@@ -788,6 +796,28 @@ class SubtitleApp(QMainWindow):
         self.worker.stop()
         self._add_log_entry("已请求停止")
 
+    def _unload_model(self):
+        """手动卸载 Whisper 模型，释放显存"""
+        if not self.worker.transcriber.is_loaded():
+            return
+        if not self._confirm("卸载模型", "确定要卸载 Whisper 模型吗？\n下次处理时需要重新加载模型（约 2-10 秒）。", default_no=True):
+            return
+        self.worker.transcriber.release_model()
+        self._update_model_status()
+        self._add_log_entry("🧠 Whisper 模型已卸载，显存已释放")
+
+    def _update_model_status(self):
+        """更新模型状态 UI 标签"""
+        loaded = self.worker.transcriber.is_loaded()
+        if loaded:
+            self.model_status.setText("🧠 模型：已加载")
+            self.model_status.setStyleSheet("color:#22c55e; font-size:11px; padding:0 4px; font-weight:600;")
+            self.unload_model_btn.setEnabled(True)
+        else:
+            self.model_status.setText("🧠 模型：未加载")
+            self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
+            self.unload_model_btn.setEnabled(False)
+
     def _retry(self):
         if self.worker.thread and self.worker.thread.is_alive():
             QMessageBox.warning(self, "提示", "正在处理中")
@@ -912,6 +942,38 @@ class SubtitleApp(QMainWindow):
         if not s.get("api_url") or not s.get("api_key"):
             self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
 
+        # 启动后延时预加载 Whisper 模型
+        QTimer.singleShot(2000, self._preload_whisper_model)
+
+    def _preload_whisper_model(self):
+        """后台预加载 Whisper 模型，让第一次处理时秒开"""
+        if self.worker.transcriber.is_loaded():
+            self._update_model_status()
+            return
+        s = self.settings_data
+        model_dir = Path(s["model_dir"])
+        if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
+            self._add_log_entry("Whisper 模型文件未找到，跳过后台预加载", "DEBUG")
+            return
+        self._add_log_entry("🔄 后台预加载 Whisper 模型中...（约 2-10 秒）", "INFO")
+
+        def _do_load():
+            try:
+                self.worker.transcriber.load_whisper_model(
+                    model_dir, s["device"], s["compute_type"],
+                    self.signal_bridge.post)
+                # model_loaded 事件自动触发 _update_model_status()
+            except Exception as e:
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": f"Whisper 模型预加载失败: {e}",
+                    "level": "WARNING",
+                })
+
+        import threading
+        t = threading.Thread(target=_do_load, daemon=True)
+        t.start()
+
     def _export_log(self):
         """导出当前日志列表到文件"""
         if self.log_panel.count() == 0:
@@ -1016,6 +1078,7 @@ class SubtitleApp(QMainWindow):
             self._add_log_entry(quality_summary, "WARNING" if "雷" in quality_summary else "INFO")
             notify_body = f"{notify_body}\n{quality_summary}"
         self._notify("字幕工具", notify_body)
+        self._update_model_status()
 
     def _handle_error(self, e):
         msg = e.get("message", "错误")
@@ -1024,6 +1087,7 @@ class SubtitleApp(QMainWindow):
         self.stop_btn.setEnabled(False)
         self._reset_progress()
         self.preview_panel.preview.setReadOnly(False)
+        self._update_model_status()
 
     def _handle_event(self, event: dict):
         t = event.get("type", "")
@@ -1050,6 +1114,7 @@ class SubtitleApp(QMainWindow):
             "preview_append": self._handle_preview_append,
             "done": self._handle_done,
             "error": self._handle_error,
+            "model_loaded": lambda e: self._update_model_status(),
         }
         handler = handlers.get(t)
         if handler:
@@ -1104,7 +1169,7 @@ class SubtitleApp(QMainWindow):
         parts = [f"{labels[k]} {n}" for k, n in merged.items() if n]
         backup_hint = ""
         if any(r.get("backup_path") for r in files_with_issues):
-            backup_hint = "；SRT 备份见 srt_backup/"
+            backup_hint = "；SRT 备份见 logs/srt_backup/"
         return (
             f"字幕质量：{len(files_with_issues)}/{len(reports)} 个文件有雷，"
             f"共 {total_issues} 处（" + "，".join(parts) + f"）{backup_hint}"
@@ -1283,6 +1348,9 @@ class SubtitleApp(QMainWindow):
             return False
 
     def closeEvent(self, event):
+        """应用关闭时释放 Whisper 模型显存并保存窗口状态"""
+        if self.worker.transcriber.is_loaded():
+            self.worker.transcriber.release_model()
         self._save_window_state()
         super().closeEvent(event)
 
