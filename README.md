@@ -2,7 +2,11 @@
 
 基于 **faster-whisper** 的本地语音转写 + **AI** 翻译的 Windows 桌面工具。拖拽视频/音频即可一键生成双语字幕，支持批量处理、并行流水线和 MKV 字幕内嵌。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Platform](https://img.shields.io/badge/Platform-Windows-blue) ![License](https://img.shields.io/badge/License-MIT-green)
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python">
+  <img src="https://img.shields.io/badge/Platform-Windows-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
+</p>
 
 ---
 
