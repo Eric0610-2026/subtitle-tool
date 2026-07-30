@@ -65,6 +65,8 @@ class Transcriber:
         # 子进程注册回调（由 pipeline 注入，用于停止时清理）
         self._register_proc = None
         self._unregister_proc = None
+        # 语言检测缓存：同一批同语种视频，第一次检测后后续直接复用
+        self._cached_auto_lang: Optional[str] = None
 
     def attach_proc_handlers(self, register, unregister) -> None:
         self._register_proc = register
@@ -76,6 +78,7 @@ class Transcriber:
 
     def release_model(self) -> None:
         """手动卸载模型，释放显存。供 UI 手工卸载按钮和 app 退出时调用。"""
+        self._cached_auto_lang = None
         for key in list(self._model_cache.keys()):
             try:
                 _, _, model = self._model_cache[key]
@@ -401,12 +404,24 @@ class Transcriber:
                           "message": f"传递上文语境（{context_n} 句）给 Whisper",
                           "level": "INFO"})
 
+                        # ── 语言检测：auto 模式优先使用缓存，第一次检测后更新缓存 ──
+                transcribe_lang = self._cached_auto_lang if language == "auto" else language
+                if language == "auto" and self._cached_auto_lang:
+                    post({"type": "log",
+                          "message": f"复用语言检测结果：{self._cached_auto_lang}（跳过语言检测）",
+                          "level": "INFO"})
+
                 segments, info = model.transcribe(
                     str(audio_path), beam_size=cfg.whisper.beam_size, vad_filter=vad_enabled,
-                    language=None if language == "auto" else language,
+                    language=transcribe_lang,
                     initial_prompt=init_prompt,
                     word_timestamps=use_word_timestamps)
                 detected_lang = info.language
+                if language == "auto" and self._cached_auto_lang is None:
+                    self._cached_auto_lang = detected_lang
+                    post({"type": "log",
+                          "message": f"检测到视频语言：{detected_lang}（后续文件将自动复用）",
+                          "level": "INFO"})
                 t_post({"type": "language", "message": f"语言：{detected_lang}"})
 
                 transcribe_start = time.time()
