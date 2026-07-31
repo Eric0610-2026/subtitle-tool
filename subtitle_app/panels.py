@@ -14,8 +14,12 @@ from PySide6.QtWidgets import (
     QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
     QDoubleSpinBox, QLineEdit, QMessageBox,
     QApplication, QAbstractSpinBox, QToolButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QStackedWidget,
 )
-from PySide6.QtGui import QFont, QFontMetrics, QColor, QDragEnterEvent, QDropEvent, QPalette
+from PySide6.QtGui import (
+    QFont, QFontMetrics, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
+)
 
 from .srt_utils import fmt_duration, estimate_eta
 from .widgets import LogEntry
@@ -340,57 +344,82 @@ class PreviewPanel(QFrame):
         self._save_cb = None
         self._offset_cb = None
         self._raw_text = ""
+        self._updating = False
+        self._highlighted_rows: set = set()
         self._build_ui()
 
-    def _render_structured_preview(self):
-        """将 SRT 文本渲染为只读表格，保留原文用于编辑和保存。"""
-        import html
-        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+    def _palette_colors(self) -> dict:
+        """根据当前主题返回表格配色（跟随应用明暗主题）"""
         dark = self.palette().color(QPalette.Base).lightness() < 128
-        table_bg = "#161b2a" if dark else "#ffffff"
-        header_bg = "#252b3d" if dark else "#eef2ff"
-        row_bg = "#1d2435" if dark else "#ffffff"
-        alt_bg = "#20283a" if dark else "#f8fafc"
-        border = "#3b455b" if dark else "#dbe3ef"
-        time_fg = "#9aa8bd" if dark else "#64748b"
-        text_fg = "#dbe4f0" if dark else "#172033"
-        translation_fg = "#b8c3ff" if dark else "#4f46e5"
-        if not blocks:
-            self.preview.setPlaceholderText("\n\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里")
-            self.preview.clear()
-            return
+        if dark:
+            return {
+                "index": "#64748b", "time": "#94a3b8",
+                "text": "#e2e8f0", "translation": "#a5b4fc",
+                "highlight_bg": "#fde68a", "highlight_fg": "#1e293b",
+            }
+        return {
+            "index": "#94a3b8", "time": "#64748b",
+            "text": "#0f172a", "translation": "#6d28d9",
+            "highlight_bg": "#fde68a", "highlight_fg": "#1e293b",
+        }
 
+    def _style_item(self, item: QTableWidgetItem, kind: str):
+        """按列类型设置单元格字体与颜色（kind: index/time/text/translation）"""
+        c = self._palette_colors()
+        if kind == "index":
+            item.setFont(QFont("Consolas", 8))
+            item.setForeground(QBrush(QColor(c["index"])))
+            item.setTextAlignment(Qt.AlignCenter)
+        elif kind == "time":
+            item.setFont(QFont("Consolas", 8))
+            item.setForeground(QBrush(QColor(c["time"])))
+        elif kind == "text":
+            item.setFont(QFont("Consolas", 9))
+            item.setForeground(QBrush(QColor(c["text"])))
+        else:  # translation
+            item.setFont(QFont("Consolas", 9))
+            item.setForeground(QBrush(QColor(c["translation"])))
+
+    def _render_structured_preview(self):
+        """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
+
+        原始文本始终保留在 _raw_text 中，供编辑与保存使用；表格只负责展示。
+        """
+        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
         rows = []
-        for index, block in enumerate(blocks, 1):
+        for block in blocks:
             lines = block.splitlines()
             if len(lines) < 3:
                 continue
-            timeline = html.escape(lines[1].strip())
+            timeline = lines[1].strip()
             text_lines = [line.strip() for line in lines[2:] if line.strip()]
             if not text_lines:
                 continue
-            original = html.escape(text_lines[0]).replace("\n", "<br>")
-            translated = "<br>".join(html.escape(line) for line in text_lines[1:]) or "—"
-            row_color = alt_bg if len(rows) % 2 else row_bg
-            rows.append(
-                f'<tr style="background:{row_color};">'
-                f'<td width="44" align="center" style="color:{time_fg};">{index}</td>'
-                f'<td width="190" style="color:{time_fg};">{timeline}</td>'
-                f'<td style="color:{text_fg};">{original}</td>'
-                f'<td style="color:{translation_fg};">{translated}</td></tr>'
-            )
-        table = (
-            f'<table width="100%" cellspacing="0" cellpadding="8" '
-            f'style="background:{table_bg}; border:1px solid {border};">'
-            f'<tr style="background:{header_bg};">'
-            f'<th width="44" style="color:{text_fg};">#</th>'
-            f'<th width="190" align="left" style="color:{text_fg};">时间轴</th>'
-            f'<th align="left" style="color:{text_fg};">原文</th>'
-            f'<th align="left" style="color:{text_fg};">译文</th></tr>'
-            f'{"".join(rows)}</table>'
-        )
-        self.preview.setPlaceholderText("")
-        self.preview.setHtml(table)
+            original = text_lines[0]
+            translated = "\n".join(text_lines[1:]) or "—"
+            rows.append((timeline, original, translated))
+        if not rows:
+            self._highlighted_rows.clear()
+            self._stack.setCurrentWidget(self._empty_label)
+            return
+        self._stack.setCurrentWidget(self.preview)
+        self._updating = True
+        try:
+            self._highlighted_rows.clear()
+            self.preview.setRowCount(0)
+            self.preview.setRowCount(len(rows))
+            for r, (timeline, original, translated) in enumerate(rows):
+                for col, (kind, text) in enumerate(
+                    (("index", str(r + 1)), ("time", timeline), ("text", original), ("translation", translated))
+                ):
+                    item = QTableWidgetItem(text)
+                    self._style_item(item, kind)
+                    if kind == "index":
+                        # 序号列始终不可编辑；其余列由 setReadOnly 统一控制
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.preview.setItem(r, col, item)
+        finally:
+            self._updating = False
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -406,15 +435,40 @@ class PreviewPanel(QFrame):
         tb.addStretch()
         layout.addLayout(tb)
 
-        self.preview = QTextEdit()
+        self.preview = QTableWidget(0, 4)
         self.preview.setObjectName("subtitlePreview")
-        self.preview.setPlaceholderText("\n\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里")
-        self.preview.setReadOnly(True)
-        self.preview.setFont(QFont("Consolas", 10))
-        self.preview.setAcceptDrops(False)
-        self.preview.setFrameShape(QFrame.NoFrame)
-        self.preview.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.preview, 1)
+        self.preview.setHorizontalHeaderLabels(["#", "时间轴", "原文", "译文"])
+        self.preview.setShowGrid(False)
+        self.preview.setAlternatingRowColors(True)
+        self.preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.preview.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.preview.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.preview.setWordWrap(True)
+        self.preview.setMouseTracking(True)
+        self.preview.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.preview.verticalHeader().setVisible(False)
+        # 行高按内容自适应（多行译文完整显示），同时保留最小行高
+        self.preview.verticalHeader().setMinimumSectionSize(28)
+        self.preview.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        header = self.preview.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        self.preview.setColumnWidth(0, 40)
+        self.preview.setColumnWidth(1, 185)
+        self.preview.itemChanged.connect(self._on_item_changed)
+
+        self._empty_label = QLabel(
+            "\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里"
+        )
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setStyleSheet("color:#64748b; background:transparent; font-size:13px;")
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._empty_label)
+        self._stack.addWidget(self.preview)
+        layout.addWidget(self._stack, 1)
 
         self.setAcceptDrops(True)
 
@@ -446,22 +500,108 @@ class PreviewPanel(QFrame):
 
     def set_text(self, text: str):
         self._raw_text = text
-        self.preview.setReadOnly(True)
+        self.setReadOnly(True)
         self._render_structured_preview()
 
     def clear(self):
         self._raw_text = ""
-        self.preview.clear()
-        self.preview.setReadOnly(True)
+        self._highlighted_rows.clear()
+        self._updating = True
+        try:
+            self.preview.setRowCount(0)
+        finally:
+            self._updating = False
+        self.setReadOnly(True)
+        self._stack.setCurrentWidget(self._empty_label)
 
     def append(self, text: str):
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
         self._render_structured_preview()
-        sb = self.preview.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.preview.scrollToBottom()
 
     def get_text(self) -> str:
         return self._raw_text
+
+    def setReadOnly(self, readonly: bool):
+        """控制表格是否允许直接编辑（完成后放开，供微调译文/时间轴）"""
+        if readonly:
+            self.preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        else:
+            self.preview.setEditTriggers(
+                QAbstractItemView.DoubleClicked
+                | QAbstractItemView.SelectedClicked
+                | QAbstractItemView.EditKeyPressed
+            )
+
+    # ── 查找高亮 ──
+
+    def highlight_rows(self, rows):
+        """高亮命中的行，并滚动到第一个命中行"""
+        self.clear_highlight()
+        c = self._palette_colors()
+        for r in rows:
+            for col in range(self.preview.columnCount()):
+                item = self.preview.item(r, col)
+                if item:
+                    item.setBackground(QBrush(QColor(c["highlight_bg"])))
+                    item.setForeground(QBrush(QColor(c["highlight_fg"])))
+        self._highlighted_rows = set(rows)
+        if rows:
+            self.preview.scrollToItem(self.preview.item(rows[0], 0), QAbstractItemView.PositionAtTop)
+
+    def clear_highlight(self):
+        """恢复高亮行的默认样式（交替背景 + 各列颜色）"""
+        kinds = ["index", "time", "text", "translation"]
+        for r in self._highlighted_rows:
+            for col in range(self.preview.columnCount()):
+                item = self.preview.item(r, col)
+                if item:
+                    item.setBackground(QBrush())
+                    self._style_item(item, kinds[col])
+        self._highlighted_rows.clear()
+
+    # ── 单元格编辑回写 _raw_text ──
+
+    def _on_item_changed(self, item: QTableWidgetItem):
+        """用户直接在表格里改时间轴/原文/译文后，同步回 _raw_text（保存走 get_text）"""
+        if getattr(self, "_updating", False):
+            return
+        if not self._raw_text.strip():
+            return
+        col = item.column()
+        if col not in (1, 2, 3):
+            return
+        row = item.row()
+        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        if row >= len(blocks):
+            return
+        lines = blocks[row].splitlines()
+        if col == 1:
+            # 时间轴
+            if len(lines) < 2:
+                return
+            lines[1] = item.text().strip()
+        else:
+            text_lines = [l.strip() for l in lines[2:] if l.strip()]
+            if not text_lines:
+                return
+            if col == 2:
+                # 原文（保持第 1 行语义；译文原样保留）
+                text_lines[0] = item.text()
+                lines = lines[:2] + text_lines
+            else:
+                # 译文（可多行；清空或 “—” 视为无译文）
+                new_trans = item.text()
+                if new_trans.strip() in ("", "—"):
+                    lines = lines[:2] + [text_lines[0]]
+                else:
+                    lines = lines[:2] + [text_lines[0]] + new_trans.split("\n")
+        blocks[row] = "\n".join(lines)
+        body = "\n\n".join(blocks)
+        # 保留原始文本首尾空白，避免重建丢失 SRT 结尾换行等格式
+        leading = self._raw_text[: len(self._raw_text) - len(self._raw_text.lstrip())]
+        trailing = self._raw_text[len(self._raw_text.rstrip()):]
+        self._raw_text = leading + body + trailing
 
     def _open_edit_dialog(self):
         content = self.get_text().strip()

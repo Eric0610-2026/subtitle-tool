@@ -319,10 +319,29 @@ class SubtitleApp(QMainWindow):
     def _apply_style(self):
         c = self.colors
         border_radius = "border-radius:8px;"
+        is_dark = self.dark_mode
+        alt_bg = "#1c1f33" if is_dark else "#f8fafc"
+        sel_bg = "#2f3554" if is_dark else "#e0e7ff"
+        hover_bg = "#232741" if is_dark else "#eef2ff"
         self.setStyleSheet(f"""
             QMainWindow {{ background: {c['bg']}; }}
             QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
-            QWidget#previewPanel QTextEdit#subtitlePreview {{ background:transparent; color:{c['text']}; border:none; padding:4px; }}
+            QTableWidget#subtitlePreview {{
+                background: transparent; color: {c['text']};
+                border: none; gridline-color: transparent;
+                alternate-background-color: {alt_bg};
+                selection-background-color: {sel_bg}; selection-color: {c['text']};
+                outline: 0;
+            }}
+            QTableWidget#subtitlePreview::item:hover {{ background: {hover_bg}; }}
+            QTableWidget#subtitlePreview::item:selected {{ background: {sel_bg}; color: {c['text']}; }}
+            QHeaderView {{ background: transparent; border: none; }}
+            QHeaderView::section {{
+                background: {c['bg']}; color: {c['text_sec']};
+                border: none; border-bottom: 1px solid {c['border']};
+                padding: 5px 8px; font-size: 11px; font-weight: 600;
+            }}
+            QTableCornerButton::section {{ background: transparent; border: none; }}
             QFrame#header {{
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {c['header']}, stop:0.62 {c['header']}, stop:1 {c['accent']});
@@ -380,7 +399,6 @@ class SubtitleApp(QMainWindow):
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {c['accent']}, stop:1 #a78bfa); {border_radius}
             }}
-            QTextEdit#subtitlePreview QScrollBar:vertical {{ width:8px; background:transparent; }}
             QTabWidget::pane {{ background:{c['card']}; border:none; }}
             QTabBar::tab {{
                 background:{c['bg']}; color:{c['text_sec']};
@@ -703,35 +721,22 @@ class SubtitleApp(QMainWindow):
                 break
 
     def _find_in_preview(self):
-        """在预览区弹出查找对话框"""
+        """在预览区表格中查找原文/译文，并高亮命中行"""
         text, ok = _silent_text_input(self, "查找", "输入要查找的文本：")
         if not ok or not text:
             return
-        content = self.preview_panel.get_text()
-        # 先清除上次高亮
-        fmt_normal = self.preview_panel.preview.currentCharFormat()
-        cursor = self.preview_panel.preview.textCursor()
-        cursor.select(cursor.SelectionType.Document)
-        cursor.setCharFormat(fmt_normal)
-        self.preview_panel.preview.setTextCursor(cursor)
-        # 查找并高亮
-        found = False
-        cursor = self.preview_panel.preview.textCursor()
-        cursor.movePosition(cursor.MoveOperation.Start)
-        fmt = cursor.charFormat()
-        fmt.setBackground(QColor("#fbbf24"))
-        pos = 0
-        while True:
-            idx = content.find(text, pos)
-            if idx == -1:
-                break
-            found = True
-            cursor.setPosition(idx)
-            cursor.setPosition(idx + len(text), cursor.MoveMode.KeepAnchor)
-            cursor.setCharFormat(fmt)
-            pos = idx + len(text)
-        if found:
-            self._add_log_entry(f"预览区查找完成：{text}")
+        table = self.preview_panel.preview
+        self.preview_panel.clear_highlight()
+        hit_rows = []
+        for r in range(table.rowCount()):
+            for col in (2, 3):  # 原文 / 译文
+                item = table.item(r, col)
+                if item and text in item.text():
+                    hit_rows.append(r)
+                    break
+        if hit_rows:
+            self.preview_panel.highlight_rows(hit_rows)
+            self._add_log_entry(f"预览区查找完成：{text}（命中 {len(hit_rows)} 行）")
         else:
             self._add_log_entry(f"预览区未找到：{text}")
 
@@ -1147,7 +1152,7 @@ class SubtitleApp(QMainWindow):
             p.overall_label.setText("总进度：全部完成 100%")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.preview_panel.preview.setReadOnly(False)
+        self.preview_panel.setReadOnly(False)
         elapsed = time.time() - self._start_time if self._start_time else 0
         stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
@@ -1165,7 +1170,7 @@ class SubtitleApp(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._reset_progress()
-        self.preview_panel.preview.setReadOnly(False)
+        self.preview_panel.setReadOnly(False)
         self._update_model_status()
 
     def _handle_event(self, event: dict):
