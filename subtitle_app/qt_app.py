@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QLabel, QTabWidget, QSplitter, QGroupBox,
     QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
-    QMenu, QDialog,
+    QMenu, QDialog, QGridLayout,
 )
 from PySide6.QtGui import QFont, QColor, QFontMetrics
 
@@ -33,7 +33,7 @@ from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog
 from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
-from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, TranslationMonitor, TranslationMonitorDialog, _silent_text_input, _silent_double_input
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
@@ -174,10 +174,13 @@ class SubtitleApp(QMainWindow):
 
     def _build_file_list(self, bl):
         """构建文件列表区（splitter + 操作按钮）"""
-        splitter = QSplitter()
-        left = QWidget()
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setFixedHeight(320)
+        left = QFrame()
+        left.setObjectName("filePanel")
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setContentsMargins(8, 6, 8, 0)
         self.tabs = QTabWidget()
 
         def _make_list(is_video: bool):
@@ -206,27 +209,34 @@ class SubtitleApp(QMainWindow):
         ]:
             btn_row.addWidget(self._make_btn(text, cb, object_name="actionBtn"))
         ll.addLayout(btn_row)
-        splitter.addWidget(left)
+        top_splitter = QSplitter(Qt.Horizontal)
+        top_splitter.setChildrenCollapsible(False)
+        top_splitter.setFixedHeight(340)
+        top_splitter.setHandleWidth(6)
+        left.setMinimumWidth(0)
+        top_splitter.addWidget(left)
 
         # ── 右侧预览面板 ──
         self.preview_panel = PreviewPanel()
+        self.preview_panel.setObjectName("previewPanel")
         self.preview_panel.connect_toolbar(self._find_in_preview, self._save_preview, self._offset_preview_time)
         self.preview_panel.fileDropped.connect(self._on_preview_file_dropped)
-        splitter.addWidget(self.preview_panel)
-        splitter.setSizes([600, 600])
-        bl.addWidget(splitter, 2)
+        top_splitter.addWidget(self.preview_panel)
+        top_splitter.setSizes([540, 660])
+        top_splitter.setStretchFactor(0, 1)
+        top_splitter.setStretchFactor(1, 1)
+        return top_splitter
 
     def _build_progress_and_log(self, bl):
         """构建进度 + 日志面板"""
-        self.progress_panel = ProgressPanel()
+        self.progress_panel = ProgressPanel(details_cb=self._show_translation_monitor)
+        self.progress_panel.setObjectName("progressPanel")
+        self.translation_monitor_dialog = TranslationMonitorDialog(self)
+        self.translation_monitor = self.translation_monitor_dialog.monitor
         self.log_panel = LogPanel()
+        self.log_panel.setObjectName("logPanel")
         self.log_panel.log_list.installEventFilter(self)
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        bottom_splitter.setChildrenCollapsible(False)
-        bottom_splitter.addWidget(self.progress_panel)
-        bottom_splitter.addWidget(self.log_panel)
-        bottom_splitter.setSizes([520, 520])
-        bl.addWidget(bottom_splitter, 1)
+        return self.progress_panel, self.log_panel
 
     def _build_ui(self):
         central = QWidget()
@@ -238,9 +248,9 @@ class SubtitleApp(QMainWindow):
 
         # ── 主体内容 ──
         body = QWidget()
-        body.setContentsMargins(12, 8, 12, 8)
+        body.setContentsMargins(16, 10, 16, 8)
         bl = QVBoxLayout(body)
-        bl.setSpacing(6)
+        bl.setSpacing(8)
 
         # ── 路径行 + 翻译开关 + 更多设置 ──
         pr = QHBoxLayout()
@@ -258,17 +268,29 @@ class SubtitleApp(QMainWindow):
         pr.addWidget(self._make_btn("⚙ 更多设置", self._open_settings, object_name="accentBtn"))
         bl.addLayout(pr)
 
-        # ── 文件列表（双栏 splitter）──
-        self._build_file_list(bl)
-
-        # ── 进度 + 日志（底部）──
-        self._build_progress_and_log(bl)
+        # ── 田字型主体：左上文件、右上预览、左下进度、右下日志 ──
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        top_splitter = self._build_file_list(bl)
+        progress_panel, log_panel = self._build_progress_and_log(bl)
+        grid.addWidget(top_splitter.widget(0), 0, 0)
+        grid.addWidget(top_splitter.widget(1), 0, 1)
+        grid.addWidget(progress_panel, 1, 0)
+        grid.addWidget(log_panel, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 3)
+        grid.setRowStretch(1, 2)
+        bl.addLayout(grid, 1)
 
         main.addWidget(body, 1)
 
         # ── 操作按钮 ──
         ar = QHBoxLayout()
-        ar.setContentsMargins(12, 4, 12, 6)
+        ar.setContentsMargins(16, 6, 16, 10)
+        ar.setSpacing(8)
         self.start_btn = self._make_btn("▶ 开始处理", self._start, object_name="startBtn")
         ar.addWidget(self.start_btn)
         self.stop_btn = self._make_btn("⏹ 停止", self._stop, object_name="stopBtn")
@@ -296,50 +318,98 @@ class SubtitleApp(QMainWindow):
 
     def _apply_style(self):
         c = self.colors
-        border_radius = "border-radius:6px;"
+        border_radius = "border-radius:8px;"
         self.setStyleSheet(f"""
             QMainWindow {{ background: {c['bg']}; }}
             QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
-            QFrame#header {{ background: {c['header']}; border: none; }}
+            QWidget#previewPanel QTextEdit#subtitlePreview {{ background:transparent; color:{c['text']}; border:none; padding:4px; }}
+            QFrame#header {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {c['header']}, stop:0.62 {c['header']}, stop:1 {c['accent']});
+                border: none;
+                border-bottom: 1px solid {c['border']};
+            }}
             QFrame#card {{ background: {c['card']}; {border_radius} border:1px solid {c['border']}; }}
-            QGroupBox {{ background: {c['card']}; {border_radius} border:1px solid {c['border']}; margin-top:10px; padding:10px; font-weight:600; color:{c['accent']}; }}
-            QGroupBox::title {{ subcontrol-origin:margin; left:10px; padding:0 5px; }}
-            QLineEdit, QComboBox, QTextEdit, QListWidget {{ background:{c['card']}; color:{c['text']}; border:1px solid {c['border']}; {border_radius} padding:4px 6px; }}
-            QComboBox::drop-down {{ border:none; }}
-            QPushButton {{ background:{c['card']}; color:{c['text']}; border:1px solid {c['border']}; {border_radius} padding:6px 14px; }}
-            QPushButton:hover {{ background:{c['border']}; }}
-            QPushButton#bottomBtn {{ padding:8px 16px; font-size:13px; font-weight:600; }}
-            QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; font-weight:bold; padding:8px 20px; font-size:13px; }}
+            QFrame#filePanel, QFrame#previewPanel, QFrame#logPanel {{
+                background: {c['card']}; {border_radius}
+                border:1px solid {c['border']};
+            }}
+            QFrame#progressPanel {{ background:{c['card']}; {border_radius} border:1px solid {c['border']}; }}
+            QGroupBox {{
+                background: {c['card']}; {border_radius}
+                border:1px solid {c['border']};
+                margin-top:8px; padding:8px 8px 8px 8px;
+                font-weight:600; color:{c['accent']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin:margin; left:12px; padding:0 7px;
+                background:{c['card']};
+            }}
+            QLineEdit, QComboBox, QTextEdit, QListWidget {{
+                background:{c['card']}; color:{c['text']};
+                border:1px solid {c['border']}; {border_radius} padding:7px 9px;
+                selection-background-color:{c['accent']}; selection-color:white;
+            }}
+            QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus {{
+                border:1px solid {c['accent']};
+            }}
+            QComboBox::drop-down {{ border:none; width:26px; }}
+            QPushButton {{
+                background:{c['card']}; color:{c['text']};
+                border:1px solid {c['border']}; {border_radius}
+                padding:7px 14px; font-weight:500;
+            }}
+            QPushButton:hover {{ background:{c['border']}; border-color:{c['accent']}; }}
+            QPushButton:pressed {{ padding-top:8px; padding-bottom:6px; }}
+            QPushButton:disabled {{ color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']}; }}
+            QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:600; }}
+            QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
             QPushButton#startBtn:hover {{ background:#16a34a; }}
             QPushButton#startBtn:disabled {{ background:{c['text_muted']}; }}
-            QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; font-weight:bold; padding:8px 20px; font-size:13px; }}
+            QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
             QPushButton#stopBtn:hover {{ background:#dc2626; }}
             QPushButton#stopBtn:disabled {{ background:{c['text_muted']}; }}
-            QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; padding:6px 14px; }}
+            QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; padding:8px 16px; font-weight:600; }}
             QPushButton#accentBtn:hover {{ background:#4f46e5; }}
-            QPushButton#actionBtn {{ padding:5px 10px; font-size:12px; }}
-            QProgressBar {{ background:{c['border']}; border:none; {border_radius} }}
-            QProgressBar::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {c['accent']}, stop:1 #818cf8); {border_radius} }}
-            QTabWidget::pane {{ background:{c['card']}; border:1px solid {c['border']}; }}
-            QTabBar::tab {{ background:{c['border']}; color:{c['text_sec']}; padding:6px 16px; }}
-            QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; }}
-            QCheckBox {{ spacing:4px; }}
-            QScrollBar:vertical {{ width:8px; background:{c['bg']}; border:none; }}
-            QScrollBar::handle:vertical {{ background:{c['border']}; {border_radius} min-height:24px; }}
+            QPushButton#actionBtn {{ padding:6px 11px; font-size:12px; }}
+            QProgressBar {{
+                background:{c['border']}; border:none; {border_radius}
+                color:{c['text']}; text-align:center; font-size:11px; font-weight:600;
+            }}
+            QProgressBar::chunk {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {c['accent']}, stop:1 #a78bfa); {border_radius}
+            }}
+            QTextEdit#subtitlePreview QScrollBar:vertical {{ width:8px; background:transparent; }}
+            QTabWidget::pane {{ background:{c['card']}; border:none; }}
+            QTabBar::tab {{
+                background:{c['bg']}; color:{c['text_sec']};
+                padding:9px 18px; margin-right:3px;
+                border:1px solid transparent; border-bottom:none;
+                border-top-left-radius:8px; border-top-right-radius:8px;
+            }}
+            QTabBar::tab:hover {{ color:{c['accent']}; }}
+            QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
+            QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; }}
+            QCheckBox::indicator {{ width:16px; height:16px; }}
+            QScrollBar:vertical {{ width:9px; background:{c['bg']}; border:none; margin:2px; }}
+            QScrollBar::handle:vertical {{ background:{c['border']}; {border_radius} min-height:28px; }}
             QScrollBar::handle:vertical:hover {{ background:{c['text_muted']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; border:none; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:none; }}
-            QScrollBar:horizontal {{ height:8px; background:{c['bg']}; border:none; }}
-            QScrollBar::handle:horizontal {{ background:{c['border']}; {border_radius} min-width:24px; }}
+            QScrollBar:horizontal {{ height:9px; background:{c['bg']}; border:none; margin:2px; }}
+            QScrollBar::handle:horizontal {{ background:{c['border']}; {border_radius} min-width:28px; }}
             QScrollBar::handle:horizontal:hover {{ background:{c['text_muted']}; }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; border:none; }}
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background:none; }}
             QSplitter::handle {{ background:{c['border']}; }}
-            QSplitter::handle:horizontal {{ width:1px; }}
-            QSplitter::handle:vertical {{ height:3px; }}
+            QSplitter::handle:horizontal {{ width:2px; }}
+            QSplitter::handle:vertical {{ height:4px; }}
             QLabel {{ background:transparent; }}
-            QListWidget#logList {{ background:{c['card']}; border:1px solid {c['border']}; }}
-            QListWidget#logList::item {{ padding:0; }}
+            QListWidget#logList {{ background:{c['card']}; border:none; }}
+            QListWidget#logList::item {{ padding:2px 4px; border-bottom:1px solid {c['border']}; }}
+            QListWidget::item:hover {{ background:{c['bg']}; }}
+            QListWidget::item:selected {{ background:{c['accent']}; color:white; }}
         """)
 
     # ─── 交互 ───
@@ -787,8 +857,14 @@ class SubtitleApp(QMainWindow):
         w = max(label.width(), 200)
         label.setText(fm.elidedText(text, Qt.ElideRight, w))
 
+    def _show_translation_monitor(self):
+        self.translation_monitor_dialog.show()
+        self.translation_monitor_dialog.raise_()
+        self.translation_monitor_dialog.activateWindow()
+
     def _reset_progress(self):
         self.progress_panel.reset()
+        self.translation_monitor.reset()
 
     def _stop(self):
         if not (self.worker.thread and self.worker.thread.is_alive()):
@@ -1057,6 +1133,7 @@ class SubtitleApp(QMainWindow):
 
     def _handle_done(self, e):
         p = self.progress_panel
+        self.translation_monitor.finish()
         msg = e.get("message", "完成")
         self._add_log_entry(msg, "INFO")
         p.transcribe_bar.setValue(100)
@@ -1103,6 +1180,7 @@ class SubtitleApp(QMainWindow):
                 f"🌍 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
             "current": lambda e: self._set_elided(self.progress_panel.transcribe_label, f"🎤 {e.get('message', '')}"),
             "progress": self._handle_progress,
+            "translation_monitor": lambda e: self.translation_monitor.update_progress(e),
             "counter": lambda e: self.progress_panel.counter_label.setText(
                 f"已转写 {e.get('generated',0)}/{e.get('total',0)} | "
                 f"已翻译 {e.get('translated',0)}/{e.get('total',0)} | "

@@ -366,5 +366,43 @@ class TestRun(unittest.TestCase):
             self.assertTrue(len(done_calls) >= 1, "并行模式应发出 done 事件")
 
 
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_parallel_reports_translation_error_after_stream_end(self, mock_find_tool, mock_translate):
+        """_STREAM_END 提前结束消费循环时，仍应上报翻译 future 的异常"""
+        mock_find_tool.return_value = None
+        mock_translate.side_effect = RuntimeError("translation failed")
+        opts = {
+            "work_dir": str(Path.cwd()),
+            "model_dir": "fake",
+            "language": "auto",
+            "device": "cpu",
+            "compute_type": "int8",
+            "translate_enabled": False,
+            "extract_audio": True,
+            "vad_filter": True,
+            "api_url": "",
+            "api_key": "",
+            "translation_model": "",
+            "skip_completed": False,
+            "post": self.post,
+            "concurrency": 2,
+            "_is_stopped": lambda: False,
+            "_register_proc": MagicMock(),
+            "_unregister_proc": MagicMock(),
+        }
+
+        with tempfile.TemporaryDirectory() as d:
+            srt = Path(d) / "test.srt"
+            srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+
+            self.w._run([srt], opts)
+
+        errors = [c[0][0] for c in self.post.call_args_list
+                  if c[0][0].get("type") == "error"]
+        self.assertTrue(errors, "并行翻译异常应发出 error 事件")
+        self.assertIn("translation failed", errors[0]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

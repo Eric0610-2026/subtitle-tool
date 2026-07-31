@@ -236,6 +236,11 @@ class TranslationClient:
 
         with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
             batch_futures: List[tuple] = []
+            self.post_ui({
+                "type": "log",
+                "message": f"开始提交翻译批次：共 {total_batches} 批（{len(unique_texts)} 句）",
+                "level": "INFO",
+            })
             for batch_idx in range(0, len(unique_texts), effective_batch_size):
                 batch = unique_texts[batch_idx:batch_idx + effective_batch_size]
                 batch_id = batch_idx // self.batch_size + 1
@@ -251,8 +256,15 @@ class TranslationClient:
                     context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
                     context_text = "\n".join(context_lines) + "\n"
                 self.post_ui({
-                    "type": "log", "message": f"提交翻译批次 {batch_id}/{total_batches}（{len(batch)} 句）",
-                    "level": "INFO",
+                    "type": "translation_monitor",
+                    "percent": 0,
+                    "stage": "翻译",
+                    "detail": f"批次 {batch_id}/{total_batches} · 正在请求大模型（{len(batch)} 句）",
+                    "batch_id": batch_id,
+                    "total_batches": total_batches,
+                    "batch_sentences": len(batch),
+                    "total_sentences": len(unique_texts),
+                    "completed_sentences": 0,
                 })
                 future = executor.submit(self._translate_batch, batch, context_text, 0)
                 batch_futures.append((future, batch, text_to_gsid, batch_id, main_para))
@@ -301,6 +313,17 @@ class TranslationClient:
                         "updated_at": datetime.now().isoformat(),
                     })
                 completed_count += 1
+                self.post_ui({
+                    "type": "translation_monitor",
+                    "percent": (completed_count / max(total_batches, 1)) * 100,
+                    "stage": "翻译",
+                    "detail": f"批次 {batch_id}/{total_batches} 完成，已处理 {completed_count}/{total_batches} 批",
+                    "batch_id": batch_id,
+                    "total_batches": total_batches,
+                    "batch_sentences": len(batch),
+                    "total_sentences": len(unique_texts),
+                    "completed_sentences": min(len(unique_texts), sum(len(item[1]) for item in batch_futures[:completed_count])),
+                })
                 self.post_ui({
                     "type": "progress",
                     "percent": (completed_count / max(total_batches, 1)) * 100,

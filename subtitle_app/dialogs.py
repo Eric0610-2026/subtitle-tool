@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QTabWidget, QWidget, QFrame,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPalette
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
@@ -245,7 +245,43 @@ class ModelConfigDialog(QDialog):
 
         # ── 模型列表 ──
         self.model_list = QListWidget()
+        self.model_list.setObjectName("modelList")
         self.model_list.setAlternatingRowColors(True)
+        dark_mode = self.palette().color(QPalette.Window).lightness() < 128
+        if dark_mode:
+            list_bg = "#202535"
+            alt_bg = "#252b3d"
+            text_fg = "#dbe4f0"
+            border = "#3b455b"
+            hover_bg = "#303951"
+            selected_bg = "#4f5f9f"
+        else:
+            list_bg = "#ffffff"
+            alt_bg = "#f1f5f9"
+            text_fg = "#172033"
+            border = "#cbd5e1"
+            hover_bg = "#e0e7ff"
+            selected_bg = "#4f46e5"
+        self.model_list.setStyleSheet(f"""
+            QListWidget#modelList {{
+                background: {list_bg}; color: {text_fg};
+                alternate-background-color: {alt_bg};
+                selection-background-color: {selected_bg};
+                selection-color: #ffffff; border: 1px solid {border};
+            }}
+            QListWidget#modelList::item {{
+                color: {text_fg}; background: {list_bg}; padding: 6px 8px;
+            }}
+            QListWidget#modelList::item:alternate {{
+                color: {text_fg}; background: {alt_bg};
+            }}
+            QListWidget#modelList::item:hover {{
+                color: {text_fg}; background: {hover_bg};
+            }}
+            QListWidget#modelList::item:selected {{
+                color: #ffffff; background: {selected_bg};
+            }}
+        """)
         self.model_list.itemClicked.connect(self._on_item_clicked)
         self.model_list.itemDoubleClicked.connect(lambda item: self.accept())
         layout.addWidget(self.model_list, 1)
