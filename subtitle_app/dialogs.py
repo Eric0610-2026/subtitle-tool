@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
     QAbstractItemView, QTabWidget, QWidget, QFrame,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QObject
-from PySide6.QtGui import QFont, QPalette
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
+from PySide6.QtGui import QFont, QPalette, QIcon, QPainter, QPen, QPixmap, QColor
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
@@ -29,6 +29,36 @@ _SCROLLBAR_STYLE = """
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; border:none; }
     QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:none; }
 """
+
+
+def _circle_symbol_icon(symbol: str, size: int = 18) -> QIcon:
+    """绘制圆形加号/减号图标（不依赖系统 emoji 字体）"""
+    def _draw(bg: QColor, fg: QColor) -> QPixmap:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        margin = 1
+        p.drawEllipse(margin, margin, size - 2 * margin, size - 2 * margin)
+        pen = QPen(fg, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        c = size / 2
+        arm = size / 2 - 3.5
+        p.drawLine(c - arm, c, c + arm, c)  # 横线
+        if symbol == "+":
+            p.drawLine(c, c - arm, c, c + arm)  # 竖线
+        p.end()
+        return pm
+
+    icon = QIcon()
+    icon.addPixmap(_draw(QColor("#6366f1"), QColor("white")),
+                   QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_draw(QColor("#cbd5e1"), QColor("#94a3b8")),
+                   QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
 
 
 class ApiTestWorker(QObject):
@@ -224,11 +254,19 @@ class ModelConfigDialog(QDialog):
 
         # ── API Key ──
         layout.addWidget(QLabel("API Key"))
+        key_row = QHBoxLayout()
         self.api_key_edit = QLineEdit(api_key)
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("sk-...")
         self.api_key_edit.textChanged.connect(self._on_field_changed)
-        layout.addWidget(self.api_key_edit)
+        key_row.addWidget(self.api_key_edit, 1)
+        self.show_key_btn = QPushButton("显示")
+        self.show_key_btn.setFixedWidth(52)
+        self.show_key_btn.setToolTip("显示/隐藏 API Key")
+        self.show_key_btn.setCheckable(True)
+        self.show_key_btn.clicked.connect(self._toggle_key_visible)
+        key_row.addWidget(self.show_key_btn)
+        layout.addLayout(key_row)
 
         # ── 搜索框 + 获取列表 ──
         search_row = QHBoxLayout()
@@ -329,6 +367,12 @@ class ModelConfigDialog(QDialog):
     def _on_field_changed(self):
         """字段变化时清空状态"""
         self.status_label.setText("")
+
+    def _toggle_key_visible(self, checked: bool):
+        """切换 API Key 明文/密文显示"""
+        self.api_key_edit.setEchoMode(
+            QLineEdit.Normal if checked else QLineEdit.Password)
+        self.show_key_btn.setText("隐藏" if checked else "显示")
 
     # ── 搜索过滤 ──
 
@@ -451,7 +495,10 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent, values: dict):
         super().__init__(parent)
-        self.setStyleSheet(_SCROLLBAR_STYLE)
+        self.setStyleSheet(_SCROLLBAR_STYLE + """
+            QCheckBox { background: transparent; spacing: 7px; }
+            QCheckBox::indicator { width: 16px; height: 16px; }
+        """)
         self.setWindowTitle("更多设置")
         self.setMinimumWidth(520)
         self._model_name = values.get("translation_model", "")
@@ -491,6 +538,7 @@ class SettingsDialog(QDialog):
         g1.addWidget(self.precision, r, 1)
         r += 1
         opts_row = QHBoxLayout()
+        opts_row.setSpacing(18)
         self.extract_cb = QCheckBox("提取音频")
         self.extract_cb.setChecked(values.get("extract_audio", True))
         opts_row.addWidget(self.extract_cb)
@@ -538,16 +586,18 @@ class SettingsDialog(QDialog):
         self.preset_combo = QComboBox()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
         preset_row.addWidget(self.preset_combo, 1)
-        add_btn = QPushButton("+")
+        add_btn = QPushButton()
         add_btn.setFixedWidth(32)
+        add_btn.setIcon(_circle_symbol_icon("+"))
+        add_btn.setIconSize(QSize(18, 18))
         add_btn.setToolTip("添加新方案")
-        add_btn.setStyleSheet("font-size:18px; font-weight:bold;")
         add_btn.clicked.connect(self._add_preset)
         preset_row.addWidget(add_btn)
-        self.del_btn = QPushButton("-")
+        self.del_btn = QPushButton()
         self.del_btn.setFixedWidth(32)
+        self.del_btn.setIcon(_circle_symbol_icon("-"))
+        self.del_btn.setIconSize(QSize(18, 18))
         self.del_btn.setToolTip("删除当前方案")
-        self.del_btn.setStyleSheet("font-size:18px; font-weight:bold;")
         self.del_btn.clicked.connect(self._del_preset)
         preset_row.addWidget(self.del_btn)
         preset_row.addStretch()
@@ -667,7 +717,6 @@ class SettingsDialog(QDialog):
         self._load_preset_fields(self._get_current_preset())
         self._updating = False
         self.del_btn.setEnabled(len(self._presets) > 1)
-        self.del_btn.setStyleSheet("font-size:16px; font-weight:bold;")
         self._update_cfg_btn_text()
 
     def _refresh_combo_labels(self):
