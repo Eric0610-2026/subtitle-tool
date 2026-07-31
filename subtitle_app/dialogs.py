@@ -198,6 +198,218 @@ class ModelListWorker(QObject):
             self.error.emit("响应格式不符合预期（缺少 data 数组）")
 
 
+class ModelConfigDialog(QDialog):
+    """二级对话框：模型配置（API URL/Key + 模型选择/搜索/检测）"""
+
+    def __init__(self, parent, api_url: str = "", api_key: str = "",
+                 current_model: str = "", target_lang: str = "zh"):
+        super().__init__(parent)
+        self.setWindowTitle("模型配置")
+        self.setMinimumSize(520, 520)
+        self.resize(560, 560)
+        self._api_url = api_url
+        self._api_key = api_key
+        self._target_lang = target_lang
+        self._all_models: List[str] = []
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # ── API URL ──
+        layout.addWidget(QLabel("API URL"))
+        self.api_url_edit = QLineEdit(api_url)
+        self.api_url_edit.setPlaceholderText("https://api.example.com/v1/chat/completions")
+        self.api_url_edit.textChanged.connect(self._on_field_changed)
+        layout.addWidget(self.api_url_edit)
+
+        # ── API Key ──
+        layout.addWidget(QLabel("API Key"))
+        self.api_key_edit = QLineEdit(api_key)
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("sk-...")
+        self.api_key_edit.textChanged.connect(self._on_field_changed)
+        layout.addWidget(self.api_key_edit)
+
+        # ── 搜索框 + 获取列表 ──
+        search_row = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 搜索模型...")
+        self.search_edit.textChanged.connect(self._apply_filter)
+        search_row.addWidget(self.search_edit, 1)
+        self.fetch_btn = QPushButton("📋 获取列表")
+        self.fetch_btn.setObjectName("accentBtn")
+        self.fetch_btn.setToolTip("从 API 获取可用模型列表")
+        self.fetch_btn.clicked.connect(self._fetch_models)
+        search_row.addWidget(self.fetch_btn)
+        layout.addLayout(search_row)
+
+        # ── 模型列表 ──
+        self.model_list = QListWidget()
+        self.model_list.setAlternatingRowColors(True)
+        self.model_list.itemClicked.connect(self._on_item_clicked)
+        self.model_list.itemDoubleClicked.connect(lambda item: self.accept())
+        layout.addWidget(self.model_list, 1)
+
+        # ── 手动输入 + 检测 ──
+        manual_row = QHBoxLayout()
+        manual_row.addWidget(QLabel("或手动输入:"))
+        self.manual_edit = QLineEdit()
+        self.manual_edit.setPlaceholderText("输入模型名称...")
+        manual_row.addWidget(self.manual_edit, 1)
+        self.test_btn = QPushButton("🔍 检测")
+        self.test_btn.setObjectName("accentBtn")
+        self.test_btn.setToolTip("向 API 发送一条测试请求，验证选中模型是否可用")
+        self.test_btn.clicked.connect(self._test_selected)
+        manual_row.addWidget(self.test_btn)
+        layout.addLayout(manual_row)
+
+        # ── 状态 ──
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
+        layout.addWidget(self.status_label)
+
+        # ── 底部按钮 ──
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        ok_btn = QPushButton("确定")
+        ok_btn.setObjectName("startBtn")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+        # 预填当前模型
+        if current_model:
+            self._all_models = [current_model]
+            self._apply_filter("")
+            self.manual_edit.setText(current_model)
+
+        # 自动获取（有 URL 和 Key 时）
+        if api_url and api_key:
+            self._fetch_models()
+
+    def _on_field_changed(self):
+        """字段变化时清空状态"""
+        self.status_label.setText("")
+
+    # ── 搜索过滤 ──
+
+    def _apply_filter(self, text: str):
+        self.model_list.clear()
+        keyword = text.strip().lower()
+        for mid in self._all_models:
+            if not keyword or keyword in mid.lower():
+                self.model_list.addItem(mid)
+
+    def _on_item_clicked(self, item):
+        """列表点击时同步到手动输入框"""
+        self.manual_edit.setText(item.text())
+
+    # ── 获取模型列表 ──
+
+    def _fetch_models(self):
+        api_url = self.api_url_edit.text().strip()
+        api_key = self.api_key_edit.text().strip()
+        if not api_url:
+            self.status_label.setText("⚠ 请先填写 API URL")
+            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
+            return
+        if not api_key:
+            self.status_label.setText("⚠ 请先填写 API Key")
+            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
+            return
+
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText("⏳ 获取中...")
+        self.status_label.setText("⏳ 正在获取模型列表...")
+        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
+
+        self._thread = QThread()
+        self._worker = ModelListWorker(api_url, api_key)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_models_fetched)
+        self._worker.error.connect(self._on_models_error)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.error.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.error.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
+
+    def _on_models_fetched(self, model_ids: list):
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("📋 获取列表")
+        self._all_models = list(model_ids)
+        self._apply_filter(self.search_edit.text())
+        self.status_label.setText(f"✅ 获取到 {len(model_ids)} 个模型")
+        self.status_label.setStyleSheet("color:#22c55e; font-size:11px;")
+
+    def _on_models_error(self, err_msg: str):
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("📋 获取列表")
+        self.status_label.setText(f"❌ {err_msg}")
+        self.status_label.setStyleSheet("color:#ef4444; font-size:11px;")
+
+    # ── 检测 ──
+
+    def _test_selected(self):
+        model = self.selected_model()
+        api_url = self.api_url_edit.text().strip()
+        api_key = self.api_key_edit.text().strip()
+        if not api_url or not api_key:
+            self.status_label.setText("⚠ 请先填写 API URL 和 Key")
+            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
+            return
+        if not model:
+            self.status_label.setText("⚠ 请先选择或输入模型")
+            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
+            return
+
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("⏳ 检测中...")
+        self.status_label.setText("⏳ 正在连接 API...")
+        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
+
+        self._test_thread = QThread()
+        self._test_worker = ApiTestWorker(api_url, api_key, model, self._target_lang)
+        self._test_worker.moveToThread(self._test_thread)
+        self._test_thread.started.connect(self._test_worker.run)
+        self._test_worker.finished.connect(self._on_test_done)
+        self._test_worker.finished.connect(self._test_thread.quit)
+        self._test_worker.finished.connect(self._test_worker.deleteLater)
+        self._test_thread.finished.connect(self._test_thread.deleteLater)
+        self._test_thread.start()
+
+    def _on_test_done(self, result: str):
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("🔍 检测")
+        is_success = result.startswith("✅")
+        self.status_label.setText(result)
+        if is_success:
+            self.status_label.setStyleSheet("color:#22c55e; font-size:11px;")
+        else:
+            self.status_label.setStyleSheet("color:#ef4444; font-size:11px;")
+
+    # ── 结果 ──
+
+    def selected_model(self) -> str:
+        item = self.model_list.currentItem()
+        if item:
+            return item.text().strip()
+        manual = self.manual_edit.text().strip()
+        return manual
+
+    def get_values(self) -> dict:
+        return {
+            "api_url": self.api_url_edit.text().strip(),
+            "api_key": self.api_key_edit.text().strip(),
+            "model": self.selected_model(),
+        }
+
+
 class SettingsDialog(QDialog):
     """二级设置对话框——语音识别 + AI翻译全部参数"""
 
@@ -206,6 +418,7 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(_SCROLLBAR_STYLE)
         self.setWindowTitle("更多设置")
         self.setMinimumWidth(520)
+        self._model_name = values.get("translation_model", "")
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
 
@@ -312,49 +525,23 @@ class SettingsDialog(QDialog):
         g2.addWidget(self.preset_name, r, 1, 1, 2)
         r += 1
 
-        g2.addWidget(QLabel("API URL"), r, 0)
-        self.api_url = QLineEdit()
-        self.api_url.textChanged.connect(self._on_field_changed)
-        g2.addWidget(self.api_url, r, 1, 1, 2)
+        # ── 模型配置按钮（点开二级页）──
+        g2.addWidget(QLabel("模型配置"), r, 0)
+        cfg_row = QHBoxLayout()
+        cfg_row.setSpacing(4)
+        self.model_cfg_btn = QPushButton()
+        self.model_cfg_btn.setObjectName("accentBtn")
+        self.model_cfg_btn.setCursor(Qt.PointingHandCursor)
+        self.model_cfg_btn.setStyleSheet("text-align:left; padding:6px 10px; font-size:12px;")
+        self.model_cfg_btn.clicked.connect(self._open_model_config)
+        cfg_row.addWidget(self.model_cfg_btn, 1)
+        self.cfg_status_dot = QLabel("●")
+        self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
+        self.cfg_status_dot.setToolTip("灰色=未配置，绿色=已配置")
+        cfg_row.addWidget(self.cfg_status_dot)
+        g2.addLayout(cfg_row, r, 1, 1, 2)
         r += 1
-
-        g2.addWidget(QLabel("API Key"), r, 0)
-        self.api_key = QLineEdit()
-        self.api_key.setEchoMode(QLineEdit.Password)
-        self.api_key.textChanged.connect(self._on_field_changed)
-        g2.addWidget(self.api_key, r, 1, 1, 2)
-        r += 1
-
-        g2.addWidget(QLabel("模型"), r, 0)
-        model_row = QHBoxLayout()
-        model_row.setSpacing(4)
-        self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)
-        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.model_combo.setPlaceholderText("选择或输入模型名称...")
-        current_model = values.get("translation_model", "")
-        if current_model:
-            self.model_combo.addItem(current_model)
-        self.model_combo.editTextChanged.connect(self._on_field_changed)
-        model_row.addWidget(self.model_combo, 1)
-        self.fetch_btn = QPushButton("📋 获取列表")
-        self.fetch_btn.setObjectName("accentBtn")
-        self.fetch_btn.setToolTip("从 API 获取可用模型列表")
-        self.fetch_btn.clicked.connect(self._fetch_models)
-        model_row.addWidget(self.fetch_btn)
-        self.test_btn = QPushButton("🔍 检测")
-        self.test_btn.setObjectName("accentBtn")
-        self.test_btn.setToolTip("向 API 发送一条测试请求，验证配置是否可用")
-        self.test_btn.clicked.connect(self._test_current_preset)
-        model_row.addWidget(self.test_btn)
-        g2.addLayout(model_row, r, 1, 1, 2)
-        r += 1
-
-        # ── 检测结果状态 ──
-        self.test_status = QLabel("")
-        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
-        g2.addWidget(self.test_status, r, 1, 1, 2)
-        r += 1
+        self._update_cfg_btn_text()
 
         # ── 其余选项 ──
         self.only_zh_cb = QCheckBox("只要译文（不生成双语）")
@@ -418,17 +605,13 @@ class SettingsDialog(QDialog):
         """将当前 UI 字段值刷回方案字典"""
         p = self._get_current_preset()
         p["name"] = self.preset_name.text().strip() or "未命名方案"
-        p["api_url"] = self.api_url.text().strip()
-        p["api_key"] = self.api_key.text().strip()
-        p["model"] = self.model_combo.currentText().strip()
+        p["model"] = self._model_name
 
     def _load_preset_fields(self, preset: dict):
         """将方案数据加载到 UI 编辑字段"""
         self.preset_name.setText(preset["name"])
-        self.api_url.setText(preset.get("api_url", ""))
-        self.api_key.setText(preset.get("api_key", ""))
-        self.model_combo.clear()
-        self.model_combo.setEditText(preset.get("model", ""))
+        self._model_name = preset.get("model", "")
+        self._update_cfg_btn_text()
 
     def _rebuild_combo(self):
         """重建方案下拉框（添加/删除/切换后调用）"""
@@ -449,7 +632,7 @@ class SettingsDialog(QDialog):
         self._updating = False
         self.del_btn.setEnabled(len(self._presets) > 1)
         self.del_btn.setStyleSheet("font-size:16px; font-weight:bold;")
-        self.test_status.setText("")
+        self._update_cfg_btn_text()
 
     def _refresh_combo_labels(self):
         """更新下拉框文字上的星标（不重建控件）"""
@@ -477,7 +660,7 @@ class SettingsDialog(QDialog):
             self._load_preset_fields(self._get_preset(pid))
             self._refresh_combo_labels()
             self._updating = False
-            self.test_status.setText("")
+            self._update_cfg_btn_text()
 
     def _on_field_changed(self):
         """字段变化时自动保存到当前方案"""
@@ -492,8 +675,7 @@ class SettingsDialog(QDialog):
                 else:
                     label = "  " + p["name"]
                 self.preset_combo.setItemText(idx, label)
-            # 字段变化后清除检测状态
-            self.test_status.setText("")
+            self._update_cfg_btn_text()
 
     def _add_preset(self):
         """添加空白新方案并选中"""
@@ -531,116 +713,41 @@ class SettingsDialog(QDialog):
         self._active_id = self._presets[0]["id"]
         self._rebuild_combo()
 
-    def _fetch_models(self):
-        """从 API 获取可用模型列表"""
-        # 先保存当前编辑内容，确保 API URL 和 Key 最新
+    def _open_model_config(self):
+        """打开模型配置二级对话框"""
         self._save_current_preset()
+        cur = self._get_current_preset()
+        dlg = ModelConfigDialog(self, api_url=cur.get("api_url", ""),
+                                api_key=cur.get("api_key", ""),
+                                current_model=self._model_name,
+                                target_lang=self.target_lang.currentText())
+        if dlg.exec() == QDialog.Accepted:
+            vals = dlg.get_values()
+            cur["api_url"] = vals["api_url"]
+            cur["api_key"] = vals["api_key"]
+            cur["model"] = vals["model"]
+            self._model_name = vals["model"]
+            self._update_cfg_btn_text()
+
+    def _update_cfg_btn_text(self):
+        """更新模型配置按钮的显示文字和状态指示器"""
         cur = self._get_current_preset()
         api_url = cur.get("api_url", "").strip()
         api_key = cur.get("api_key", "").strip()
-
-        if not api_url:
-            self.test_status.setText("⚠ 请先填写 API URL")
-            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
-            return
-        if not api_key:
-            self.test_status.setText("⚠ 请先填写 API Key")
-            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
-            return
-
-        self.fetch_btn.setEnabled(False)
-        self.fetch_btn.setText("⏳ 获取中...")
-        self.test_status.setText("⏳ 正在获取模型列表...")
-        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
-
-        self._model_thread = QThread()
-        self._model_worker = ModelListWorker(api_url, api_key)
-        self._model_worker.moveToThread(self._model_thread)
-        self._model_thread.started.connect(self._model_worker.run)
-        self._model_worker.finished.connect(self._on_models_fetched)
-        self._model_worker.error.connect(self._on_models_error)
-        self._model_worker.finished.connect(self._model_thread.quit)
-        self._model_worker.error.connect(self._model_thread.quit)
-        self._model_worker.finished.connect(self._model_worker.deleteLater)
-        self._model_worker.error.connect(self._model_worker.deleteLater)
-        self._model_thread.finished.connect(self._model_thread.deleteLater)
-        self._model_thread.start()
-
-    def _on_models_fetched(self, model_ids: list):
-        """获取模型列表成功"""
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("📋 获取列表")
-        # 保存当前输入的文字
-        current_text = self.model_combo.currentText().strip()
-        # 重新填充下拉框
-        self.model_combo.clear()
-        self.model_combo.addItems(model_ids)
-        # 恢复之前选中的模型
-        idx = self.model_combo.findText(current_text)
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
+        model = self._model_name
+        configured = bool(api_url and api_key and model)
+        if model:
+            self.model_cfg_btn.setText(f"⚙  {model}")
+            self.model_cfg_btn.setToolTip(f"模型: {model}\nURL: {api_url[:40]}...\n点击修改配置")
         else:
-            self.model_combo.setEditText(current_text)
-        # 显示状态
-        self.test_status.setText(f"✅ 获取到 {len(model_ids)} 个模型")
-        self.test_status.setStyleSheet("color:#22c55e; font-size:11px; padding-left:4px;")
-
-    def _on_models_error(self, err_msg: str):
-        """获取模型列表失败"""
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("📋 获取列表")
-        self.test_status.setText(f"❌ {err_msg}")
-        self.test_status.setStyleSheet("color:#ef4444; font-size:11px; padding-left:4px;")
-
-    def _test_current_preset(self):
-        """检测当前方案配置是否可用"""
-        # 先保存当前编辑内容
-        self._save_current_preset()
-        cur = self._get_current_preset()
-        api_url = cur.get("api_url", "").strip()
-        api_key = cur.get("api_key", "").strip()
-        model = cur.get("model", "").strip()
-        target_lang = self.target_lang.currentText()
-
-        if not api_url:
-            self.test_status.setText("⚠ 请先填写 API URL")
-            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
-            return
-        if not api_key:
-            self.test_status.setText("⚠ 请先填写 API Key")
-            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
-            return
-        if not model:
-            self.test_status.setText("⚠ 请先选择或输入模型名称")
-            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
-            return
-
-        self.test_btn.setEnabled(False)
-        self.test_btn.setText("⏳ 检测中...")
-        self.test_status.setText("⏳ 正在连接 API...")
-        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
-
-        # 创建后台线程检测
-        self._test_thread = QThread()
-        self._test_worker = ApiTestWorker(api_url, api_key, model, target_lang)
-        self._test_worker.moveToThread(self._test_thread)
-        self._test_thread.started.connect(self._test_worker.run)
-        self._test_worker.finished.connect(self._on_test_result)
-        self._test_worker.finished.connect(self._test_thread.quit)
-        self._test_worker.finished.connect(self._test_worker.deleteLater)
-        self._test_thread.finished.connect(self._test_thread.deleteLater)
-        self._test_thread.start()
-
-    def _on_test_result(self, result: str):
-        """检测完成后的回调"""
-        self.test_btn.setEnabled(True)
-        self.test_btn.setText("🔍 检测")
-        is_success = result.startswith("✅")
-        self.test_status.setText(result)
-        if is_success:
-            self.test_status.setStyleSheet("color:#22c55e; font-size:11px; padding-left:4px;")
+            self.model_cfg_btn.setText("⚙  点击配置模型...")
+            self.model_cfg_btn.setToolTip("点击配置 API URL、Key 和模型")
+        if configured:
+            self.cfg_status_dot.setStyleSheet("color:#22c55e; font-size:16px;")
+            self.cfg_status_dot.setToolTip("已配置 ✓")
         else:
-            self.test_status.setStyleSheet("color:#ef4444; font-size:11px; padding-left:4px;")
+            self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
+            self.cfg_status_dot.setToolTip("未配置 - 点击配置")
 
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
