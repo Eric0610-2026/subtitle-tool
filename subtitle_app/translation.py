@@ -11,6 +11,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -133,10 +134,12 @@ class TranslationClient:
     """翻译客户端：句子级缓存 + 批量翻译 + 断点续翻 + 403 fallback"""
 
     def __init__(self, api_url: str, api_key: str, model: str, cache_path: Path,
-                 post_ui: Callable, batch_size: int = None, target_lang: str = "zh"):
+                 post_ui: Callable, batch_size: int = None, target_lang: str = "zh",
+                 send_all: bool = False):
         if batch_size is None:
             batch_size = cfg.translation.batch_size
         self.batch_size = batch_size
+        self.send_all = send_all
         self.api_url = api_url
         self.api_key = api_key
         self.model = model
@@ -227,13 +230,14 @@ class TranslationClient:
             return result_texts
 
         # Step 3: 批量翻译（多线程并发 API 调用）
-        total_batches = (len(unique_texts) + self.batch_size - 1) // self.batch_size
+        effective_batch_size = len(unique_texts) if self.send_all else self.batch_size
+        total_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
         para_context: Dict[int, List[str]] = {}
 
         with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
             batch_futures: List[tuple] = []
-            for batch_idx in range(0, len(unique_texts), self.batch_size):
-                batch = unique_texts[batch_idx:batch_idx + self.batch_size]
+            for batch_idx in range(0, len(unique_texts), effective_batch_size):
+                batch = unique_texts[batch_idx:batch_idx + effective_batch_size]
                 batch_id = batch_idx // self.batch_size + 1
                 para_ids = set()
                 for text in batch:
@@ -261,7 +265,7 @@ class TranslationClient:
                     try:
                         translations = future.result(timeout=15)
                         break
-                    except TimeoutError:
+                    except (concurrent.futures.TimeoutError, TimeoutError):
                         self.post_ui({
                             "type": "progress",
                             "percent": (completed_count / max(total_batches, 1)) * 100,

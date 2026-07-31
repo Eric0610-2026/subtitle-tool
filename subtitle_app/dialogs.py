@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
     QAbstractItemView, QTabWidget, QWidget, QFrame,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QFont
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
@@ -29,6 +29,173 @@ _SCROLLBAR_STYLE = """
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; border:none; }
     QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:none; }
 """
+
+
+class ApiTestWorker(QObject):
+    """后台线程：测试 API 连接是否可用"""
+    finished = Signal(str)  # 返回结果消息
+
+    def __init__(self, api_url: str, api_key: str, model: str, target_lang: str = "zh"):
+        super().__init__()
+        self.api_url = api_url
+        self.api_key = api_key
+        self.model = model
+        self.target_lang = target_lang
+
+    def run(self):
+        """发送一条测试请求，验证 API 配置是否有效"""
+        # 构造简单的测试请求——只发一条简短翻译，确认 API 返回可用
+        import json, urllib.request, urllib.error, time
+        test_text = "Hello"
+        prompt = (
+            f"你是严谨的字幕翻译器。将以下数组中的字幕文本逐条翻译为{self.target_lang}。"
+            "要求：\n"
+            f"1. 译文符合{self.target_lang}表达习惯，自然流畅\n"
+            "2. 返回格式严格为 JSON 数组，每个元素为对应译文\n"
+            f'示例：["你好"]'
+        )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps([test_text], ensure_ascii=False)},
+            ],
+            "temperature": 0.1,
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(self.api_url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:200]
+            self.finished.emit(f"❌ HTTP {e.code}: {body}")
+            return
+        except urllib.error.URLError as e:
+            self.finished.emit(f"❌ 网络错误: {e.reason}")
+            return
+        except TimeoutError:
+            self.finished.emit("❌ 请求超时（30s）")
+            return
+        except json.JSONDecodeError:
+            self.finished.emit("❌ 响应不是有效的 JSON")
+            return
+        except Exception as e:
+            self.finished.emit(f"❌ 请求失败: {e}")
+            return
+
+        # 检查响应
+        err = resp_json.get("error")
+        if err:
+            msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            self.finished.emit(f"❌ API 返回错误: {msg[:120]}")
+            return
+
+        choices = resp_json.get("choices", [])
+        if not choices:
+            self.finished.emit("❌ 响应缺少 choices 字段")
+            return
+
+        content = ""
+        if isinstance(choices[0], dict):
+            msg = choices[0].get("message", {})
+            if isinstance(msg, str):
+                content = msg
+            elif isinstance(msg, dict):
+                content = msg.get("content", "")
+
+        if not content:
+            self.finished.emit("❌ 响应内容为空")
+            return
+
+        # 模型名称
+        model_name = resp_json.get("model", "") or self.model
+        self.finished.emit(f"✅ 检测成功（模型: {model_name}）")
+
+
+class ModelListWorker(QObject):
+    """后台线程：获取 API 可用模型列表"""
+    finished = Signal(list)  # 返回模型 ID 列表
+    error = Signal(str)      # 返回错误消息
+
+    def __init__(self, api_url: str, api_key: str):
+        super().__init__()
+        self.api_url = api_url
+        self.api_key = api_key
+
+    @staticmethod
+    def derive_models_url(api_url: str) -> str:
+        """从 API URL 推导 models 端点 URL"""
+        url = api_url.rstrip("/")
+        # 标准 OpenAI 兼容格式：/v1/chat/completions → /v1/models
+        if url.endswith("/chat/completions"):
+            return url.replace("/chat/completions", "/models")
+        # 如果包含 /v1/ 但路径不同，尝试同级替换
+        if "/v1/" in url:
+            return url.rsplit("/", 1)[0] + "/models"
+        # 兜底
+        return url + "/models"
+
+    def run(self):
+        """调用 /v1/models 端点获取可用模型列表"""
+        import json, urllib.request, urllib.error
+        models_url = self.derive_models_url(self.api_url)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        req = urllib.request.Request(models_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:200]
+            self.error.emit(f"HTTP {e.code}: {body}")
+            return
+        except urllib.error.URLError as e:
+            self.error.emit(f"网络错误: {e.reason}")
+            return
+        except TimeoutError:
+            self.error.emit("请求超时（15s）")
+            return
+        except json.JSONDecodeError:
+            self.error.emit("响应不是有效的 JSON")
+            return
+        except Exception as e:
+            self.error.emit(f"请求失败: {e}")
+            return
+
+        # 提取模型列表
+        err = resp_json.get("error")
+        if err:
+            msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            self.error.emit(f"API 返回错误: {msg[:120]}")
+            return
+
+        models_data = resp_json.get("data", resp_json)
+        if isinstance(models_data, list):
+            model_ids = []
+            for m in models_data:
+                if isinstance(m, dict):
+                    mid = m.get("id", "")
+                elif isinstance(m, str):
+                    mid = m
+                else:
+                    continue
+                if mid:
+                    model_ids.append(mid)
+            if model_ids:
+                model_ids.sort()
+                self.finished.emit(model_ids)
+            else:
+                self.error.emit("模型列表为空")
+        else:
+            self.error.emit("响应格式不符合预期（缺少 data 数组）")
 
 
 class SettingsDialog(QDialog):
@@ -159,9 +326,34 @@ class SettingsDialog(QDialog):
         r += 1
 
         g2.addWidget(QLabel("模型"), r, 0)
-        self.model_name = QLineEdit()
-        self.model_name.textChanged.connect(self._on_field_changed)
-        g2.addWidget(self.model_name, r, 1, 1, 2)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(4)
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.model_combo.setPlaceholderText("选择或输入模型名称...")
+        current_model = values.get("translation_model", "")
+        if current_model:
+            self.model_combo.addItem(current_model)
+        self.model_combo.editTextChanged.connect(self._on_field_changed)
+        model_row.addWidget(self.model_combo, 1)
+        self.fetch_btn = QPushButton("📋 获取列表")
+        self.fetch_btn.setObjectName("accentBtn")
+        self.fetch_btn.setToolTip("从 API 获取可用模型列表")
+        self.fetch_btn.clicked.connect(self._fetch_models)
+        model_row.addWidget(self.fetch_btn)
+        self.test_btn = QPushButton("🔍 检测")
+        self.test_btn.setObjectName("accentBtn")
+        self.test_btn.setToolTip("向 API 发送一条测试请求，验证配置是否可用")
+        self.test_btn.clicked.connect(self._test_current_preset)
+        model_row.addWidget(self.test_btn)
+        g2.addLayout(model_row, r, 1, 1, 2)
+        r += 1
+
+        # ── 检测结果状态 ──
+        self.test_status = QLabel("")
+        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
+        g2.addWidget(self.test_status, r, 1, 1, 2)
         r += 1
 
         # ── 其余选项 ──
@@ -171,11 +363,19 @@ class SettingsDialog(QDialog):
         r += 1
 
         g2.addWidget(QLabel("批大小"), r, 0)
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(4)
         self.batch_size = QSpinBox()
-        self.batch_size.setRange(10, 200)
+        self.batch_size.setRange(10, 5000)
         self.batch_size.setSingleStep(5)
         self.batch_size.setValue(values.get("translation_batch_size", cfg.translation.batch_size))
-        g2.addWidget(self.batch_size, r, 1, 1, 2)
+        batch_row.addWidget(self.batch_size)
+        self.send_all_cb = QCheckBox("一次性发送全部文本（不拆分批次）")
+        self.send_all_cb.setChecked(values.get("send_all", False))
+        self.send_all_cb.toggled.connect(self._on_send_all_toggled)
+        batch_row.addWidget(self.send_all_cb)
+        batch_row.addStretch()
+        g2.addLayout(batch_row, r, 1, 1, 2)
         r += 1
 
         self.pause_embed_cb = QCheckBox("嵌入前暂停确认（可预览/编辑字幕后再嵌入）")
@@ -220,14 +420,15 @@ class SettingsDialog(QDialog):
         p["name"] = self.preset_name.text().strip() or "未命名方案"
         p["api_url"] = self.api_url.text().strip()
         p["api_key"] = self.api_key.text().strip()
-        p["model"] = self.model_name.text().strip()
+        p["model"] = self.model_combo.currentText().strip()
 
     def _load_preset_fields(self, preset: dict):
         """将方案数据加载到 UI 编辑字段"""
         self.preset_name.setText(preset["name"])
         self.api_url.setText(preset.get("api_url", ""))
         self.api_key.setText(preset.get("api_key", ""))
-        self.model_name.setText(preset.get("model", ""))
+        self.model_combo.clear()
+        self.model_combo.setEditText(preset.get("model", ""))
 
     def _rebuild_combo(self):
         """重建方案下拉框（添加/删除/切换后调用）"""
@@ -248,6 +449,7 @@ class SettingsDialog(QDialog):
         self._updating = False
         self.del_btn.setEnabled(len(self._presets) > 1)
         self.del_btn.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.test_status.setText("")
 
     def _refresh_combo_labels(self):
         """更新下拉框文字上的星标（不重建控件）"""
@@ -275,6 +477,7 @@ class SettingsDialog(QDialog):
             self._load_preset_fields(self._get_preset(pid))
             self._refresh_combo_labels()
             self._updating = False
+            self.test_status.setText("")
 
     def _on_field_changed(self):
         """字段变化时自动保存到当前方案"""
@@ -289,6 +492,8 @@ class SettingsDialog(QDialog):
                 else:
                     label = "  " + p["name"]
                 self.preset_combo.setItemText(idx, label)
+            # 字段变化后清除检测状态
+            self.test_status.setText("")
 
     def _add_preset(self):
         """添加空白新方案并选中"""
@@ -326,6 +531,125 @@ class SettingsDialog(QDialog):
         self._active_id = self._presets[0]["id"]
         self._rebuild_combo()
 
+    def _fetch_models(self):
+        """从 API 获取可用模型列表"""
+        # 先保存当前编辑内容，确保 API URL 和 Key 最新
+        self._save_current_preset()
+        cur = self._get_current_preset()
+        api_url = cur.get("api_url", "").strip()
+        api_key = cur.get("api_key", "").strip()
+
+        if not api_url:
+            self.test_status.setText("⚠ 请先填写 API URL")
+            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
+            return
+        if not api_key:
+            self.test_status.setText("⚠ 请先填写 API Key")
+            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
+            return
+
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText("⏳ 获取中...")
+        self.test_status.setText("⏳ 正在获取模型列表...")
+        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
+
+        self._model_thread = QThread()
+        self._model_worker = ModelListWorker(api_url, api_key)
+        self._model_worker.moveToThread(self._model_thread)
+        self._model_thread.started.connect(self._model_worker.run)
+        self._model_worker.finished.connect(self._on_models_fetched)
+        self._model_worker.error.connect(self._on_models_error)
+        self._model_worker.finished.connect(self._model_thread.quit)
+        self._model_worker.error.connect(self._model_thread.quit)
+        self._model_worker.finished.connect(self._model_worker.deleteLater)
+        self._model_worker.error.connect(self._model_worker.deleteLater)
+        self._model_thread.finished.connect(self._model_thread.deleteLater)
+        self._model_thread.start()
+
+    def _on_models_fetched(self, model_ids: list):
+        """获取模型列表成功"""
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("📋 获取列表")
+        # 保存当前输入的文字
+        current_text = self.model_combo.currentText().strip()
+        # 重新填充下拉框
+        self.model_combo.clear()
+        self.model_combo.addItems(model_ids)
+        # 恢复之前选中的模型
+        idx = self.model_combo.findText(current_text)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.setEditText(current_text)
+        # 显示状态
+        self.test_status.setText(f"✅ 获取到 {len(model_ids)} 个模型")
+        self.test_status.setStyleSheet("color:#22c55e; font-size:11px; padding-left:4px;")
+
+    def _on_models_error(self, err_msg: str):
+        """获取模型列表失败"""
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("📋 获取列表")
+        self.test_status.setText(f"❌ {err_msg}")
+        self.test_status.setStyleSheet("color:#ef4444; font-size:11px; padding-left:4px;")
+
+    def _test_current_preset(self):
+        """检测当前方案配置是否可用"""
+        # 先保存当前编辑内容
+        self._save_current_preset()
+        cur = self._get_current_preset()
+        api_url = cur.get("api_url", "").strip()
+        api_key = cur.get("api_key", "").strip()
+        model = cur.get("model", "").strip()
+        target_lang = self.target_lang.currentText()
+
+        if not api_url:
+            self.test_status.setText("⚠ 请先填写 API URL")
+            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
+            return
+        if not api_key:
+            self.test_status.setText("⚠ 请先填写 API Key")
+            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
+            return
+        if not model:
+            self.test_status.setText("⚠ 请先选择或输入模型名称")
+            self.test_status.setStyleSheet("color:#eab308; font-size:11px; padding-left:4px;")
+            return
+
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("⏳ 检测中...")
+        self.test_status.setText("⏳ 正在连接 API...")
+        self.test_status.setStyleSheet("color:#64748b; font-size:11px; padding-left:4px;")
+
+        # 创建后台线程检测
+        self._test_thread = QThread()
+        self._test_worker = ApiTestWorker(api_url, api_key, model, target_lang)
+        self._test_worker.moveToThread(self._test_thread)
+        self._test_thread.started.connect(self._test_worker.run)
+        self._test_worker.finished.connect(self._on_test_result)
+        self._test_worker.finished.connect(self._test_thread.quit)
+        self._test_worker.finished.connect(self._test_worker.deleteLater)
+        self._test_thread.finished.connect(self._test_thread.deleteLater)
+        self._test_thread.start()
+
+    def _on_test_result(self, result: str):
+        """检测完成后的回调"""
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("🔍 检测")
+        is_success = result.startswith("✅")
+        self.test_status.setText(result)
+        if is_success:
+            self.test_status.setStyleSheet("color:#22c55e; font-size:11px; padding-left:4px;")
+        else:
+            self.test_status.setStyleSheet("color:#ef4444; font-size:11px; padding-left:4px;")
+
+    def _on_send_all_toggled(self, checked: bool):
+        """一次性发送开关：勾选后禁用批大小调节"""
+        self.batch_size.setEnabled(not checked)
+        if checked:
+            self.batch_size.setStyleSheet("color:#94a3b8;")
+        else:
+            self.batch_size.setStyleSheet("")
+
     def get_values(self) -> dict:
         self._save_current_preset()
         cur = self._get_current_preset()
@@ -343,6 +667,7 @@ class SettingsDialog(QDialog):
             "pipeline": self.pipeline_cb.isChecked(),
             "translation_only": self.only_zh_cb.isChecked(),
             "translation_batch_size": self.batch_size.value(),
+            "send_all": self.send_all_cb.isChecked(),
             "pause_before_embed": self.pause_embed_cb.isChecked(),
             "presets": self._presets,
             "active_preset": self._active_id,

@@ -95,9 +95,11 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             post({"type": "log", "message": f"检测到 {len(already_translated_idx)} 条已有中文翻译，跳过翻译", "level": "INFO"})
 
         trans_concurrency = getattr(cfg.translation, "concurrency_translate", 3)
+        send_all = opts.get("send_all", False)
         client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
                                  batch_size=opts.get("translation_batch_size", cfg.translation.batch_size),
-                                 target_lang=opts.get("target_lang", "zh"))
+                                 target_lang=opts.get("target_lang", "zh"),
+                                 send_all=send_all)
         try:
             if need_translate_idx:
                 need_blocks = [blocks[i] for i in need_translate_idx]
