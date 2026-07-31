@@ -3,6 +3,7 @@
 import logging
 import queue
 import time
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -12,9 +13,9 @@ from PySide6.QtWidgets import (
     QTextEdit, QListWidget, QListWidgetItem, QWidget, QPushButton,
     QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
     QDoubleSpinBox, QLineEdit, QMessageBox,
-    QApplication, QAbstractSpinBox,
+    QApplication, QAbstractSpinBox, QToolButton,
 )
-from PySide6.QtGui import QFont, QFontMetrics, QColor, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QFont, QFontMetrics, QColor, QDragEnterEvent, QDropEvent, QPalette
 
 from .srt_utils import fmt_duration, estimate_eta
 from .widgets import LogEntry
@@ -68,9 +69,125 @@ def _silent_double_input(parent, title: str, label: str,
     return spin.value(), result == QDialog.Accepted
 
 
-class ProgressPanel(QGroupBox):
+class TranslationMonitor(QGroupBox):
+    """可折叠翻译监视器：展示批次、句子、速度和最近翻译结果。"""
+
     def __init__(self, parent=None):
-        super().__init__("进度", parent)
+        super().__init__("翻译监视器", parent)
+        self._expanded = True
+        self._started_at = None
+        self._total_sentences = 0
+        self._completed_sentences = 0
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setCheckable(True)
+        self.setChecked(True)
+        self.toggled.connect(self._toggle_content)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        self.summary = QLabel("等待翻译任务…")
+        self.summary.setObjectName("translationMonitorSummary")
+        layout.addWidget(self.summary)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("0%")
+        self.progress.setFixedHeight(17)
+        layout.addWidget(self.progress)
+
+        self.stats = QLabel("批次 --/--  ·  句子 --/--  ·  速度 --  ·  剩余 --")
+        self.stats.setObjectName("translationMonitorStats")
+        layout.addWidget(self.stats)
+
+        self.recent = QListWidget()
+        self.recent.setObjectName("translationRecentList")
+        self.recent.setMaximumHeight(112)
+        self.recent.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(self.recent)
+        self._content_widgets = [self.summary, self.progress, self.stats, self.recent]
+
+    def _toggle_content(self, checked):
+        for widget in self._content_widgets:
+            widget.setVisible(checked)
+        self._expanded = checked
+
+    def reset(self):
+        self._started_at = None
+        self._total_sentences = 0
+        self._completed_sentences = 0
+        self.summary.setText("等待翻译任务…")
+        self.progress.setValue(0)
+        self.progress.setFormat("0%")
+        self.stats.setText("批次 --/--  ·  句子 --/--  ·  速度 --  ·  剩余 --")
+        self.recent.clear()
+
+    def update_progress(self, event):
+        import time
+        if self._started_at is None:
+            self._started_at = time.monotonic()
+        detail = event.get("detail", "")
+        batch_id = event.get("batch_id")
+        total_batches = event.get("total_batches")
+        if batch_id is None or total_batches is None:
+            batch = re.search(r"批次\s+(\d+)/(\d+)", detail)
+            batch_id = int(batch.group(1)) if batch else None
+            total_batches = int(batch.group(2)) if batch else None
+        else:
+            batch = True
+        self._total_sentences = max(self._total_sentences, int(event.get("total_sentences") or 0))
+        self._completed_sentences = max(self._completed_sentences, int(event.get("completed_sentences") or 0))
+        pct = max(0, min(100, int(event.get("percent", 0))))
+        self.progress.setValue(pct)
+        self.progress.setFormat(f"{pct}%")
+        self.summary.setText(detail or "正在请求大模型…")
+        batch_text = f"批次 {batch_id}/{total_batches}" if batch_id and total_batches else "批次 --/--"
+        elapsed = max(time.monotonic() - self._started_at, 0.1)
+        speed = self._completed_sentences / elapsed * 60 if self._completed_sentences else 0
+        speed_text = f"{speed:.1f} 批/分钟" if speed else "计算中"
+        self.stats.setText(
+            f"{batch_text}  ·  句子约 {self._completed_sentences}/{self._total_sentences or '--'}  ·  "
+            f"速度 {speed_text}  ·  剩余 {max(0, 100 - pct)}%")
+        if detail and (not self.recent.count() or self.recent.item(0).text() != detail):
+            self.recent.insertItem(0, detail)
+            while self.recent.count() > 10:
+                self.recent.takeItem(10)
+
+    def finish(self):
+        self.progress.setValue(100)
+        self.progress.setFormat("100%")
+        self.summary.setText("翻译完成")
+
+
+class TranslationMonitorDialog(QDialog):
+    """翻译监视器二级页面。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("翻译进度详情")
+        self.setMinimumSize(520, 360)
+        self.resize(620, 420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.monitor = TranslationMonitor(self)
+        # 二级页面始终展开，避免用户打开后还要再次点击标题。
+        self.monitor.setChecked(True)
+        layout.addWidget(self.monitor)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.hide)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+
+class ProgressPanel(QFrame):
+    def __init__(self, parent=None, details_cb=None):
+        super().__init__(parent)
+        self._details_cb = details_cb
         self._start_time: Optional[float] = None
         self._build_ui()
 
@@ -98,6 +215,21 @@ class ProgressPanel(QGroupBox):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("进度")
+        title.setStyleSheet("font-weight:600; font-size:12px; padding:2px 0;")
+        title.setFixedHeight(20)
+        header.addWidget(title)
+        self.details_btn = QToolButton()
+        self.details_btn.setText("详情")
+        self.details_btn.setToolTip("打开翻译监视器")
+        self.details_btn.setAutoRaise(True)
+        self.details_btn.clicked.connect(self._open_details)
+        header.addWidget(self.details_btn)
+        header.addStretch()
+        layout.addLayout(header)
         self.overall_label = QLabel("总进度：等待中")
         self.overall_label.setStyleSheet("font-weight:600; color:#6366f1;")
         layout.addWidget(self.overall_label)
@@ -129,7 +261,9 @@ class ProgressPanel(QGroupBox):
         bot = QHBoxLayout()
         self.detail_label = QLabel("已用 --:-- | 剩余 --:-- | 预计 --")
         bot.addWidget(self.detail_label, 1)
-        layout.addLayout(bot)
+    def _open_details(self):
+        if self._details_cb:
+            self._details_cb()
 
     def reset(self):
         self.overall_progress.setValue(0)
@@ -195,7 +329,7 @@ class ProgressPanel(QGroupBox):
         self.detail_label.setText(" | ".join(parts))
 
 
-class PreviewPanel(QWidget):
+class PreviewPanel(QFrame):
     """字幕预览面板，支持拖入 .srt 文件"""
 
     fileDropped = Signal(str)  # 拖入文件路径
@@ -205,12 +339,63 @@ class PreviewPanel(QWidget):
         self._last_output_dir: Optional[Path] = None
         self._save_cb = None
         self._offset_cb = None
+        self._raw_text = ""
         self._build_ui()
+
+    def _render_structured_preview(self):
+        """将 SRT 文本渲染为只读表格，保留原文用于编辑和保存。"""
+        import html
+        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        dark = self.palette().color(QPalette.Base).lightness() < 128
+        table_bg = "#161b2a" if dark else "#ffffff"
+        header_bg = "#252b3d" if dark else "#eef2ff"
+        row_bg = "#1d2435" if dark else "#ffffff"
+        alt_bg = "#20283a" if dark else "#f8fafc"
+        border = "#3b455b" if dark else "#dbe3ef"
+        time_fg = "#9aa8bd" if dark else "#64748b"
+        text_fg = "#dbe4f0" if dark else "#172033"
+        translation_fg = "#b8c3ff" if dark else "#4f46e5"
+        if not blocks:
+            self.preview.setPlaceholderText("\n\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里")
+            self.preview.clear()
+            return
+
+        rows = []
+        for index, block in enumerate(blocks, 1):
+            lines = block.splitlines()
+            if len(lines) < 3:
+                continue
+            timeline = html.escape(lines[1].strip())
+            text_lines = [line.strip() for line in lines[2:] if line.strip()]
+            if not text_lines:
+                continue
+            original = html.escape(text_lines[0]).replace("\n", "<br>")
+            translated = "<br>".join(html.escape(line) for line in text_lines[1:]) or "—"
+            row_color = alt_bg if len(rows) % 2 else row_bg
+            rows.append(
+                f'<tr style="background:{row_color};">'
+                f'<td width="44" align="center" style="color:{time_fg};">{index}</td>'
+                f'<td width="190" style="color:{time_fg};">{timeline}</td>'
+                f'<td style="color:{text_fg};">{original}</td>'
+                f'<td style="color:{translation_fg};">{translated}</td></tr>'
+            )
+        table = (
+            f'<table width="100%" cellspacing="0" cellpadding="8" '
+            f'style="background:{table_bg}; border:1px solid {border};">'
+            f'<tr style="background:{header_bg};">'
+            f'<th width="44" style="color:{text_fg};">#</th>'
+            f'<th width="190" align="left" style="color:{text_fg};">时间轴</th>'
+            f'<th align="left" style="color:{text_fg};">原文</th>'
+            f'<th align="left" style="color:{text_fg};">译文</th></tr>'
+            f'{"".join(rows)}</table>'
+        )
+        self.preview.setPlaceholderText("")
+        self.preview.setHtml(table)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 0, 0, 0)
-
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
         tb = QHBoxLayout()
         title = QLabel("字幕预览")
         title.setStyleSheet("font-weight:600; font-size:12px; padding:2px 0;")
@@ -222,9 +407,13 @@ class PreviewPanel(QWidget):
         layout.addLayout(tb)
 
         self.preview = QTextEdit()
+        self.preview.setObjectName("subtitlePreview")
+        self.preview.setPlaceholderText("\n\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里")
         self.preview.setReadOnly(True)
         self.preview.setFont(QFont("Consolas", 10))
         self.preview.setAcceptDrops(False)
+        self.preview.setFrameShape(QFrame.NoFrame)
+        self.preview.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.preview, 1)
 
         self.setAcceptDrops(True)
@@ -256,20 +445,23 @@ class PreviewPanel(QWidget):
         self._offset_cb = offset_cb
 
     def set_text(self, text: str):
-        self.preview.setReadOnly(False)
-        self.preview.setText(text)
+        self._raw_text = text
+        self.preview.setReadOnly(True)
+        self._render_structured_preview()
 
     def clear(self):
+        self._raw_text = ""
         self.preview.clear()
         self.preview.setReadOnly(True)
 
     def append(self, text: str):
-        self.preview.append(text)
+        self._raw_text = f"{self._raw_text}\n\n{text}".strip()
+        self._render_structured_preview()
         sb = self.preview.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def get_text(self) -> str:
-        return self.preview.toPlainText()
+        return self._raw_text
 
     def _open_edit_dialog(self):
         content = self.get_text().strip()
@@ -528,7 +720,7 @@ class EditDialog(QDialog):
         logger.info(msg)
 
 
-class LogPanel(QWidget):
+class LogPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relayouting = False
@@ -536,14 +728,17 @@ class LogPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
         title = QLabel("日志")
         title.setStyleSheet("font-weight:600; font-size:12px; padding:2px 0;")
+        title.setFixedHeight(20)
         layout.addWidget(title)
         self.log_list = QListWidget()
         self.log_list.setObjectName("logList")
         self.log_list.setMinimumHeight(60)
         self.log_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.log_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.log_list)
 
     def add_entry(self, message: str, level: str = "INFO", trace: str = None):

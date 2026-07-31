@@ -163,6 +163,8 @@ class SubtitleWorker:
         tpool = ThreadPoolExecutor(max_workers=translate_workers)
         try:
             translate_futures = []
+            checked_futures = set()
+            translate_errors: List[Tuple[Exception, str]] = []
             while True:
                 if self.stop_requested:
                     # 立即关闭线程池，不等待正在执行的翻译任务
@@ -175,7 +177,10 @@ class SubtitleWorker:
                     try:
                         f.result()
                     except Exception as e:
-                        logger.error("翻译任务异常（流水线中捕获）: %s", e)
+                        tb = traceback.format_exc()
+                        logger.error("翻译任务异常（流水线中捕获）: %s\n%s", e, tb)
+                        translate_errors.append((e, tb))
+                    checked_futures.add(f)
                 try:
                     result = tq.get(timeout=0.5)
                 except queue.Empty:
@@ -198,6 +203,22 @@ class SubtitleWorker:
             # 正常退出时等待任务完成；停止路径中线程池已 shutdown(wait=False)
             if not self.stop_requested:
                 tpool.shutdown(wait=True)
+                # _STREAM_END 可能让主循环早于最后一批 future 退出，
+                # 此处必须读取所有未检查的 future，否则异常会被静默吞没。
+                for future in translate_futures:
+                    if future in checked_futures:
+                        continue
+                    try:
+                        future.result()
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        logger.error("翻译任务异常（流水线结束时捕获）: %s\n%s", e, tb)
+                        translate_errors.append((e, tb))
+
+        if translate_errors:
+            e, tb = translate_errors[0]
+            post({"type": "error", "message": f"翻译出错: {e}", "trace": tb})
+            return
 
         if error_info:
             e, tb = error_info[0]
