@@ -376,5 +376,33 @@ class TestTranslateOnlyProgressFile(unittest.TestCase):
             self.assertIn(str(item.resolve()), data["done"])
 
 
+class TestPruneBackups(unittest.TestCase):
+    """_prune_backups：备份保留上限，超出删除最旧"""
+
+    def test_prune_keeps_newest(self):
+        import os
+        import time
+        from subtitle_app.translator import _prune_backups
+        with tempfile.TemporaryDirectory() as d:
+            backup_dir = Path(d)
+            for i in range(5):
+                p = backup_dir / f"test_{i}.srt"
+                p.write_text("x", encoding="utf-8")
+                t = time.time() - (5 - i) * 10  # test_4 最新，test_0 最旧
+                os.utime(p, (t, t))
+            _prune_backups(backup_dir, 3)
+            remaining = sorted(p.name for p in backup_dir.glob("*.srt"))
+            self.assertEqual(remaining, ["test_2.srt", "test_3.srt", "test_4.srt"])
+
+    def test_prune_disabled_when_zero(self):
+        from subtitle_app.translator import _prune_backups
+        with tempfile.TemporaryDirectory() as d:
+            backup_dir = Path(d)
+            for i in range(5):
+                (backup_dir / f"t{i}.srt").write_text("x", encoding="utf-8")
+            _prune_backups(backup_dir, 0)
+            self.assertEqual(len(list(backup_dir.glob("*.srt"))), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

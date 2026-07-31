@@ -131,7 +131,9 @@ python subtitle_app/subtitle_app.py
 
 ## ⚙ 配置文件
 
-所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建），修改后需重启应用。
+所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）。
+
+**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、翻译方案/API 密钥、语言检测复用、字幕备份份数等，点击「💾 永久保存」自动写回 `config.json`（点击「💾 本次有效」则仅对当前会话生效）。多数修改无需重启；若需回退，直接删除 `config.json` 即可恢复默认。
 
 ### 核心配置项
 
@@ -142,6 +144,7 @@ python subtitle_app/subtitle_app.py
 | `whisper.language` | 识别语言 | `auto`（自动检测） |
 | `whisper.compute_type` | 计算精度 | `int8_float16` |
 | `whisper.vad_filter` | VAD 语音活动检测过滤 | `true` |
+| `whisper.reuse_auto_lang` | auto 模式下复用同批首个检测语言（混合语言目录请保持关闭） | `false` |
 | `translation.api_url` | 翻译 API 地址 | — |
 | `translation.api_key` | 翻译 API 密钥 | — |
 | `translation.model` | 翻译模型名称 | — |
@@ -149,8 +152,9 @@ python subtitle_app/subtitle_app.py
 | `translation.batch_size` | 翻译批处理大小 | `50` |
 | `translation.pipeline` | 启用并行流水线 | `true` |
 | `translation.concurrency_pipeline` | 并行流水线视频并发数 | `2` |
+| `translation.backup_max_files` | `logs/srt_backup` 字幕备份保留份数（超出自动清理最旧） | `50` |
 | `translation.presets` | 多翻译方案配置 | `[]` |
-| `app.default_video_dir` | 默认视频目录 | — |
+| `app.default_video_dir` | 默认视频目录（可在「更多设置」中填写并永久保存） | — |
 | `theme.light` / `theme.dark` | 浅色/深色主题颜色 | 内置配色 |
 
 ---

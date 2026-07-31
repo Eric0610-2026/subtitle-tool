@@ -342,6 +342,67 @@ class TestTranscribeVideoBasic(unittest.TestCase):
                 pass
 
 
+class TestAutoLangReuse(unittest.TestCase):
+    """语言检测复用开关：默认关闭（混合语言目录每文件独立检测），
+    仅当显式开启 reuse_auto_lang 时复用同批首个检测结果"""
+
+    class FakeSegment:
+        def __init__(self, start, end, text):
+            self.start, self.end, self.text = start, end, text
+
+    class FakeInfo:
+        language = "en"
+
+    def setUp(self):
+        self.t = Transcriber()
+        self.base_opts = {
+            "post": MagicMock(),
+            "_ffmpeg": "/usr/bin/ffmpeg",
+            "_ffprobe": "/usr/bin/ffprobe",
+            "model_dir": "faster-whisper-large-v3-turbo",
+            "device": "cpu",
+            "compute_type": "int8",
+            "language": "auto",
+            "extract_audio": True,
+            "vad_filter": True,
+            "_is_audio": False,
+            "_idx": 1,
+            "_total": 1,
+            "checkpoint_enabled": False,
+            "word_timestamps": False,
+        }
+
+    def _run(self, **opts):
+        """跑一次 transcribe_video，返回 model.transcribe 收到的 language 参数"""
+        from unittest.mock import patch as _patch
+        model = MagicMock()
+        model.transcribe.return_value = (
+            iter([self.FakeSegment(0.0, 1.0, "Hi.")]), self.FakeInfo())
+        with _patch("subtitle_app.transcriber.Transcriber.load_whisper_model",
+                    return_value=model):
+            self.t.get_duration = MagicMock(return_value=60.0)
+            self.t.extract_audio_with_progress = MagicMock(return_value=60.0)
+            with tempfile.TemporaryDirectory() as d:
+                video = Path(d) / "test.mp4"
+                video.write_text("x", encoding="utf-8")
+                self.t.transcribe_video(video, Path(d), {**self.base_opts, **opts})
+        return model.transcribe.call_args.kwargs.get("language")
+
+    def test_reuse_disabled_by_default(self):
+        """默认（reuse_auto_lang 缺省）：每次独立检测，不写缓存不复用"""
+        self.assertEqual(self._run(), None)
+        # 第一次检测结果不应写入 _cached_auto_lang
+        self.assertIsNone(self.t._cached_auto_lang)
+        # 第二次仍独立检测
+        self.assertEqual(self._run(), None)
+
+    def test_reuse_enabled_reuses_first_detection(self):
+        """开启 reuse_auto_lang：首次检测写入缓存，后续复用"""
+        self.assertEqual(self._run(reuse_auto_lang=True), None)
+        self.assertEqual(self.t._cached_auto_lang, "en")
+        self.assertEqual(self._run(reuse_auto_lang=True), "en")
+
+
 class TestModelCache(unittest.TestCase):
     """模型缓存机制"""
 

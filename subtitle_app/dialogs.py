@@ -4,12 +4,13 @@
 对话框模块：设置、历史管理、缓存管理
 """
 from pathlib import Path
+from typing import List
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QListWidget,
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
-    QAbstractItemView, QTabWidget, QWidget, QFrame,
+    QAbstractItemView, QTabWidget, QWidget, QFrame, QTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
 from PySide6.QtGui import QFont, QPalette, QIcon, QPainter, QPen, QPixmap, QColor
@@ -75,7 +76,7 @@ class ApiTestWorker(QObject):
     def run(self):
         """发送一条测试请求，验证 API 配置是否有效"""
         # 构造简单的测试请求——只发一条简短翻译，确认 API 返回可用
-        import json, urllib.request, urllib.error, time
+        import json, urllib.request, urllib.error
         test_text = "Hello"
         prompt = (
             f"你是严谨的字幕翻译器。将以下数组中的字幕文本逐条翻译为{self.target_lang}。"
@@ -551,6 +552,25 @@ class SettingsDialog(QDialog):
         opts_row.addWidget(self.pipeline_cb)
         opts_row.addStretch()
         g1.addLayout(opts_row, r, 0, 1, 3)
+        r += 1
+
+        # ── 默认视频目录（个性化：用于「📌 默认」按钮与字幕页自动扫描）──
+        g1.addWidget(QLabel("默认视频目录"), r, 0)
+        self.default_dir = QLineEdit(values.get("default_video_dir", ""))
+        self.default_dir.setPlaceholderText("可留空；用于「📌 默认」按钮与字幕页自动扫描")
+        g1.addWidget(self.default_dir, r, 1)
+        dir_browse_btn = QPushButton("浏览...")
+        dir_browse_btn.clicked.connect(lambda: self.default_dir.setText(
+            QFileDialog.getExistingDirectory(self, "选择默认视频目录", self.default_dir.text())))
+        g1.addWidget(dir_browse_btn, r, 2)
+        r += 1
+
+        # ── 语言检测复用开关 ──
+        self.reuse_lang_cb = QCheckBox("复用同批语言检测结果（单一语言目录更快）")
+        self.reuse_lang_cb.setChecked(values.get("reuse_auto_lang", False))
+        self.reuse_lang_cb.setToolTip("勾选后：auto 模式下第一个文件的检测语言将复用到同批后续文件，"
+                                      "跳过重复检测；混合语言目录请保持关闭")
+        g1.addWidget(self.reuse_lang_cb, r, 0, 1, 3)
         layout.addWidget(sg1)
 
         # ── AI 翻译（多方案管理）──
@@ -655,6 +675,15 @@ class SettingsDialog(QDialog):
         self.pause_embed_cb.setChecked(values.get("pause_before_embed", False))
         self.pause_embed_cb.setToolTip("翻译完成后弹出对话框，确认或编辑字幕内容后再嵌入 MKV")
         g2.addWidget(self.pause_embed_cb, r, 0, 1, 3)
+        r += 1
+
+        # ── 字幕备份保留份数 ──
+        g2.addWidget(QLabel("字幕备份份数"), r, 0)
+        self.backup_max = QSpinBox()
+        self.backup_max.setRange(0, 10000)
+        self.backup_max.setValue(values.get("backup_max_files", 50))
+        self.backup_max.setToolTip("logs/srt_backup 中保留的最近备份份数，超出自动清理最旧；0=不清理")
+        g2.addWidget(self.backup_max, r, 1, 1, 2)
         layout.addWidget(sg2)
 
         layout.addStretch()
@@ -852,6 +881,8 @@ class SettingsDialog(QDialog):
             "compute_type": self.precision.currentText(),
             "extract_audio": self.extract_cb.isChecked(),
             "vad_filter": self.vad_cb.isChecked(),
+            "default_video_dir": self.default_dir.text().strip(),
+            "reuse_auto_lang": self.reuse_lang_cb.isChecked(),
             "target_lang": self.target_lang.currentText(),
             "translation_model": cur["model"],
             "api_url": cur["api_url"],
@@ -861,6 +892,7 @@ class SettingsDialog(QDialog):
             "translation_batch_size": self.batch_size.value(),
             "send_all": self.send_all_cb.isChecked(),
             "pause_before_embed": self.pause_embed_cb.isChecked(),
+            "backup_max_files": self.backup_max.value(),
             "presets": self._presets,
             "active_preset": self._active_id,
         }
@@ -1318,3 +1350,66 @@ class EmbedDialog(QDialog):
             QPushButton#stopBtn:hover { background:#dc2626; }
             QLineEdit { padding:4px 6px; border:1px solid #e2e8f0; border-radius:4px; }
         """)
+
+
+def show_embed_confirm_dialog(parent, e) -> None:
+    """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕。
+
+    从 qt_app.py 抽取；通过 PauseResponse（translator.PauseResponse）与
+    工作线程通信：确认后设置 resp.action，关闭时默认「跳过嵌入」。
+    """
+    text = e.get("text", "")
+    file_name = e.get("file_name", "")
+    resp = e.get("response")
+    if resp is None:
+        return
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(f"确认嵌入字幕 — {file_name}")
+    dialog.setMinimumSize(600, 500)
+    dialog.resize(720, 580)
+
+    layout = QVBoxLayout(dialog)
+
+    info_label = QLabel(
+        f"📄 <b>{file_name}</b> — 翻译完成，请确认字幕内容后点击「嵌入」或「跳过」"
+    )
+    info_label.setWordWrap(True)
+    layout.addWidget(info_label)
+
+    editor = QTextEdit()
+    editor.setPlainText(text)
+    editor.setFont(QFont("Consolas", 10))
+    layout.addWidget(editor, 1)
+
+    btn_layout = QHBoxLayout()
+    btn_layout.addStretch()
+
+    skip_btn = QPushButton("⏭ 跳过嵌入（仅保留外挂 SRT）")
+    skip_btn.setToolTip("不嵌入字幕，仅保留独立的 SRT 文件")
+    skip_btn.clicked.connect(lambda: _finish_pause("skip"))
+    btn_layout.addWidget(skip_btn)
+
+    embed_btn = QPushButton("✅ 确认嵌入")
+    embed_btn.setObjectName("startBtn")
+    embed_btn.setToolTip("将当前字幕嵌入 MKV 视频文件")
+    embed_btn.setDefault(True)
+    embed_btn.clicked.connect(lambda: _finish_pause("embed"))
+    btn_layout.addWidget(embed_btn)
+
+    layout.addLayout(btn_layout)
+
+    def _finish_pause(action: str):
+        resp.action = action
+        if action == "embed":
+            modified = editor.toPlainText()
+            if modified != text:
+                resp.modified_text = modified
+        resp.event.set()
+        dialog.accept()
+
+    # 用户点击 X 关闭对话框时，默认跳过嵌入
+    dialog.rejected.connect(lambda: _finish_pause("skip"))
+
+    dialog.exec()
+

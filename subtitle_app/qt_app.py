@@ -4,107 +4,43 @@
 PySide6/Qt 版主应用窗口
 """
 import logging
-import os, re, subprocess, time, traceback, tempfile, math
-from datetime import datetime, timezone, timedelta
+import os, re, time, traceback
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, QSize
+from PySide6.QtCore import Qt, QTimer, QEvent, QSize
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
-    QTextEdit, QProgressBar, QLabel, QTabWidget, QSplitter, QGroupBox,
-    QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
+    QLineEdit, QCheckBox, QPushButton, QListWidgetItem,
+    QLabel, QTabWidget, QSplitter,
+    QFrame, QFileDialog, QMessageBox,
     QMenu, QDialog, QGridLayout,
 )
-from PySide6.QtGui import QFont, QColor, QFontMetrics, QPixmap, QPainter, QPen, QPolygon, QPainterPath, QIcon
+from PySide6.QtGui import QColor, QFontMetrics
 
 from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
     load_json, save_json, estimate_eta,
-    seconds_to_srt_time, srt_time_to_seconds, parse_srt,
+    seconds_to_srt_time, srt_time_to_seconds,
     OverallProgress, find_tool, IGNORE_FILE,
     analyze_subtitle_file, format_quality_report,
 )
 from .config import cfg
-from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog
+from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog
 from .muxer import embed_subtitles_to_video
-from .widgets import DropListWidget, LogEntry, is_audio_file, SCAN_VIDEO_EXTS, AUDIO_EXTS
-from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, TranslationMonitor, TranslationMonitorDialog, _silent_text_input, _silent_double_input
+from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, TranslationMonitorDialog, _silent_text_input, _silent_double_input
+from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
+from .notifier import notify as system_notify
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
-
-# ─── 配色（从 config.json 读取）───
-LIGHT = {k: v for k, v in cfg.theme.light.__dict__.items()}
-DARK = {k: v for k, v in cfg.theme.dark.__dict__.items()}
-
-_CHECK_PNG_CACHE = None
-
-
-def _checkmark_png() -> str:
-    """生成白色勾选标记 PNG（仅一次），返回用于 QSS url() 的绝对路径"""
-    global _CHECK_PNG_CACHE
-    if _CHECK_PNG_CACHE:
-        return _CHECK_PNG_CACHE
-    path = Path(tempfile.gettempdir()) / "zimu_checkmark.png"
-    if not path.exists():
-        pm = QPixmap(16, 16)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("white"), 2.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.drawPolyline(QPolygon([QPoint(3, 9), QPoint(7, 13), QPoint(13, 4)]))
-        p.end()
-        pm.save(str(path))
-    _CHECK_PNG_CACHE = path.as_posix()
-    return _CHECK_PNG_CACHE
-
-
-def _make_sun_icon(size: int = 20) -> QIcon:
-    """绘制太阳图标（浅色模式指示），避免 emoji 渲染不清"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#fbbf24")  # 琥珀黄，深色 header 上醒目
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(color)
-    c = size / 2
-    p.drawEllipse(QRectF(c - 3, c - 3, 6, 6))  # 中心圆
-    pen = QPen(color, 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    for i in range(8):
-        ang = i * math.pi / 4
-        p.drawLine(c + 4.6 * math.cos(ang), c + 4.6 * math.sin(ang),
-                   c + 6.9 * math.cos(ang), c + 6.9 * math.sin(ang))
-    p.end()
-    return QIcon(pm)
-
-
-def _make_moon_icon(size: int = 20) -> QIcon:
-    """绘制月亮图标（深色模式指示），避免 emoji 渲染不清"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#fbbf24")
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(color)
-    body = QPainterPath()
-    body.addEllipse(QRectF(2.5, 2.5, 12, 12))
-    hole = QPainterPath()
-    hole.addEllipse(QRectF(7.5, 0.5, 12, 12))
-    p.drawPath(body.subtracted(hole))  # 月牙
-    p.end()
-    return QIcon(pm)
+# ─── 配色（从 config.json 读取，见 theme.py）───
+LIGHT, DARK = load_theme_colors()
 
 
 class SubtitleApp(QMainWindow):
@@ -114,7 +50,7 @@ class SubtitleApp(QMainWindow):
         self.resize(cfg.app.window_width, cfg.app.window_height)
         self.setMinimumSize(cfg.app.window_min_width, cfg.app.window_min_height)
 
-        self.dark_mode = self._detect_system_dark()
+        self.dark_mode = detect_system_dark()
         self.colors = DARK if self.dark_mode else LIGHT
 
         self.work_dir = str(APP_DIR)
@@ -127,6 +63,8 @@ class SubtitleApp(QMainWindow):
         self._migrate_old_progress()
         self._ignore_set = self._load_ignore_set()
         self._start_time: Optional[float] = None
+        self._closing = False  # 窗口关闭中：后台线程停止发 UI 信号
+        self._manual_embedding = False  # 后台手动嵌入进行中
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
         self._stats: Dict[str, any] = {}  # 处理统计
@@ -137,6 +75,8 @@ class SubtitleApp(QMainWindow):
         # ── 信号桥（替代 queue.Queue + QTimer 轮询）──
         self.signal_bridge = SignalBridge()
         self.signal_bridge.event_received.connect(self._handle_event)
+        # 事件分发表只构建一次，避免每次事件到达时重建
+        self._event_handlers = self._build_event_handlers()
         # ── 构建多方案配置（含向后兼容）──
         _presets_raw = getattr(cfg.translation, "presets", None)
         if _presets_raw:
@@ -159,6 +99,8 @@ class SubtitleApp(QMainWindow):
             "compute_type": cfg.whisper.compute_type,
             "extract_audio": cfg.whisper.extract_audio,
             "vad_filter": cfg.whisper.vad_filter,
+            "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
+            "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", False),
             "target_lang": cfg.translation.target_lang,
             "translation_model": _active_preset["model"],
             "api_url": _active_preset["api_url"],
@@ -168,6 +110,7 @@ class SubtitleApp(QMainWindow):
             "translation_batch_size": cfg.translation.batch_size,
             "send_all": False,
             "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
+            "backup_max_files": getattr(cfg.translation, "backup_max_files", 50),
             "presets": _presets,
             "active_preset": _active_preset_id,
         }
@@ -233,7 +176,7 @@ class SubtitleApp(QMainWindow):
         hl.addSpacing(8)
         self.theme_btn = QPushButton()
         self.theme_btn.setFixedSize(32, 28)
-        self.theme_btn.setIcon(_make_moon_icon() if self.dark_mode else _make_sun_icon())
+        self.theme_btn.setIcon(make_moon_icon() if self.dark_mode else make_sun_icon())
         self.theme_btn.setIconSize(QSize(18, 18))
         self.theme_btn.setToolTip("切换浅色/深色主题")
         self.theme_btn.clicked.connect(self._toggle_theme)
@@ -386,128 +329,7 @@ class SubtitleApp(QMainWindow):
     # ─── 样式 ───
 
     def _apply_style(self):
-        c = self.colors
-        check_png = _checkmark_png()
-        border_radius = "border-radius:8px;"
-        is_dark = self.dark_mode
-        alt_bg = "#1c1f33" if is_dark else "#f8fafc"
-        sel_bg = "#2f3554" if is_dark else "#e0e7ff"
-        hover_bg = "#232741" if is_dark else "#eef2ff"
-        self.setStyleSheet(f"""
-            QMainWindow {{ background: {c['bg']}; }}
-            QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
-            QTableWidget#subtitlePreview {{
-                background: transparent; color: {c['text']};
-                border: none; gridline-color: transparent;
-                alternate-background-color: {alt_bg};
-                selection-background-color: {sel_bg}; selection-color: {c['text']};
-                outline: 0;
-            }}
-            QTableWidget#subtitlePreview::item:hover {{ background: {hover_bg}; }}
-            QTableWidget#subtitlePreview::item:selected {{ background: {sel_bg}; color: {c['text']}; }}
-            QHeaderView {{ background: transparent; border: none; }}
-            QHeaderView::section {{
-                background: {c['bg']}; color: {c['text_sec']};
-                border: none; border-bottom: 1px solid {c['border']};
-                padding: 5px 8px; font-size: 11px; font-weight: 600;
-            }}
-            QTableCornerButton::section {{ background: transparent; border: none; }}
-            QFrame#header {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {c['header']}, stop:0.62 {c['header']}, stop:1 {c['accent']});
-                border: none;
-                border-bottom: 1px solid {c['border']};
-            }}
-            QFrame#card {{ background: {c['card']}; {border_radius} border:1px solid {c['border']}; }}
-            QFrame#filePanel, QFrame#previewPanel, QFrame#logPanel {{
-                background: {c['card']}; {border_radius}
-                border:1px solid {c['border']};
-            }}
-            QFrame#progressPanel {{ background:{c['card']}; {border_radius} border:1px solid {c['border']}; }}
-            QGroupBox {{
-                background: {c['card']}; {border_radius}
-                border:1px solid {c['border']};
-                margin-top:8px; padding:8px 8px 8px 8px;
-                font-weight:600; color:{c['accent']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin:margin; left:12px; padding:0 7px;
-                background:{c['card']};
-            }}
-            QLineEdit, QComboBox, QTextEdit, QListWidget {{
-                background:{c['card']}; color:{c['text']};
-                border:1px solid {c['border']}; {border_radius} padding:7px 9px;
-                selection-background-color:{c['accent']}; selection-color:white;
-            }}
-            QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus {{
-                border:1px solid {c['accent']};
-            }}
-            QComboBox::drop-down {{ border:none; width:26px; }}
-            QPushButton {{
-                background:{c['card']}; color:{c['text']};
-                border:1px solid {c['border']}; {border_radius}
-                padding:7px 14px; font-weight:500;
-            }}
-            QPushButton:hover {{ background:{c['border']}; border-color:{c['accent']}; }}
-            QPushButton:pressed {{ padding-top:8px; padding-bottom:6px; }}
-            QPushButton:disabled {{ color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']}; }}
-            QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:600; }}
-            QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
-            QPushButton#startBtn:hover {{ background:#16a34a; }}
-            QPushButton#startBtn:disabled {{ background:{c['text_muted']}; }}
-            QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
-            QPushButton#stopBtn:hover {{ background:#dc2626; }}
-            QPushButton#stopBtn:disabled {{ background:{c['text_muted']}; }}
-            QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; padding:8px 16px; font-weight:600; }}
-            QPushButton#accentBtn:hover {{ background:#4f46e5; }}
-            QPushButton#actionBtn {{ padding:6px 11px; font-size:12px; }}
-            QProgressBar {{
-                background:{c['border']}; border:none; {border_radius}
-                color:{c['text']}; text-align:center; font-size:11px; font-weight:600;
-            }}
-            QProgressBar::chunk {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {c['accent']}, stop:1 #a78bfa); {border_radius}
-            }}
-            QTabWidget::pane {{ background:{c['card']}; border:none; }}
-            QTabBar::tab {{
-                background:{c['bg']}; color:{c['text_sec']};
-                padding:9px 18px; margin-right:3px;
-                border:1px solid transparent; border-bottom:none;
-                border-top-left-radius:8px; border-top-right-radius:8px;
-            }}
-            QTabBar::tab:hover {{ color:{c['accent']}; }}
-            QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
-            QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; }}
-            QCheckBox::indicator {{
-                width:16px; height:16px;
-                background:{c['card']}; border:1px solid {c['text_muted']};
-                border-radius:3px;
-            }}
-            QCheckBox::indicator:hover {{ border-color:{c['accent']}; }}
-            QCheckBox::indicator:checked {{
-                background:{c['accent']}; border-color:{c['accent']};
-                image: url("{check_png}");
-            }}
-            QScrollBar:vertical {{ width:9px; background:{c['bg']}; border:none; margin:2px; }}
-            QScrollBar::handle:vertical {{ background:{c['border']}; {border_radius} min-height:28px; }}
-            QScrollBar::handle:vertical:hover {{ background:{c['text_muted']}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; border:none; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:none; }}
-            QScrollBar:horizontal {{ height:9px; background:{c['bg']}; border:none; margin:2px; }}
-            QScrollBar::handle:horizontal {{ background:{c['border']}; {border_radius} min-width:28px; }}
-            QScrollBar::handle:horizontal:hover {{ background:{c['text_muted']}; }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; border:none; }}
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background:none; }}
-            QSplitter::handle {{ background:{c['border']}; }}
-            QSplitter::handle:horizontal {{ width:2px; }}
-            QSplitter::handle:vertical {{ height:4px; }}
-            QLabel {{ background:transparent; }}
-            QListWidget#logList {{ background:{c['card']}; border:none; }}
-            QListWidget#logList::item {{ padding:2px 4px; border-bottom:1px solid {c['border']}; }}
-            QListWidget::item:hover {{ background:{c['bg']}; }}
-            QListWidget::item:selected {{ background:{c['accent']}; color:white; }}
-        """)
+        self.setStyleSheet(build_qss(self.colors, self.dark_mode))
 
     # ─── 交互 ───
 
@@ -518,10 +340,16 @@ class SubtitleApp(QMainWindow):
             self.video_dir.setText(path)
             self._scan_path(path, True)
 
+    def _default_dir(self) -> str:
+        """当前默认视频目录：优先本次会话设置，其次 config.json"""
+        return str((self.settings_data or {}).get("default_video_dir") or
+                   getattr(cfg.app, "default_video_dir", "") or "")
+
     def _set_default_video_dir(self):
-        self.video_dir.setText(cfg.app.default_video_dir)
-        self._add_log_entry(f"视频目录已设为 {cfg.app.default_video_dir}")
-        self._scan_path(cfg.app.default_video_dir, True)
+        d = self._default_dir()
+        self.video_dir.setText(d)
+        self._add_log_entry(f"视频目录已设为 {d}")
+        self._scan_path(d, True)
 
     def _open_settings(self):
         dlg = SettingsDialog(self, self.settings_data)
@@ -540,13 +368,20 @@ class SubtitleApp(QMainWindow):
         if not path.exists():
             QMessageBox.warning(self, "保存失败", "未找到 config.json，请先复制 config.example.json")
             return
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            QMessageBox.warning(self, "保存失败",
+                                f"config.json 读取失败（可能被手动编辑损坏）：\n{e}")
+            return
+        raw.setdefault("app", {})["default_video_dir"] = values.get("default_video_dir", "")
         raw.setdefault("whisper", {})["model_dir"] = values.get("model_dir", "")
         raw["whisper"]["language"] = values.get("language", "auto")
         raw["whisper"]["device"] = values.get("device", "cuda")
         raw["whisper"]["compute_type"] = values.get("compute_type", "int8_float16")
         raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
         raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
+        raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", False)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
         trans["model"] = values.get("translation_model", "")
@@ -555,12 +390,17 @@ class SubtitleApp(QMainWindow):
         trans["pipeline"] = values.get("pipeline", True)
         trans["batch_size"] = values.get("translation_batch_size", 50)
         trans["pause_before_embed"] = values.get("pause_before_embed", False)
+        trans["backup_max_files"] = values.get("backup_max_files", 50)
         # 保存多方案配置
         presets = values.get("presets")
         if presets:
             trans["presets"] = presets
         trans["active_preset"] = values.get("active_preset", "default")
-        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as e:
+            QMessageBox.warning(self, "保存失败", f"写入 config.json 失败：{e}")
+            return
         cfg.reload()
 
 
@@ -696,7 +536,7 @@ class SubtitleApp(QMainWindow):
         """切换到「已有字幕翻译」标签页时，自动扫描默认目录并添加字幕文件"""
         if index != 1:
             return
-        d = cfg.app.default_video_dir
+        d = self._default_dir()
         if not d:
             self._add_log_entry("未配置默认视频目录（app.default_video_dir），跳过字幕扫描")
             return
@@ -894,6 +734,7 @@ class SubtitleApp(QMainWindow):
             "translate_enabled": self.trans_cb.isChecked(),
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
+            "reuse_auto_lang": s.get("reuse_auto_lang", False),
             "api_url": s.get("api_url", ""),
             "api_key": s.get("api_key", ""),
             "translation_model": s.get("translation_model", ""),
@@ -944,6 +785,8 @@ class SubtitleApp(QMainWindow):
         skipped = total - len(jobs)
         if not jobs:
             QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
+            return
+        if not self._confirm_peak_hours():
             return
         msg = f"开始处理，队列 {len(jobs)} 个文件"
         if skipped:
@@ -1004,6 +847,8 @@ class SubtitleApp(QMainWindow):
         if not jobs:
             QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
             return
+        if not self._confirm_peak_hours():
+            return
         msg = f"断点续翻，检查 {len(jobs)} 个文件..."
         if skipped:
             msg += f"（已跳过 {skipped} 个忽略文件）"
@@ -1024,7 +869,17 @@ class SubtitleApp(QMainWindow):
     # ─── 手动嵌入 ───
 
     def _manual_embed(self):
-        """打开嵌入字幕对话框，支持批量选择视频+字幕嵌入为 MKV"""
+        """打开嵌入字幕对话框，支持批量选择视频+字幕嵌入为 MKV。
+
+        嵌入在后台线程执行（daemon），UI 保持响应；完成后通过
+        manual_embed_done 事件弹窗汇总结果。
+        """
+        if getattr(self, "_manual_embedding", False):
+            QMessageBox.warning(self, "提示", "嵌入任务正在执行中，请等待完成")
+            return
+        if self.worker.thread and self.worker.thread.is_alive():
+            QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再嵌入")
+            return
         ffmpeg = find_tool("ffmpeg.exe", APP_DIR) or find_tool("ffmpeg", APP_DIR)
         if not ffmpeg:
             QMessageBox.warning(self, "错误", "未找到 ffmpeg，请放在应用目录下")
@@ -1037,35 +892,90 @@ class SubtitleApp(QMainWindow):
         pairs = dlg.get_pairs()
         if not pairs:
             return
+        if not self._confirm("确认嵌入",
+                f"确定要嵌入这 {len(pairs)} 个任务？\n\n"
+                "任务将在后台执行，界面可正常操作，完成后会弹出结果提示。"):
+            return
 
+        self._manual_embedding = True
+        self._add_log_entry(f"📦 开始后台嵌入 {len(pairs)} 个任务...")
+        import threading
+        threading.Thread(target=self._manual_embed_worker,
+                         args=(pairs, ffmpeg), daemon=True).start()
+
+    def _manual_embed_worker(self, pairs: list, ffmpeg: str) -> None:
+        """后台嵌入线程：逐个执行 ffmpeg 内嵌，日志经信号桥回传 UI。
+
+        异常路径也要保证发送 manual_embed_done 复位状态，避免
+        _manual_embedding 永久锁死手动嵌入功能；窗口关闭（_closing）
+        后不再发信号，daemon 线程随进程退出。
+        """
         total = len(pairs)
         success = 0
-        for i, (video, srt) in enumerate(pairs, 1):
-            if not self._confirm("确认嵌入",
-                    f"[{i}/{total}] 视频: {video.name}\n字幕: {srt.name}\n输出: {video.with_suffix('.mkv').name}\n\n确定要嵌入？"):
-                continue
 
-            def post(msg):
-                if msg.get("type") == "log":
-                    self._add_log_entry(msg.get("message", ""), msg.get("level", "INFO"))
+        def post(msg):
+            if msg.get("type") == "log":
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": msg.get("message", ""),
+                    "level": msg.get("level", "INFO"),
+                })
 
-            self._add_log_entry(f"📦 [{i}/{total}] 嵌入: {video.name} + {srt.name}")
-            QApplication.processEvents()
-            mkv, _ = embed_subtitles_to_video(video, srt, ffmpeg, post)
-            if mkv and mkv.exists():
-                success += 1
-                self._add_log_entry(f"✅ [{i}/{total}] 嵌入完成: {mkv.name}")
-                if str(mkv.resolve()) not in self._output_paths:
-                    self._output_paths.append(str(mkv.resolve()))
-                try:
-                    video.unlink()
-                    srt.unlink()
-                    self._add_log_entry(f"已删除原文件: {video.name}, {srt.name}")
-                except OSError as e:
-                    self._add_log_entry(f"删除原文件失败: {e}", "WARNING")
-            else:
-                self._add_log_entry(f"❌ [{i}/{total}] 嵌入失败: {video.name}", "WARNING")
+        try:
+            for i, (video, srt) in enumerate(pairs, 1):
+                if getattr(self, "_closing", False):
+                    break
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": f"📦 [{i}/{total}] 嵌入: {video.name} + {srt.name}",
+                })
+                mkv, _ = embed_subtitles_to_video(video, srt, ffmpeg, post)
+                if mkv and mkv.exists():
+                    success += 1
+                    self.signal_bridge.post({
+                        "type": "log", "message": f"✅ [{i}/{total}] 嵌入完成: {mkv.name}",
+                    })
+                    if str(mkv.resolve()) not in self._output_paths:
+                        self._output_paths.append(str(mkv.resolve()))
+                    try:
+                        video.unlink()
+                        srt.unlink()
+                        self.signal_bridge.post({
+                            "type": "log", "message": f"已删除原文件: {video.name}, {srt.name}",
+                        })
+                    except OSError as e:
+                        self.signal_bridge.post({
+                            "type": "log", "message": f"删除原文件失败: {e}", "level": "WARNING",
+                        })
+                else:
+                    self.signal_bridge.post({
+                        "type": "log", "message": f"❌ [{i}/{total}] 嵌入失败: {video.name}",
+                        "level": "WARNING",
+                    })
+        except Exception as e:
+            logger.error("后台嵌入线程异常: %s\n%s", e, traceback.format_exc())
+            try:
+                self.signal_bridge.post({
+                    "type": "log", "message": f"后台嵌入线程异常: {e}", "level": "ERROR",
+                })
+            except Exception:
+                pass
+        finally:
+            # 无论成功/异常/关闭，都复位标志；窗口已关闭时 UI 侧跳过弹窗
+            try:
+                self.signal_bridge.post({
+                    "type": "manual_embed_done", "success": success, "total": total,
+                })
+            except Exception:
+                pass
 
+    def _on_manual_embed_done(self, e):
+        """后台嵌入结束：恢复状态并弹出结果汇总（窗口关闭中则跳过弹窗）"""
+        self._manual_embedding = False
+        if getattr(self, "_closing", False):
+            return
+        success = e.get("success", 0)
+        total = e.get("total", 0)
         if success:
             QMessageBox.information(self, "嵌入完成", f"成功嵌入 {success}/{total} 个文件")
         else:
@@ -1254,7 +1164,7 @@ class SubtitleApp(QMainWindow):
         if quality_summary:
             self._add_log_entry(quality_summary, "WARNING" if "雷" in quality_summary else "INFO")
             notify_body = f"{notify_body}\n{quality_summary}"
-        self._notify("字幕工具", notify_body)
+        system_notify("字幕工具", notify_body)
         self._update_model_status()
 
     def _handle_error(self, e):
@@ -1267,8 +1177,13 @@ class SubtitleApp(QMainWindow):
         self._update_model_status()
 
     def _handle_event(self, event: dict):
-        t = event.get("type", "")
-        handlers = {
+        handler = self._event_handlers.get(event.get("type", ""))
+        if handler:
+            handler(event)
+
+    def _build_event_handlers(self) -> dict:
+        """预构建事件分发表（仅一次，避免每次事件到达时重建）"""
+        return {
             "log": lambda e: self._add_log_entry(e.get("message", ""), e.get("level", "INFO")),
             "transcribe_status": lambda e: self._set_elided(self.progress_panel.transcribe_label,
                 f"🎤 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
@@ -1293,10 +1208,8 @@ class SubtitleApp(QMainWindow):
             "done": self._handle_done,
             "error": self._handle_error,
             "model_loaded": lambda e: self._update_model_status(),
+            "manual_embed_done": self._on_manual_embed_done,
         }
-        handler = handlers.get(t)
-        if handler:
-            handler(event)
 
     def _handle_output_path(self, e):
         p = Path(e.get("path", ""))
@@ -1354,63 +1267,8 @@ class SubtitleApp(QMainWindow):
         )
 
     def _handle_pause_before_embed(self, e):
-        """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QPushButton
-
-        text = e.get("text", "")
-        file_name = e.get("file_name", "")
-        resp = e.get("response")
-        if resp is None:
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"确认嵌入字幕 — {file_name}")
-        dialog.setMinimumSize(600, 500)
-        dialog.resize(720, 580)
-
-        layout = QVBoxLayout(dialog)
-
-        info_label = QLabel(
-            f"📄 <b>{file_name}</b> — 翻译完成，请确认字幕内容后点击「嵌入」或「跳过」"
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
-        editor = QTextEdit()
-        editor.setPlainText(text)
-        editor.setFont(QFont("Consolas", 10))
-        layout.addWidget(editor, 1)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        skip_btn = QPushButton("⏭ 跳过嵌入（仅保留外挂 SRT）")
-        skip_btn.setToolTip("不嵌入字幕，仅保留独立的 SRT 文件")
-        skip_btn.clicked.connect(lambda: _finish_pause("skip"))
-        btn_layout.addWidget(skip_btn)
-
-        embed_btn = QPushButton("✅ 确认嵌入")
-        embed_btn.setObjectName("startBtn")
-        embed_btn.setToolTip("将当前字幕嵌入 MKV 视频文件")
-        embed_btn.setDefault(True)
-        embed_btn.clicked.connect(lambda: _finish_pause("embed"))
-        btn_layout.addWidget(embed_btn)
-
-        layout.addLayout(btn_layout)
-
-        def _finish_pause(action: str):
-            resp.action = action
-            if action == "embed":
-                modified = editor.toPlainText()
-                if modified != text:
-                    resp.modified_text = modified
-            resp.event.set()
-            dialog.accept()
-
-        # 用户点击 X 关闭对话框时，默认跳过嵌入
-        dialog.rejected.connect(lambda: _finish_pause("skip"))
-
-        dialog.exec()
+        """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕（见 dialogs.py）"""
+        show_embed_confirm_dialog(self, e)
 
     def _handle_preview_append(self, e):
         self.preview_panel.append(e.get("message", ""))
@@ -1460,77 +1318,50 @@ class SubtitleApp(QMainWindow):
         except Exception as e:
             self._add_log_entry(f"打开目录失败：{e}")
 
-    def _notify(self, title: str, msg: str):
-        """安全的系统通知，避免命令注入"""
-        safe_title = re.sub(r"[^\w\s\-_.()\[\]【】]", "", title)[:64]
-        safe_msg = re.sub(r"[^\w\s\-_.()\[\]【】，。！？、：；]", "", msg)[:200]
-
-        try:
-            from winotify import Notification, audio
-            toast = Notification(
-                app_id="字幕工具",
-                title=safe_title,
-                msg=safe_msg,
-                duration="short"
-            )
-            toast.set_audio(audio.Default, loop=False)
-            toast.show()
-            return
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.debug("winotify 通知失败: %s，尝试 PowerShell 备选方案", e)
-
-        try:
-            ps_script = (
-                "Add-Type -AssemblyName System.Windows.Forms;"
-                "$n=New-Object System.Windows.Forms.NotifyIcon;"
-                "$n.Icon=[System.Drawing.SystemIcons]::Information;"
-                '$n.BalloonTipIcon="Info";'
-                f'$n.BalloonTipTitle="{safe_title}";'
-                f'$n.BalloonTipText="{safe_msg}";'
-                "$n.Visible=$true;"
-                f"$n.ShowBalloonTip({cfg.app.notification_duration_ms});"
-                f"Start-Sleep -Seconds {cfg.app.notification_sleep_s};"
-                "$n.Dispose()"
-            )
-            import base64
-            encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-        except Exception as e:
-            logger.debug("通知失败: %s", e)
-
     # ─── 主题 ───
 
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
         self.colors = DARK if self.dark_mode else LIGHT
         self._apply_style()
-        self.theme_btn.setIcon(_make_moon_icon() if self.dark_mode else _make_sun_icon())
+        self.theme_btn.setIcon(make_moon_icon() if self.dark_mode else make_sun_icon())
         self._add_log_entry(f"已切换至{'深色' if self.dark_mode else '浅色'}模式")
-
-    def _detect_system_dark(self) -> bool:
-        try:
-            import winreg
-            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                               r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-            v, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
-            winreg.CloseKey(k)
-            return v == 0
-        except (OSError, TypeError) as e:
-            logger.debug("读取系统主题失败: %s", e)
-            return False
 
     def closeEvent(self, event):
         """应用关闭时释放 Whisper 模型显存并保存窗口状态"""
+        self._closing = True  # 通知后台嵌入线程停止发信号（daemon 随进程退出）
         if self.worker.transcriber.is_loaded():
             self.worker.transcriber.release_model()
         self._save_window_state()
         super().closeEvent(event)
+
+    def _confirm_peak_hours(self) -> bool:
+        """DeepSeek API 高峰时段确认（仅在点击「开始处理」时调用）。
+
+        仅当当前活跃翻译方案使用 DeepSeek 且处于高峰时段时弹窗；
+        用户选「否」则返回 False 真正阻止本次处理（不再直接退出应用）。
+        非 DeepSeek / 非高峰时段直接返回 True。
+        """
+        api_url = str((self.settings_data or {}).get("api_url", "") or "")
+        if "deepseek" not in api_url.lower():
+            return True
+        from datetime import timezone, timedelta, datetime
+        bj_tz = timezone(timedelta(hours=8))
+        hour = datetime.now(bj_tz).hour
+        in_peak = (9 <= hour < 12) or (14 <= hour < 18)
+        if not in_peak:
+            return True
+        reply = QMessageBox.question(
+            self, "高峰时段提醒",
+            "当前为 DeepSeek API 高峰时段（9:00-12:00、14:00-18:00），价格较高。\n"
+            "是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.No:
+            self._add_log_entry("已取消处理（DeepSeek 高峰时段提醒）", "INFO")
+            return False
+        return True
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1577,29 +1408,7 @@ def main():
     window = SubtitleApp()
     window.show()
 
-    # 延迟检查高峰时段——不阻塞窗口首次显示
-    from PySide6.QtCore import QTimer
-    QTimer.singleShot(0, lambda: _check_peak_hours(window))
-
     sys.exit(app.exec())
-
-
-def _check_peak_hours(parent):
-    from datetime import timezone, timedelta, datetime
-    bj_tz = timezone(timedelta(hours=8))
-    hour = datetime.now(bj_tz).hour
-    peak_periods = "9:00-12:00、14:00-18:00"
-    in_peak = (9 <= hour < 12) or (14 <= hour < 18)
-    if in_peak:
-        reply = QMessageBox.question(
-            parent, "高峰时段提醒",
-            f"当前为 DeepSeek API 高峰时段（{peak_periods}），价格较高。\n是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply == QMessageBox.No:
-            import sys
-            sys.exit(0)
 
 
 if __name__ == "__main__":
