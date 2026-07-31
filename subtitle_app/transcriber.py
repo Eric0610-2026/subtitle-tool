@@ -404,12 +404,20 @@ class Transcriber:
                           "message": f"传递上文语境（{context_n} 句）给 Whisper",
                           "level": "INFO"})
 
-                        # ── 语言检测：auto 模式优先使用缓存，第一次检测后更新缓存 ──
-                transcribe_lang = self._cached_auto_lang if language == "auto" else language
-                if language == "auto" and self._cached_auto_lang:
+                # ── 语言检测：默认每个文件独立检测（混合语言目录不会误用）。
+                #    仅当显式开启 whisper.reuse_auto_lang 时，才复用同批首个
+                #    检测结果以跳过重复检测（适合单一语言目录）。──
+                reuse_lang = opts.get(
+                    "reuse_auto_lang", getattr(cfg.whisper, "reuse_auto_lang", False))
+                if language != "auto":
+                    transcribe_lang = language
+                elif reuse_lang and self._cached_auto_lang:
+                    transcribe_lang = self._cached_auto_lang
                     post({"type": "log",
                           "message": f"复用语言检测结果：{self._cached_auto_lang}（跳过语言检测）",
                           "level": "INFO"})
+                else:
+                    transcribe_lang = None  # 交给 Whisper 自动检测
 
                 segments, info = model.transcribe(
                     str(audio_path), beam_size=cfg.whisper.beam_size, vad_filter=vad_enabled,
@@ -417,10 +425,14 @@ class Transcriber:
                     initial_prompt=init_prompt,
                     word_timestamps=use_word_timestamps)
                 detected_lang = info.language
-                if language == "auto" and self._cached_auto_lang is None:
+                if language == "auto" and reuse_lang and self._cached_auto_lang is None:
                     self._cached_auto_lang = detected_lang
                     post({"type": "log",
-                          "message": f"检测到视频语言：{detected_lang}（后续文件将自动复用）",
+                          "message": f"检测到视频语言：{detected_lang}（同批后续文件将复用）",
+                          "level": "INFO"})
+                elif language == "auto":
+                    post({"type": "log",
+                          "message": f"检测到视频语言：{detected_lang}",
                           "level": "INFO"})
                 t_post({"type": "language", "message": f"语言：{detected_lang}"})
 

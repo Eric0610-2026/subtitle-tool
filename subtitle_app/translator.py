@@ -34,6 +34,25 @@ class PauseResponse:
 _BACKUP_DIR = Path(__file__).resolve().parent.parent / "logs" / "srt_backup"
 
 
+def _prune_backups(backup_dir: Path, max_files: int) -> None:
+    """保留最近 max_files 份 SRT 备份，超出部分按修改时间删除最旧的。
+
+    防止 logs/srt_backup 无限膨胀；max_files<=0 表示不清理。
+    """
+    if max_files <= 0:
+        return
+    try:
+        files = sorted(backup_dir.glob("*.srt"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for old in files[max_files:]:
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def translate_stage(result: dict, opts: dict, post: Callable) -> None:
     """翻译阶段入口：消费转写结果，执行翻译+整理输出"""
     post({"type": "translate_status", "file": result["item"].name,
@@ -197,6 +216,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             post({"type": "log", "message": f"原文字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份原文字幕失败: %s", e)
+        _prune_backups(backup_dir, getattr(cfg.translation, "backup_max_files", 50))
 
     # ── 将翻译后的字幕也统一备份到 srt_backup 文件夹 ──
     # 策略：始终保留 srt_backup 中的副本；工作区临时 SRT 仍可按原规则清理
@@ -215,6 +235,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             post({"type": "log", "message": f"翻译字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)
+        _prune_backups(backup_dir, getattr(cfg.translation, "backup_max_files", 50))
 
     # ── 嵌入前质量检查（计数+样例；不阻断自动嵌入）──
     srt_for_quality = None

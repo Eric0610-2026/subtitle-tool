@@ -265,5 +265,44 @@ class TestChineseDetection(unittest.TestCase):
         self.assertTrue(has_chinese("Hello\n你好世界"))
 
 
+class TestSharedCache(unittest.TestCase):
+    """进程级共享缓存：多个 TranslationClient 共享同一内存 dict，
+    写回磁盘时不再互相覆盖（并发流水线回归测试）"""
+
+    def test_clients_share_same_cache_dict(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache_path = Path(d) / "cache.json"
+            c1 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
+            c2 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
+            c1.cache["k1"] = "v1"
+            self.assertEqual(c2.cache.get("k1"), "v1")
+            c2.cache["k2"] = "v2"
+            self.assertEqual(c1.cache.get("k2"), "v2")
+
+    def test_save_cache_persists_all_shared_entries(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache_path = Path(d) / "cache.json"
+            c1 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
+            c2 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
+            c1.cache["k1"] = "v1"
+            c2.cache["k2"] = "v2"
+            c2._save_cache()  # 后写回的 client 不能丢先写回的条目
+            from subtitle_app.srt_utils import load_json
+            disk = load_json(cache_path, {})
+            self.assertEqual(disk.get("k1"), "v1")
+            self.assertEqual(disk.get("k2"), "v2")
+
+    def test_shared_cache_switches_on_path_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            path_a = Path(d) / "a.json"
+            path_b = Path(d) / "b.json"
+            ca = TranslationClient("url", "key", "m", path_a, lambda *a: None)
+            ca.cache["only_a"] = "1"
+            cb = TranslationClient("url", "key", "m", path_b, lambda *a: None)
+            self.assertNotIn("only_a", cb.cache)
+            cb.cache["only_b"] = "1"
+            self.assertNotIn("only_b", ca.cache)
+
+
 if __name__ == "__main__":
     unittest.main()

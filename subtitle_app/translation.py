@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -25,6 +25,26 @@ from .srt_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── 进程级共享翻译缓存 ──
+# 并行流水线中每个文件会创建独立的 TranslationClient，若各自加载/写回同一
+# cache 文件，后写会覆盖先写的增量（缓存条目丢失、重复扣费）。
+# 这里把缓存提升为进程级单例 + 全局锁：所有 client 共享同一份内存 dict，
+# 写盘时串行化，彻底消除互相覆盖。
+_shared_cache_lock = Lock()
+_shared_cache: Dict[str, str] = {}
+_shared_cache_path: Optional[Path] = None
+
+
+def _get_shared_cache(cache_path: Path) -> Dict[str, str]:
+    """返回绑定到 cache_path 的进程级共享缓存 dict（懒加载）。"""
+    global _shared_cache, _shared_cache_path
+    with _shared_cache_lock:
+        if _shared_cache_path != cache_path:
+            _shared_cache = load_json(cache_path, {})
+            _shared_cache_path = cache_path
+        return _shared_cache
+
 
 # ── 常量（从 config.json 读取）──
 
@@ -145,10 +165,12 @@ class TranslationClient:
         self.model = model
         self.target_lang = target_lang
         self.system_prompt = make_prompt(target_lang)
-        self.cache: Dict[str, str] = load_json(cache_path, {})
+        # 进程级共享缓存：并发流水线中所有 client 共享同一内存 dict，
+        # 配合全局锁保证写盘串行，避免后写覆盖先写导致缓存丢失
+        self.cache: Dict[str, str] = _get_shared_cache(cache_path)
         self.cache_path = cache_path
         self.post_ui = post_ui
-        self._cache_lock = Lock()
+        self._cache_lock = _shared_cache_lock
 
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
@@ -589,7 +611,7 @@ class TranslationClient:
         return items if isinstance(items, list) else []
 
     def _save_cache(self) -> None:
-        with self._cache_lock:
+        with _shared_cache_lock:
             if len(self.cache) > MAX_CACHE_ENTRIES:
                 # FIFO 裁剪：移除最旧条目，保留最新的 MAX_CACHE_ENTRIES//2 条
                 excess = len(self.cache) - MAX_CACHE_ENTRIES // 2
