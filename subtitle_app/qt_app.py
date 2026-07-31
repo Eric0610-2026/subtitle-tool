@@ -4,14 +4,14 @@
 PySide6/Qt 版主应用窗口
 """
 import logging
-import os, re, subprocess, time, traceback
+import os, re, subprocess, time, traceback, tempfile, math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, QSize
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFrame, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
     QMenu, QDialog, QGridLayout,
 )
-from PySide6.QtGui import QFont, QColor, QFontMetrics
+from PySide6.QtGui import QFont, QColor, QFontMetrics, QPixmap, QPainter, QPen, QPolygon, QPainterPath, QIcon
 
 from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
@@ -41,6 +41,71 @@ APP_DIR = Path(__file__).resolve().parent.parent
 # ─── 配色（从 config.json 读取）───
 LIGHT = {k: v for k, v in cfg.theme.light.__dict__.items()}
 DARK = {k: v for k, v in cfg.theme.dark.__dict__.items()}
+
+_CHECK_PNG_CACHE = None
+
+
+def _checkmark_png() -> str:
+    """生成白色勾选标记 PNG（仅一次），返回用于 QSS url() 的绝对路径"""
+    global _CHECK_PNG_CACHE
+    if _CHECK_PNG_CACHE:
+        return _CHECK_PNG_CACHE
+    path = Path(tempfile.gettempdir()) / "zimu_checkmark.png"
+    if not path.exists():
+        pm = QPixmap(16, 16)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("white"), 2.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawPolyline(QPolygon([QPoint(3, 9), QPoint(7, 13), QPoint(13, 4)]))
+        p.end()
+        pm.save(str(path))
+    _CHECK_PNG_CACHE = path.as_posix()
+    return _CHECK_PNG_CACHE
+
+
+def _make_sun_icon(size: int = 20) -> QIcon:
+    """绘制太阳图标（浅色模式指示），避免 emoji 渲染不清"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#fbbf24")  # 琥珀黄，深色 header 上醒目
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    c = size / 2
+    p.drawEllipse(QRectF(c - 3, c - 3, 6, 6))  # 中心圆
+    pen = QPen(color, 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    for i in range(8):
+        ang = i * math.pi / 4
+        p.drawLine(c + 4.6 * math.cos(ang), c + 4.6 * math.sin(ang),
+                   c + 6.9 * math.cos(ang), c + 6.9 * math.sin(ang))
+    p.end()
+    return QIcon(pm)
+
+
+def _make_moon_icon(size: int = 20) -> QIcon:
+    """绘制月亮图标（深色模式指示），避免 emoji 渲染不清"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#fbbf24")
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    body = QPainterPath()
+    body.addEllipse(QRectF(2.5, 2.5, 12, 12))
+    hole = QPainterPath()
+    hole.addEllipse(QRectF(7.5, 0.5, 12, 12))
+    p.drawPath(body.subtracted(hole))  # 月牙
+    p.end()
+    return QIcon(pm)
+
 
 class SubtitleApp(QMainWindow):
     def __init__(self):
@@ -158,7 +223,7 @@ class SubtitleApp(QMainWindow):
         header.setObjectName("header")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(16, 0, 12, 0)
-        title = QLabel("🎬 本地字幕生成工具")
+        title = QLabel("本地字幕生成工具")
         title.setStyleSheet("color:white; font-size:15px; font-weight:700;")
         hl.addWidget(title)
         hl.addStretch()
@@ -166,8 +231,11 @@ class SubtitleApp(QMainWindow):
         ver.setStyleSheet("color:#94a3b8; font-size:11px;")
         hl.addWidget(ver)
         hl.addSpacing(8)
-        self.theme_btn = QPushButton("☀" if not self.dark_mode else "🌙")
+        self.theme_btn = QPushButton()
         self.theme_btn.setFixedSize(32, 28)
+        self.theme_btn.setIcon(_make_moon_icon() if self.dark_mode else _make_sun_icon())
+        self.theme_btn.setIconSize(QSize(18, 18))
+        self.theme_btn.setToolTip("切换浅色/深色主题")
         self.theme_btn.clicked.connect(self._toggle_theme)
         hl.addWidget(self.theme_btn)
         main.addWidget(header)
@@ -197,6 +265,7 @@ class SubtitleApp(QMainWindow):
         self.sub_list = _make_list(False)
         self.tabs.addTab(self.video_list, "视频/音频生成字幕")
         self.tabs.addTab(self.sub_list, "已有字幕翻译")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         ll.addWidget(self.tabs)
         btn_row = QHBoxLayout()
         for text, cb in [
@@ -318,6 +387,7 @@ class SubtitleApp(QMainWindow):
 
     def _apply_style(self):
         c = self.colors
+        check_png = _checkmark_png()
         border_radius = "border-radius:8px;"
         is_dark = self.dark_mode
         alt_bg = "#1c1f33" if is_dark else "#f8fafc"
@@ -409,7 +479,16 @@ class SubtitleApp(QMainWindow):
             QTabBar::tab:hover {{ color:{c['accent']}; }}
             QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
             QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; }}
-            QCheckBox::indicator {{ width:16px; height:16px; }}
+            QCheckBox::indicator {{
+                width:16px; height:16px;
+                background:{c['card']}; border:1px solid {c['text_muted']};
+                border-radius:3px;
+            }}
+            QCheckBox::indicator:hover {{ border-color:{c['accent']}; }}
+            QCheckBox::indicator:checked {{
+                background:{c['accent']}; border-color:{c['accent']};
+                image: url("{check_png}");
+            }}
             QScrollBar:vertical {{ width:9px; background:{c['bg']}; border:none; margin:2px; }}
             QScrollBar::handle:vertical {{ background:{c['border']}; {border_radius} min-height:28px; }}
             QScrollBar::handle:vertical:hover {{ background:{c['text_muted']}; }}
@@ -612,6 +691,20 @@ class SubtitleApp(QMainWindow):
             return
         exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
         self._add_paths([d / f for f in sorted(d.iterdir()) if f.suffix.lower() in exts], is_video)
+
+    def _on_tab_changed(self, index: int):
+        """切换到「已有字幕翻译」标签页时，自动扫描默认目录并添加字幕文件"""
+        if index != 1:
+            return
+        d = cfg.app.default_video_dir
+        if not d:
+            self._add_log_entry("未配置默认视频目录（app.default_video_dir），跳过字幕扫描")
+            return
+        if not Path(d).exists():
+            self._add_log_entry(f"默认视频目录不存在：{d}，跳过字幕扫描")
+            return
+        self._scan_path(d, False)
+        self._add_log_entry(f"已在默认目录中扫描字幕：{d}")
 
     def _scan_dir(self):
         is_video = self.tabs.currentIndex() == 0
@@ -1417,7 +1510,7 @@ class SubtitleApp(QMainWindow):
         self.dark_mode = not self.dark_mode
         self.colors = DARK if self.dark_mode else LIGHT
         self._apply_style()
-        self.theme_btn.setText("☀" if not self.dark_mode else "🌙")
+        self.theme_btn.setIcon(_make_moon_icon() if self.dark_mode else _make_sun_icon())
         self._add_log_entry(f"已切换至{'深色' if self.dark_mode else '浅色'}模式")
 
     def _detect_system_dark(self) -> bool:
