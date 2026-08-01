@@ -57,7 +57,15 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -r tools/requirements.txt
 ```
 
-### 3️⃣ 放置 ffmpeg（必需）
+### 3️⃣ 准备 ffmpeg（必需）
+
+应用按以下顺序查找 ffmpeg/ffprobe：**应用目录 → `tools/` 目录 → 系统 PATH**（`shutil.which`），任一处找到即用。
+
+**方式一：使用系统已安装的 ffmpeg（推荐）**
+
+如果电脑已安装 ffmpeg（含 ffprobe）并已加入 PATH（命令行执行 `ffmpeg -version` 有输出即满足），无需任何额外操作。
+
+**方式二：放入 `tools/` 目录**
 
 从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载 Windows 完整构建，将 `bin/` 目录下的 **ffmpeg.exe** 和 **ffprobe.exe** 放入项目 `tools/` 目录中。**两个文件缺一不可。**
 
@@ -178,7 +186,7 @@ python subtitle_app/subtitle_app.py
 │   ├── config.example.json        # 配置模板（不含密钥）
 │   └── config.json                # 本地配置（含 API 密钥，不提交到仓库）
 ├── tools/                         # 第三方工具与测试
-│   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（需自行下载放置）
+│   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（可选：可改用系统 PATH 版）
 │   ├── requirements.txt           # Python 依赖清单
 │   └── tests/                     # 单元测试（pipeline / srt_utils / translation 等）
 │       ├── test_pipeline.py
