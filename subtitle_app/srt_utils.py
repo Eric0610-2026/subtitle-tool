@@ -609,12 +609,15 @@ def has_chinese(text: str, source_lang: str = "") -> bool:
 # ── 文件工具 ──
 
 def find_tool(name: str, base_dir: Path) -> Optional[str]:
-    # 先在 base_dir 下查找，再在 base_dir/tools 下查找
+    # 先在 base_dir 下查找，再在 base_dir/tools 下查找，最后回退到系统 PATH
     p = base_dir / name
     if p.exists():
         return str(p)
     p = base_dir / "tools" / name
-    return str(p) if p.exists() else None
+    if p.exists():
+        return str(p)
+    which = shutil.which(name)
+    return which if which else None
 
 
 # ── 进度映射与跨文件总进度 ──

@@ -5,19 +5,19 @@
 - 入口：`subtitle_app/subtitle_app.py` → `subtitle_app.qt_app.main()`
 - 运行：双击 `字幕工具.lnk` 或 `python subtitle_app/subtitle_app.py`
 - `subtitle_app.py` 智能检测：首次运行自动 `pip install -r tools/requirements.txt`（超时 300s），成功则创建 `cache/.deps_installed` 标记，此后跳过
-- 仅 Windows（ctypes MessageBoxW、ffmpeg 二进制）
+- 仅 Windows（ctypes MessageBoxW、ffmpeg 二进制；查找顺序：应用目录 → `tools/` → 系统 PATH，见 `srt_utils.find_tool`）
 
 ## 测试
 
 ```powershell
-python -m unittest discover -s tools/tests          # 全部（129 例）
+python -m unittest discover -s tools/tests          # 全部（155 例）
 python -m unittest tools.tests.test_srt_utils        # 单文件
 python -m unittest tools.tests.test_srt_utils.TestSrtRoundtrip  # 单用例
 ```
 
 - 框架：`unittest`（无 pytest）
 - 7 个测试文件：`test_srt_utils.py`、`test_translation.py`、`test_translator.py`、`test_transcriber.py`、`test_pipeline.py`、`test_muxer.py`、`test_widgets.py`（位于 `tools/tests/`）
-- 当前 129 例
+- 当前 155 例
 - 无需网络或模型加载；API 调用用 `unittest.mock`
 - 运行全部测试：`python -m unittest discover -s tools/tests`
 
