@@ -224,7 +224,7 @@ class TranslationClient:
         for gsid, bidx, sent in flat:
             if gsid in sent_trans and str(sent_trans[gsid]).strip():
                 continue
-            key = sentence_cache_key(sent, self.model, True)
+            key = sentence_cache_key(sent, self.model, is_bilingual)
             cached = self.cache.get(key)
             if isinstance(cached, str) and cached.strip():
                 sent_trans[gsid] = cached.strip()
@@ -319,7 +319,8 @@ class TranslationClient:
                         })
                     raise
                 applied = _apply_batch_translations(
-                    batch, translations, t2g, sent_trans, self.cache, self._cache_lock, self.model)
+                    batch, translations, t2g, sent_trans, self.cache, self._cache_lock,
+                    self.model, is_bilingual)
                 for orig_text, zh_text in applied:
                     if not zh_text:
                         continue
@@ -382,7 +383,7 @@ class TranslationClient:
                         if plain:
                             zh = str(plain[0].get("zh") or "").strip()
                     if zh and zh != orig:
-                        key = sentence_cache_key(orig, self.model, True)
+                        key = sentence_cache_key(orig, self.model, is_bilingual)
                         with self._cache_lock:
                             self.cache[key] = zh
                         for gsid in gsids:
@@ -736,6 +737,7 @@ def _apply_batch_translations(
     cache: dict,
     cache_lock: Lock,
     model: str,
+    is_bilingual: bool = True,
 ) -> List[Tuple[str, str]]:
     """把一批 API 结果写回 sent_trans / cache。
 
@@ -783,7 +785,7 @@ def _apply_batch_translations(
             zh = ordered_zh[i]
         if not zh:
             continue
-        key = sentence_cache_key(orig_text, model, True)
+        key = sentence_cache_key(orig_text, model, is_bilingual)
         with cache_lock:
             cache[key] = zh
         for gsid in t2g.get(orig_text, []):

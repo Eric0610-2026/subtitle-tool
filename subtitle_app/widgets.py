@@ -5,12 +5,11 @@
 """
 import logging
 from pathlib import Path
-from typing import List
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QListWidget, QListWidgetItem, QWidget, QVBoxLayout, QHBoxLayout,
+    QListWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QApplication, QAbstractItemView,
 )
 

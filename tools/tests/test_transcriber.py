@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """transcriber.py 单元测试"""
-import json
-import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock, call
+from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
     Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
-    _MODEL_SPEED, _model_speed_lock, _model_load_lock,
+    _MODEL_SPEED, _model_speed_lock,
 )
 from subtitle_app.srt_utils import SubtitleBlock
 

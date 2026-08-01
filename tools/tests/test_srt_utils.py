@@ -10,7 +10,7 @@ from subtitle_app.srt_utils import (
     SubtitleBlock, parse_srt, write_srt, split_sentences,
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
     load_json, save_json, fmt_job_display, find_existing_subtitle,
-    match_video_for_subtitle, VIDEO_EXTS, SUB_EXTS,
+    match_video_for_subtitle,
     analyze_subtitle_quality, analyze_subtitle_file, format_quality_report,
 )
 

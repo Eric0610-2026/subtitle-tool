@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import logging
-import queue
 import time
 import re
 from pathlib import Path
@@ -10,15 +9,15 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import Qt, QObject, Signal, QTimer
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
-    QTextEdit, QListWidget, QListWidgetItem, QWidget, QPushButton,
+    QTextEdit, QListWidget, QListWidgetItem, QPushButton,
     QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
     QDoubleSpinBox, QLineEdit, QMessageBox,
-    QApplication, QAbstractSpinBox, QToolButton,
+    QAbstractSpinBox, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStackedWidget,
 )
 from PySide6.QtGui import (
-    QFont, QFontMetrics, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
+    QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
 )
 
 from .srt_utils import fmt_duration, estimate_eta
@@ -130,18 +129,15 @@ class TranslationMonitor(QGroupBox):
         self.recent.clear()
 
     def update_progress(self, event):
-        import time
         if self._started_at is None:
             self._started_at = time.monotonic()
         detail = event.get("detail", "")
         batch_id = event.get("batch_id")
         total_batches = event.get("total_batches")
         if batch_id is None or total_batches is None:
-            batch = re.search(r"批次\s+(\d+)/(\d+)", detail)
-            batch_id = int(batch.group(1)) if batch else None
-            total_batches = int(batch.group(2)) if batch else None
-        else:
-            batch = True
+            m = re.search(r"批次\s+(\d+)/(\d+)", detail)
+            batch_id = int(m.group(1)) if m else None
+            total_batches = int(m.group(2)) if m else None
         self._total_sentences = max(self._total_sentences, int(event.get("total_sentences") or 0))
         self._completed_sentences = max(self._completed_sentences, int(event.get("completed_sentences") or 0))
         pct = max(0, min(100, int(event.get("percent", 0))))
@@ -151,7 +147,7 @@ class TranslationMonitor(QGroupBox):
         batch_text = f"批次 {batch_id}/{total_batches}" if batch_id and total_batches else "批次 --/--"
         elapsed = max(time.monotonic() - self._started_at, 0.1)
         speed = self._completed_sentences / elapsed * 60 if self._completed_sentences else 0
-        speed_text = f"{speed:.1f} 批/分钟" if speed else "计算中"
+        speed_text = f"{speed:.1f} 句/分钟" if speed else "计算中"
         self.stats.setText(
             f"{batch_text}  ·  句子约 {self._completed_sentences}/{self._total_sentences or '--'}  ·  "
             f"速度 {speed_text}  ·  剩余 {max(0, 100 - pct)}%")
@@ -856,7 +852,6 @@ class EditDialog(QDialog):
         return "\n\n".join(parts)
 
     def _add_log_message(self, msg: str):
-        from datetime import datetime
         logger.info(msg)
 
 
