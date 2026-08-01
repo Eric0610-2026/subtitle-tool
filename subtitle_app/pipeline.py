@@ -11,7 +11,9 @@ import queue
 import subprocess
 import threading
 import traceback
+import weakref
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.thread import _threads_queues, _worker
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -27,6 +29,36 @@ from .translator import translate_stage
 logger = logging.getLogger(__name__)
 
 _STREAM_END = object()  # pipeline 队列结束标记
+
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """工作线程为 daemon 的线程池。
+
+    ThreadPoolExecutor 的工作线程默认非 daemon：用户停止后，正在执行的
+    翻译请求（最长可达 API 超时 × 重试次数）会阻塞解释器退出，导致
+    关闭窗口后进程挂起数分钟。这里仅重写线程创建逻辑并标记 daemon。
+    """
+
+    def _adjust_thread_count(self):
+        # 与父类实现一致，唯一区别是 t.daemon = True
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = '%s_%d' % (self._thread_name_prefix or self, num_threads)
+            t = threading.Thread(name=thread_name, target=_worker,
+                                 args=(weakref.ref(self, weakref_cb),
+                                       self._work_queue,
+                                       self._initializer,
+                                       self._initargs))
+            t.daemon = True
+            t.start()
+            self._threads.add(t)
+            _threads_queues[t] = self._work_queue
 
 
 class SubtitleWorker:
@@ -120,6 +152,10 @@ class SubtitleWorker:
                 else:
                     post({"type": "done", "message": "用户已停止处理"})
             except Exception as e:
+                if self.stop_requested:
+                    # 用户主动停止时，转写线程抛出的"用户停止"异常不算错误
+                    post({"type": "done", "message": "用户已停止处理"})
+                    return
                 tb = traceback.format_exc()
                 logger.error("处理出错: %s\n%s", e, tb)
                 post({"type": "error", "message": f"处理出错: {e}", "trace": tb})
@@ -151,16 +187,19 @@ class SubtitleWorker:
                         _safe_put(result)
                 _safe_put(_STREAM_END)
             except Exception as e:
-                tb = traceback.format_exc()
-                logger.error("转写线程出错: %s\n%s", e, tb)
-                error_info.append((e, tb))
+                if not self.stop_requested:
+                    # 仅非停止场景记录为错误；停止时"用户停止"异常不污染 error_info
+                    tb = traceback.format_exc()
+                    logger.error("转写线程出错: %s\n%s", e, tb)
+                    error_info.append((e, tb))
                 _safe_put(_STREAM_END)
 
         trans_thread = threading.Thread(target=transcribe_worker, daemon=True)
         trans_thread.start()
 
         translate_workers = max(1, getattr(cfg.translation, "concurrency_translate", 3))
-        tpool = ThreadPoolExecutor(max_workers=translate_workers)
+        # daemon 线程池：停止后正在执行的翻译请求不会阻塞进程退出
+        tpool = _DaemonThreadPoolExecutor(max_workers=translate_workers)
         try:
             translate_futures = []
             checked_futures = set()
@@ -214,6 +253,16 @@ class SubtitleWorker:
                         tb = traceback.format_exc()
                         logger.error("翻译任务异常（流水线结束时捕获）: %s\n%s", e, tb)
                         translate_errors.append((e, tb))
+            else:
+                # 停止路径：不等待未完成任务，但已完成的 future 异常仍要记录，
+                # 避免翻译线程因其他原因崩溃时静默无痕
+                for future in translate_futures:
+                    if future in checked_futures or not future.done():
+                        continue
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.warning("翻译任务异常（停止时捕获）: %s", e)
 
         if translate_errors:
             e, tb = translate_errors[0]

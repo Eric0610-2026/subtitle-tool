@@ -3,12 +3,11 @@
 """pipeline.py 单元测试（适配当前代码，使用 mock 依赖）"""
 import subprocess
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from subtitle_app.pipeline import SubtitleWorker, _STREAM_END
+from subtitle_app.pipeline import SubtitleWorker
 
 
 class TestSubtitleWorkerInit(unittest.TestCase):
@@ -402,6 +401,52 @@ class TestRun(unittest.TestCase):
                   if c[0][0].get("type") == "error"]
         self.assertTrue(errors, "并行翻译异常应发出 error 事件")
         self.assertIn("translation failed", errors[0]["message"])
+
+    def _make_opts(self, concurrency: int) -> dict:
+        """构造 _run 所需的 opts（与现有测试保持一致）"""
+        return {
+            "work_dir": str(Path.cwd()),
+            "model_dir": "fake",
+            "language": "auto",
+            "device": "cpu",
+            "compute_type": "int8",
+            "translate_enabled": False,
+            "extract_audio": True,
+            "vad_filter": True,
+            "api_url": "",
+            "api_key": "",
+            "translation_model": "",
+            "skip_completed": False,
+            "post": self.post,
+            "concurrency": concurrency,
+            "_is_stopped": lambda: False,
+            "_register_proc": MagicMock(),
+            "_unregister_proc": MagicMock(),
+        }
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    def test_run_serial_stop_is_not_error(self, mock_translate):
+        """回归：串行模式用户停止时，转写线程的「用户停止」异常不得报为 error"""
+        self.w.stop_requested = True
+        with patch.object(SubtitleWorker, "_transcribe_stage",
+                          side_effect=RuntimeError("用户停止")):
+            self.w._run([Path("test.mp4")], self._make_opts(1))
+
+        types = [c[0][0].get("type") for c in self.post.call_args_list]
+        self.assertNotIn("error", types, "停止不应发出 error 事件")
+        self.assertIn("done", types, "停止应发出 done 事件")
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    def test_run_parallel_stop_is_not_error(self, mock_translate):
+        """回归：并行流水线用户停止时，不得把「用户停止」报为 error"""
+        self.w.stop_requested = True
+        with patch.object(SubtitleWorker, "_transcribe_stage",
+                          side_effect=RuntimeError("用户停止")):
+            self.w._run([Path("test.mp4"), Path("test2.mp4")], self._make_opts(2))
+
+        types = [c[0][0].get("type") for c in self.post.call_args_list]
+        self.assertNotIn("error", types, "停止不应发出 error 事件")
+        self.assertIn("done", types, "停止应发出 done 事件")
 
 
 if __name__ == "__main__":

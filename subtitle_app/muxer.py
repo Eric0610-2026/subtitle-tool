@@ -288,7 +288,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
             _cleanup_file(remux_temp)
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
                 return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
-                                          f"内嵌超时但 MKV 已生成", "WARNING")
+                                          "内嵌超时但 MKV 已生成", "WARNING")
             return None, False
 
         proc, stdout, stderr = result
@@ -326,7 +326,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
             _cleanup_file(remux_temp)
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
                 return _verify_and_return(video_path, mkv_path, ffmpeg_bin, sanitized, remux_temp, post,
-                                          f"降级重试超时但 MKV 已生成", "WARNING")
+                                          "降级重试超时但 MKV 已生成", "WARNING")
             return None, False
 
         proc2, _, stderr2 = result2

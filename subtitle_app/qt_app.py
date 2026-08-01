@@ -56,7 +56,6 @@ class SubtitleApp(QMainWindow):
         self.work_dir = str(APP_DIR)
         self.video_jobs: List[Path] = []
         self.subtitle_jobs: List[Path] = []
-        self._last_progress_update = 0
         from .pipeline import SubtitleWorker
         self.worker = SubtitleWorker()
         self._ignore_path = APP_DIR / IGNORE_FILE
@@ -185,9 +184,6 @@ class SubtitleApp(QMainWindow):
 
     def _build_file_list(self, bl):
         """构建文件列表区（splitter + 操作按钮）"""
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.setFixedHeight(320)
         left = QFrame()
         left.setObjectName("filePanel")
         ll = QVBoxLayout(left)
@@ -752,8 +748,7 @@ class SubtitleApp(QMainWindow):
 
     def _begin_processing(self, jobs, opts, log_msg):
         self._start_time = time.time()
-        self._stats = {"files": len(jobs), "cache_hits": 0, "translated_segments": 0,
-                       "transcribed_segments": 0, "start": self._start_time}
+        self._stats = {"files": len(jobs)}
         self._quality_reports = []
         self._output_paths = []
         self.start_btn.setEnabled(False)
@@ -1119,17 +1114,16 @@ class SubtitleApp(QMainWindow):
             p.transcribe_bar.setFormat("100%")
             p.translate_bar.setValue(100)
             p.translate_bar.setFormat("100%")
-        _has_detail_above = stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成", "翻译")
-        if _has_detail_above:
-            pass
-        elif detail and self._start_time and pct:
-            self._set_detail_with_eta(p, detail, pct)
-        elif detail:
-            p.detail_label.setText(detail)
-        elif self._start_time and pct:
-            self._set_detail_with_eta(p, "", pct)
-        else:
-            p.detail_label.setText("")
+        # 转写/翻译阶段已设置对应子进度条的详情，跳过底部 detail_label
+        if stage not in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成", "翻译"):
+            if detail and self._start_time and pct:
+                self._set_detail_with_eta(p, detail, pct)
+            elif detail:
+                p.detail_label.setText(detail)
+            elif self._start_time and pct:
+                self._set_detail_with_eta(p, "", pct)
+            else:
+                p.detail_label.setText("")
         idx = e.get("idx", 0)
         if idx and self._overall is not None:
             overall_pct = self._overall.tick(idx, pct, stage)

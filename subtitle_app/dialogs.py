@@ -407,12 +407,16 @@ class ModelConfigDialog(QDialog):
         self.status_label.setText("⏳ 正在获取模型列表...")
         self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
 
+        # 请求序号：若旧请求仍在飞行，其迟到回调会被忽略，避免竞态覆盖
+        self._fetch_seq = getattr(self, "_fetch_seq", 0) + 1
+        seq = self._fetch_seq
+
         self._thread = QThread()
         self._worker = ModelListWorker(api_url, api_key)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_models_fetched)
-        self._worker.error.connect(self._on_models_error)
+        self._worker.finished.connect(lambda ids, s=seq: self._on_models_fetched(ids, s))
+        self._worker.error.connect(lambda msg, s=seq: self._on_models_error(msg, s))
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
@@ -420,7 +424,9 @@ class ModelConfigDialog(QDialog):
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
 
-    def _on_models_fetched(self, model_ids: list):
+    def _on_models_fetched(self, model_ids: list, seq: int = None):
+        if seq is not None and seq != getattr(self, "_fetch_seq", None):
+            return  # 已发起更新的请求，忽略过期结果
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("📋 获取列表")
         self._all_models = list(model_ids)
@@ -428,7 +434,9 @@ class ModelConfigDialog(QDialog):
         self.status_label.setText(f"✅ 获取到 {len(model_ids)} 个模型")
         self.status_label.setStyleSheet("color:#22c55e; font-size:11px;")
 
-    def _on_models_error(self, err_msg: str):
+    def _on_models_error(self, err_msg: str, seq: int = None):
+        if seq is not None and seq != getattr(self, "_fetch_seq", None):
+            return  # 已发起更新的请求，忽略过期结果
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("📋 获取列表")
         self.status_label.setText(f"❌ {err_msg}")
@@ -454,17 +462,23 @@ class ModelConfigDialog(QDialog):
         self.status_label.setText("⏳ 正在连接 API...")
         self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
 
+        # 请求序号：旧请求的迟到回调将被忽略，避免竞态覆盖
+        self._test_seq = getattr(self, "_test_seq", 0) + 1
+        tseq = self._test_seq
+
         self._test_thread = QThread()
         self._test_worker = ApiTestWorker(api_url, api_key, model, self._target_lang)
         self._test_worker.moveToThread(self._test_thread)
         self._test_thread.started.connect(self._test_worker.run)
-        self._test_worker.finished.connect(self._on_test_done)
+        self._test_worker.finished.connect(lambda r, s=tseq: self._on_test_done(r, s))
         self._test_worker.finished.connect(self._test_thread.quit)
         self._test_worker.finished.connect(self._test_worker.deleteLater)
         self._test_thread.finished.connect(self._test_thread.deleteLater)
         self._test_thread.start()
 
-    def _on_test_done(self, result: str):
+    def _on_test_done(self, result: str, seq: int = None):
+        if seq is not None and seq != getattr(self, "_test_seq", None):
+            return  # 已发起更新的请求，忽略过期结果
         self.test_btn.setEnabled(True)
         self.test_btn.setText("🔍 检测")
         is_success = result.startswith("✅")

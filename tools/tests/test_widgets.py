@@ -3,7 +3,6 @@
 """widgets.py 单元测试（仅测试非 Qt 依赖部分）"""
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from subtitle_app.widgets import is_audio_file
 
