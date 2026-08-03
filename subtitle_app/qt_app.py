@@ -343,9 +343,18 @@ class SubtitleApp(QMainWindow):
 
     def _set_default_video_dir(self):
         d = self._default_dir()
+        if not d:
+            self._add_log_entry("未配置默认视频目录（app.default_video_dir），可在「⚙ 更多设置」中配置")
+            return
+        if not Path(d).exists():
+            self._add_log_entry(f"默认视频目录不存在：{d}，跳过扫描")
+            return
         self.video_dir.setText(d)
-        self._add_log_entry(f"视频目录已设为 {d}")
-        self._scan_path(d, True)
+        # 按当前标签页类型扫描：视频页扫视频/音频，字幕页扫字幕
+        is_video = self.tabs.currentIndex() == 0
+        self._scan_path(d, is_video)
+        kind = "视频/音频" if is_video else "字幕"
+        self._add_log_entry(f"已从默认目录扫描{kind}文件：{d}")
 
     def _open_settings(self):
         dlg = SettingsDialog(self, self.settings_data)
@@ -529,18 +538,8 @@ class SubtitleApp(QMainWindow):
         self._add_paths([d / f for f in sorted(d.iterdir()) if f.suffix.lower() in exts], is_video)
 
     def _on_tab_changed(self, index: int):
-        """切换到「已有字幕翻译」标签页时，自动扫描默认目录并添加字幕文件"""
-        if index != 1:
-            return
-        d = self._default_dir()
-        if not d:
-            self._add_log_entry("未配置默认视频目录（app.default_video_dir），跳过字幕扫描")
-            return
-        if not Path(d).exists():
-            self._add_log_entry(f"默认视频目录不存在：{d}，跳过字幕扫描")
-            return
-        self._scan_path(d, False)
-        self._add_log_entry(f"已在默认目录中扫描字幕：{d}")
+        """切换标签页时不做任何自动扫描（扫描由「📌 默认」按钮手动触发）"""
+        pass
 
     def _scan_dir(self):
         is_video = self.tabs.currentIndex() == 0
