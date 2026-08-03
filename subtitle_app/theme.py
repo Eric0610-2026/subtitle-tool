@@ -28,6 +28,32 @@ def load_theme_colors():
 
 
 _CHECK_PNG_CACHE = None
+_ARROW_PNG_CACHE: dict = {}
+
+
+def _arrow_png(key: str, color_hex: str) -> str:
+    """生成下拉箭头 PNG（按主题/状态缓存），返回用于 QSS url() 的绝对路径"""
+    cached = _ARROW_PNG_CACHE.get(key)
+    if cached:
+        return cached
+    path = Path(tempfile.gettempdir()) / f"zimu_arrow_{key}.png"
+    if not path.exists():
+        pm = QPixmap(12, 12)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color_hex))
+        tri = QPainterPath()
+        tri.moveTo(2.0, 4.0)
+        tri.lineTo(6.0, 9.0)
+        tri.lineTo(10.0, 4.0)
+        tri.closeSubpath()
+        p.drawPath(tri)
+        p.end()
+        pm.save(str(path))
+    _ARROW_PNG_CACHE[key] = path.as_posix()
+    return _ARROW_PNG_CACHE[key]
 
 
 def checkmark_png() -> str:
@@ -114,6 +140,8 @@ def build_qss(colors: dict, is_dark: bool) -> str:
     alt_bg = "#1c1f33" if is_dark else "#f8fafc"
     sel_bg = "#2f3554" if is_dark else "#e0e7ff"
     hover_bg = "#232741" if is_dark else "#eef2ff"
+    theme_key = "dark" if is_dark else "light"
+    arrow = _arrow_png(theme_key, c['text_muted'])
     return f"""
         QMainWindow {{ background: {c['bg']}; }}
         QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
@@ -163,7 +191,31 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus {{
             border:1px solid {c['accent']};
         }}
-        QComboBox::drop-down {{ border:none; width:26px; }}
+        QComboBox:hover {{ border-color:{c['accent']}; }}
+        QComboBox:disabled {{
+            color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']};
+        }}
+        QComboBox::drop-down {{
+            border:none; width:26px; subcontrol-origin:padding;
+            subcontrol-position:center right; background:{c['card']};
+        }}
+        QComboBox::down-arrow {{
+            image: url("{arrow}"); width:12px; height:12px;
+            subcontrol-origin:padding; subcontrol-position:center;
+        }}
+        QComboBox QAbstractItemView {{
+            background:{c['card']}; color:{c['text']};
+            border:1px solid {c['border']}; {border_radius}
+            selection-background-color:{c['accent']}; selection-color:white;
+            outline:0; padding:4px;
+        }}
+        QComboBox QAbstractItemView::item {{
+            min-height:24px; padding:4px 10px;
+        }}
+        QComboBox QAbstractItemView::item:hover {{
+            background:{hover_bg}; color:{c['text']};
+        }}
+        QComboBox QAbstractItemView::item:selected {{ background:{c['accent']}; color:white; }}
         QPushButton {{
             background:{c['card']}; color:{c['text']};
             border:1px solid {c['border']}; {border_radius}

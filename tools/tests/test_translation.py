@@ -72,8 +72,10 @@ class TestTranslationClient(unittest.TestCase):
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
     def test_default_batch_size(self):
+        # 默认批次大小应跟随 config 的 translation.batch_size（Hy-MT2 本地化调参后为 20）
+        from subtitle_app.config import cfg
         c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()), lambda *a: None)
-        self.assertEqual(c.batch_size, 100)
+        self.assertEqual(c.batch_size, cfg.translation.batch_size)
 
     def test_translate_blocks_basic(self):
         with tempfile.TemporaryDirectory() as d:

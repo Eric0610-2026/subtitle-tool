@@ -259,6 +259,59 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         previews = [p for p in posts if p["type"] == "preview"]
         self.assertGreater(len(previews), 0)
 
+    def test_batch_size_mode_defaults(self):
+        """批大小模式默认：联网=100（cfg.batch_size_online）、本地 Hy-MT2=20（cfg.batch_size）；显式传入时覆盖"""
+        captured = {}
+
+        def capture(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            client = MagicMock()
+            client.translate_blocks.return_value = ["（中文）"]
+            client.get_cache_size.return_value = 0
+            return client
+
+        def run(api_url, bs_marker="absent"):
+            srt = self.d / "bs.srt"
+            blocks = [SubtitleBlock(index=1, start=0.0, end=2.0, text="Hello")]
+            from subtitle_app.srt_utils import write_srt
+            write_srt(srt, blocks, ["Hello"])
+            item = self.d / "bs.mp4"
+            item.write_text("dummy")
+            opts = {
+                "work_dir": str(self.d),
+                "language": "en",
+                "translate_enabled": True,
+                "api_url": api_url,
+                "api_key": "k",
+                "translation_model": "m",
+                "translation_only": False,
+                "_detected_lang": "en",
+                "_ffmpeg": None,
+                "_is_stopped": lambda: False,
+            }
+            if bs_marker != "absent":
+                opts["translation_batch_size"] = bs_marker
+            mocks = {"TranslationClient": MagicMock(side_effect=capture)}
+            if api_url.lower().startswith("http://127.0.0.1:8080"):
+                # 本地模式会触发服务探测，测试中直接视为已就绪
+                mocks["ensure_running"] = MagicMock(return_value=(True, "ok", False))
+            from subtitle_app.translator import translate_only
+            with patch.multiple("subtitle_app.translator", **mocks):
+                translate_only(srt, self.d, item, 0, 1, opts, lambda *a: None)
+
+        # 联网默认 100
+        captured.clear()
+        run("https://api.example.com")
+        self.assertEqual(captured["kwargs"]["batch_size"], 100)
+        # 本地 Hy-MT2 默认 20
+        captured.clear()
+        run("http://127.0.0.1:8080/v1/chat/completions")
+        self.assertEqual(captured["kwargs"]["batch_size"], 20)
+        # 显式传入覆盖默认
+        captured.clear()
+        run("https://api.example.com", bs_marker=50)
+        self.assertEqual(captured["kwargs"]["batch_size"], 50)
+
     def test_mkv_embed_success(self):
         """MKV 内嵌成功路径"""
         posts, mocks = self._run(srt_texts=["Hello", "World"], mkv_ok=True)

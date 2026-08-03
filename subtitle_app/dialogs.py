@@ -607,6 +607,26 @@ class SettingsDialog(QDialog):
         self._updating = False  # 防止信号递归
 
         r = 0
+        # ── 翻译方式：本地 Hy-MT2 / 联网 API ──
+        g2.addWidget(QLabel("翻译方式"), r, 0)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(4)
+        self.translation_mode = QComboBox()
+        self.translation_mode.addItem("本地（Hy-MT2）", "local")
+        self.translation_mode.addItem("联网 API", "online")
+        self.translation_mode.setCurrentIndex(
+            ["local", "online"].index(values.get("translation_mode", "local"))
+            if values.get("translation_mode", "local") in ("local", "online") else 0)
+        self.translation_mode.setToolTip("本地：使用电脑上运行的 Hy-MT2（需先启动 start-local-model.bat）\n联网：调用在线 API，需配置模型")
+        self.translation_mode.currentIndexChanged.connect(self._on_translation_mode_changed)
+        mode_row.addWidget(self.translation_mode, 1)
+        self.mode_hint = QLabel("使用本地 Hy-MT2 服务 http://127.0.0.1:8080")
+        self.mode_hint.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self.mode_hint.setWordWrap(True)
+        mode_row.addWidget(self.mode_hint, 1)
+        g2.addLayout(mode_row, r, 1, 1, 2)
+        r += 1
+
         g2.addWidget(QLabel("目标语言"), r, 0)
         self.target_lang = QComboBox()
         self.target_lang.addItems(["zh", "en", "ja", "ko", "fr", "de", "es", "ru"])
@@ -614,10 +634,22 @@ class SettingsDialog(QDialog):
         g2.addWidget(self.target_lang, r, 1, 1, 2)
         r += 1
 
+        # ── 联网方案配置（本地模式时整块隐藏）──
+        self.online_cfg_widget = QWidget()
+        self.online_cfg_widget.setObjectName("onlineCfgWidget")
+        # 全局 QSS 的 QWidget { background: ... } 会给嵌套容器及内部 QLabel 强制上色，
+        # 这里覆盖为透明，避免方案配置块底部出现色块/黑框
+        self.online_cfg_widget.setStyleSheet(
+            "#onlineCfgWidget { background: transparent; }"
+            "#onlineCfgWidget QLabel { background: transparent; }")
+        ocl = QVBoxLayout(self.online_cfg_widget)
+        ocl.setContentsMargins(0, 0, 0, 0)
+        ocl.setSpacing(8)
+
         # ── 方案选择行 ──
-        g2.addWidget(QLabel("方案"), r, 0)
         preset_row = QHBoxLayout()
         preset_row.setSpacing(4)
+        preset_row.addWidget(QLabel("方案"))
         self.preset_combo = QComboBox()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
         preset_row.addWidget(self.preset_combo, 1)
@@ -636,20 +668,21 @@ class SettingsDialog(QDialog):
         self.del_btn.clicked.connect(self._del_preset)
         preset_row.addWidget(self.del_btn)
         preset_row.addStretch()
-        g2.addLayout(preset_row, r, 1, 1, 2)
-        r += 1
+        ocl.addLayout(preset_row)
 
         # ── 当前方案的编辑字段 ──
-        g2.addWidget(QLabel("方案名称"), r, 0)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(4)
+        name_row.addWidget(QLabel("方案名称"))
         self.preset_name = QLineEdit()
         self.preset_name.textChanged.connect(self._on_field_changed)
-        g2.addWidget(self.preset_name, r, 1, 1, 2)
-        r += 1
+        name_row.addWidget(self.preset_name, 1)
+        ocl.addLayout(name_row)
 
         # ── 模型配置按钮（点开二级页）──
-        g2.addWidget(QLabel("模型配置"), r, 0)
         cfg_row = QHBoxLayout()
         cfg_row.setSpacing(4)
+        cfg_row.addWidget(QLabel("模型配置"))
         self.model_cfg_btn = QPushButton()
         self.model_cfg_btn.setObjectName("accentBtn")
         self.model_cfg_btn.setCursor(Qt.PointingHandCursor)
@@ -660,9 +693,12 @@ class SettingsDialog(QDialog):
         self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
         self.cfg_status_dot.setToolTip("灰色=未配置，绿色=已配置")
         cfg_row.addWidget(self.cfg_status_dot)
-        g2.addLayout(cfg_row, r, 1, 1, 2)
+        ocl.addLayout(cfg_row)
+
+        g2.addWidget(self.online_cfg_widget, r, 0, 1, 3)
         r += 1
         self._update_cfg_btn_text()
+        self._apply_mode_visibility(values.get("translation_mode", "local"))
 
         # ── 其余选项 ──
         self.only_zh_cb = QCheckBox("只要译文（不生成双语）")
@@ -676,7 +712,13 @@ class SettingsDialog(QDialog):
         self.batch_size = QSpinBox()
         self.batch_size.setRange(10, 5000)
         self.batch_size.setSingleStep(5)
-        self.batch_size.setValue(values.get("translation_batch_size", cfg.translation.batch_size))
+        # 批大小默认按翻译方式区分：本地 Hy-MT2=20（config batch_size），联网大模型=100（config batch_size_online）
+        _mode_now = str(values.get("translation_mode", "local")).lower()
+        _default_bs = getattr(cfg.translation, "batch_size_online", 100) if _mode_now == "online" else cfg.translation.batch_size
+        _saved_bs = values.get("translation_batch_size")
+        self.batch_size.setValue(_default_bs if _saved_bs is None else _saved_bs)
+        self._bs_custom = False  # 用户未手动改过时，切换翻译方式自动跟随该方式默认
+        self.batch_size.valueChanged.connect(self._on_bs_changed)
         batch_row.addWidget(self.batch_size)
         self.send_all_cb = QCheckBox("一次性发送全部文本（不拆分批次）")
         self.send_all_cb.setChecked(values.get("send_all", False))
@@ -878,6 +920,40 @@ class SettingsDialog(QDialog):
             self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
             self.cfg_status_dot.setToolTip("未配置 - 点击配置")
 
+    def _on_translation_mode_changed(self, idx: int):
+        """翻译方式切换：本地 Hy-MT2 隐藏联网配置块"""
+        mode = self.translation_mode.itemData(idx) if idx >= 0 else "local"
+        self._apply_mode_visibility(mode)
+
+    def _on_bs_changed(self, value: int):
+        """用户手动改动批大小后，切换翻译方式不再自动跟随默认"""
+        self._bs_custom = True
+
+    def _apply_mode_visibility(self, mode: str):
+        """根据翻译方式显示/隐藏联网配置块"""
+        # 未手动自定义时，切换翻译方式让批大小跟随该方式的默认值
+        if not getattr(self, "_bs_custom", False) and getattr(self, "batch_size", None) is not None:
+            dflt = getattr(cfg.translation, "batch_size_online", 100) if str(mode).lower() != "local" else cfg.translation.batch_size
+            self.batch_size.blockSignals(True)
+            self.batch_size.setValue(dflt)
+            self.batch_size.blockSignals(False)
+        if str(mode).lower() == "local":
+            self.online_cfg_widget.setVisible(False)
+            self.mode_hint.setText("使用本地 Hy-MT2 服务 http://127.0.0.1:8080（无需配置）")
+            self.mode_hint.setStyleSheet("color:#22c55e; font-size:11px;")
+        else:
+            self.online_cfg_widget.setVisible(True)
+            self.mode_hint.setText("联网调用在线 API，请配置下方模型")
+            self.mode_hint.setStyleSheet("color:#94a3b8; font-size:11px;")
+
+    def _batch_size_value_for_mode(self):
+        """批大小保存规则：等于当前翻译方式默认值时存 None（跟随模式默认，本地 20 / 联网 100），
+        用户自定义值则保存（全局覆盖两种模式）"""
+        mode = self.translation_mode.itemData(self.translation_mode.currentIndex())
+        dflt = getattr(cfg.translation, "batch_size_online", 100) if str(mode).lower() != "local" else cfg.translation.batch_size
+        val = self.batch_size.value()
+        return None if val == dflt else val
+
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
         self.batch_size.setEnabled(not checked)
@@ -899,12 +975,13 @@ class SettingsDialog(QDialog):
             "default_video_dir": self.default_dir.text().strip(),
             "reuse_auto_lang": self.reuse_lang_cb.isChecked(),
             "target_lang": self.target_lang.currentText(),
+            "translation_mode": self.translation_mode.itemData(self.translation_mode.currentIndex()),
             "translation_model": cur["model"],
             "api_url": cur["api_url"],
             "api_key": cur["api_key"],
             "pipeline": self.pipeline_cb.isChecked(),
             "translation_only": self.only_zh_cb.isChecked(),
-            "translation_batch_size": self.batch_size.value(),
+            "translation_batch_size": self._batch_size_value_for_mode(),
             "send_all": self.send_all_cb.isChecked(),
             "pause_before_embed": self.pause_embed_cb.isChecked(),
             "backup_max_files": self.backup_max.value(),

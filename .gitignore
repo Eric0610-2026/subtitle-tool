@@ -3,8 +3,16 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 大模型文件
-models/faster-whisper-large-v3-turbo/
+# 大模型文件（GGUF / Whisper 权重）
+models/
+tools/llama-cpp/
+
+# 本地翻译服务脚本与备份（不进仓库）
+start-local-model.bat
+start-local-model.ps1
+config.json.bak_hy_mt2
+tools/srt_translate.py
+tools/check_local_model.py
 
 # 第三方二进制
 tools/ffmpeg.exe

@@ -101,12 +101,13 @@ class SubtitleApp(QMainWindow):
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
             "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", False),
             "target_lang": cfg.translation.target_lang,
+            "translation_mode": getattr(cfg.translation, "mode", "local"),
             "translation_model": _active_preset["model"],
             "api_url": _active_preset["api_url"],
             "api_key": _active_preset["api_key"],
             "pipeline": cfg.translation.pipeline,
             "translation_only": False,
-            "translation_batch_size": cfg.translation.batch_size,
+            "translation_batch_size": None,  # None=按模式默认（本地 cfg.batch_size / 联网 cfg.batch_size_online）
             "send_all": False,
             "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
             "backup_max_files": getattr(cfg.translation, "backup_max_files", 50),
@@ -115,6 +116,7 @@ class SubtitleApp(QMainWindow):
         }
         self._build_ui()
         self._apply_style()
+        self._update_model_status()  # 初始化「当前模型」标签
 
         self._add_log_entry("应用就绪")
         self._restore_window_state()
@@ -304,14 +306,10 @@ class SubtitleApp(QMainWindow):
         self.stop_btn = self._make_btn("⏹ 停止", self._stop, object_name="stopBtn")
         self.stop_btn.setEnabled(False)
         ar.addWidget(self.stop_btn)
-        # ── 模型状态与卸载按钮 ──
-        self.model_status = QLabel("🧠 模型：未加载")
+        # ── 当前模型状态（信息展示：Whisper/本地/联网大模型具体到种类） ──
+        self.model_status = QLabel("🧠 当前模型：…")
         self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
         ar.addWidget(self.model_status)
-        self.unload_model_btn = self._make_btn("✕ 卸载模型", self._unload_model, object_name="bottomBtn",
-                                     tooltip="手动卸载 Whisper 模型，释放显存")
-        self.unload_model_btn.setEnabled(False)
-        ar.addWidget(self.unload_model_btn)
         ar.addWidget(self._make_btn("🔄 重试", self._retry, object_name="bottomBtn",
                            stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
                                       "QPushButton:hover { background:#4f46e5; }"))
@@ -362,10 +360,12 @@ class SubtitleApp(QMainWindow):
         if result == 1:
             self.settings_data = dlg.get_values()
             self._add_log_entry("设置已应用（本次运行有效）")
+            self._update_model_status()  # 翻译模型种类可能已变化，刷新标签
         elif result == 2:
             self.settings_data = dlg.get_values()
             self._save_settings_permanently(dlg.get_values())
             self._add_log_entry("设置已保存到 config.json（永久生效）")
+            self._update_model_status()
 
     def _save_settings_permanently(self, values: dict):
         import json
@@ -389,11 +389,14 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", False)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
+        trans["mode"] = values.get("translation_mode", "local")
         trans["model"] = values.get("translation_model", "")
         trans["api_url"] = values.get("api_url", "")
         trans["api_key"] = values.get("api_key", "")
         trans["pipeline"] = values.get("pipeline", True)
-        trans["batch_size"] = values.get("translation_batch_size", 50)
+        _saved_bs = values.get("translation_batch_size")
+        if _saved_bs is not None:  # 自定义值才写入 config.json；默认值不覆盖，保留本地默认 20
+            trans["batch_size"] = _saved_bs
         trans["pause_before_embed"] = values.get("pause_before_embed", False)
         trans["backup_max_files"] = values.get("backup_max_files", 50)
         # 保存多方案配置
@@ -719,6 +722,14 @@ class SubtitleApp(QMainWindow):
 
     def _build_opts(self, skip_completed=False):
         s = self.settings_data
+        # 翻译方式：local=本地 Hy-MT2（强制走本机 8080 服务，无需配置）；online=使用用户预设的联网 API
+        mode = str(s.get("translation_mode", "local")).lower()
+        if mode == "local":
+            api_url, api_key, tmodel = (
+                "http://127.0.0.1:8080/v1/chat/completions", "local", "hy-mt2")
+        else:
+            api_url, api_key, tmodel = (
+                s.get("api_url", ""), s.get("api_key", ""), s.get("translation_model", ""))
         return {
             "work_dir": self.work_dir,
             "model_dir": s.get("model_dir", ""),
@@ -730,11 +741,11 @@ class SubtitleApp(QMainWindow):
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
             "reuse_auto_lang": s.get("reuse_auto_lang", False),
-            "api_url": s.get("api_url", ""),
-            "api_key": s.get("api_key", ""),
-            "translation_model": s.get("translation_model", ""),
+            "api_url": api_url,
+            "api_key": api_key,
+            "translation_model": tmodel,
             "translation_only": s.get("translation_only", False),
-            "translation_batch_size": s.get("translation_batch_size", cfg.translation.batch_size),
+            "translation_batch_size": s.get("translation_batch_size"),
             "send_all": s.get("send_all", False),
             "pause_before_embed": s.get("pause_before_embed", False),
             "skip_completed": skip_completed,
@@ -809,27 +820,35 @@ class SubtitleApp(QMainWindow):
         self.worker.stop()
         self._add_log_entry("已请求停止")
 
-    def _unload_model(self):
-        """手动卸载 Whisper 模型，释放显存"""
-        if not self.worker.transcriber.is_loaded():
-            return
-        if not self._confirm("卸载模型", "确定要卸载 Whisper 模型吗？\n下次处理时需要重新加载模型（约 2-10 秒）。", default_no=True):
-            return
-        self.worker.transcriber.release_model()
-        self._update_model_status()
-        self._add_log_entry("🧠 Whisper 模型已卸载，显存已释放")
-
     def _update_model_status(self):
-        """更新模型状态 UI 标签"""
-        loaded = self.worker.transcriber.is_loaded()
-        if loaded:
-            self.model_status.setText("🧠 模型：已加载")
-            self.model_status.setStyleSheet("color:#22c55e; font-size:11px; padding:0 4px; font-weight:600;")
-            self.unload_model_btn.setEnabled(True)
+        """更新主页面「当前加载模型」标签：只列出实际已加载/已生效的模型，未加载的不显示"""
+        from .local_service import is_service_running
+        s = self.settings_data
+        parts = []
+
+        # Whisper：仅当已加载才显示
+        if self.worker.transcriber.is_loaded():
+            mdir = Path(s.get("model_dir", ""))
+            ver = mdir.name if mdir.name and mdir.name not in (".", "/", "\\") else "Whisper"
+            parts.append(f"Whisper {ver}")
+
+        # 翻译模型：本地仅运行中显示；联网始终显示（当前生效的翻译模型，无本地加载态）
+        mode = str(s.get("translation_mode", "local")).lower()
+        tmodel = (s.get("translation_model") or "").strip()
+        local_running = False
+        if mode == "local":
+            local_running = is_service_running()
+            if local_running:
+                parts.append(f"本地模型 {tmodel or 'Hy-MT2'}")
+        elif mode == "online" and s.get("api_url"):
+            parts.append(f"联网模型 {tmodel or '未配置'}")
+
+        if parts:
+            self.model_status.setText("🧠 当前加载：" + " · ".join(parts))
+            self.model_status.setStyleSheet("color:#22c55e; font-size:11px; padding:0 4px;")
         else:
-            self.model_status.setText("🧠 模型：未加载")
+            self.model_status.setText("🧠 当前加载：—")
             self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
-            self.unload_model_btn.setEnabled(False)
 
     def _retry(self):
         if self.worker.thread and self.worker.thread.is_alive():
@@ -1019,40 +1038,8 @@ class SubtitleApp(QMainWindow):
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
             self._add_log_entry(f"未找到 faster-whisper 模型，请下载后放入 {cfg.whisper.model_dir}/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
         s = self.settings_data
-        if not s.get("api_url") or not s.get("api_key"):
+        if str(s.get("translation_mode", "local")).lower() != "local" and (not s.get("api_url") or not s.get("api_key")):
             self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
-
-        # 启动后延时预加载 Whisper 模型
-        QTimer.singleShot(2000, self._preload_whisper_model)
-
-    def _preload_whisper_model(self):
-        """后台预加载 Whisper 模型，让第一次处理时秒开"""
-        if self.worker.transcriber.is_loaded():
-            self._update_model_status()
-            return
-        s = self.settings_data
-        model_dir = Path(s["model_dir"])
-        if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
-            self._add_log_entry("Whisper 模型文件未找到，跳过后台预加载", "DEBUG")
-            return
-        self._add_log_entry("🔄 后台预加载 Whisper 模型中...（约 2-10 秒）", "INFO")
-
-        def _do_load():
-            try:
-                self.worker.transcriber.load_whisper_model(
-                    model_dir, s["device"], s["compute_type"],
-                    self.signal_bridge.post)
-                # model_loaded 事件自动触发 _update_model_status()
-            except Exception as e:
-                self.signal_bridge.post({
-                    "type": "log",
-                    "message": f"Whisper 模型预加载失败: {e}",
-                    "level": "WARNING",
-                })
-
-        import threading
-        t = threading.Thread(target=_do_load, daemon=True)
-        t.start()
 
     def _export_log(self):
         """导出当前日志列表到文件"""
@@ -1321,10 +1308,16 @@ class SubtitleApp(QMainWindow):
         self._add_log_entry(f"已切换至{'深色' if self.dark_mode else '浅色'}模式")
 
     def closeEvent(self, event):
-        """应用关闭时释放 Whisper 模型显存并保存窗口状态"""
+        """应用关闭时释放 Whisper 模型显存、关闭本地翻译服务（含残留清理）并保存窗口状态"""
         self._closing = True  # 通知后台嵌入线程停止发信号（daemon 随进程退出）
         if self.worker.transcriber.is_loaded():
             self.worker.transcriber.release_model()
+        try:
+            from .local_service import shutdown_owned, shutdown_running
+            shutdown_owned()    # 先关应用自己拉起的 llama-server
+            shutdown_running()  # 兜底：清理 127.0.0.1:8080 上仍运行的 llama-server，避免残留占显存
+        except Exception:
+            pass
         self._save_window_state()
         super().closeEvent(event)
 

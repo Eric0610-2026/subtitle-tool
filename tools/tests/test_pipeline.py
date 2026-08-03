@@ -448,6 +448,60 @@ class TestRun(unittest.TestCase):
         self.assertNotIn("error", types, "停止不应发出 error 事件")
         self.assertIn("done", types, "停止应发出 done 事件")
 
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.local_service.is_service_running")
+    @patch("subtitle_app.local_service.shutdown_owned")
+    def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_running, mock_translate):
+        """阶段批量：转写后释放 Whisper 显存；本地模式同时清理本会话 llama；
+        pause_before_embed 被强制为 False（按用户要求阶段批量自动嵌入）"""
+        mock_running.return_value = False
+        mock_translate.return_value = None
+
+        self.w._transcribe_stage = lambda item, idx, total, opts: {"path": str(item), "idx": idx, "total": total, "srt": 1}
+        releases = []
+        self.w.transcriber.release_model = lambda: releases.append(1)
+
+        opts = self._make_opts(concurrency=2)
+        opts["api_url"] = "http://127.0.0.1:8080/v1/chat/completions"
+        opts["pause_before_embed"] = True
+
+        with tempfile.TemporaryDirectory() as d:
+            files = [Path(d) / f"f{i}.mp4" for i in range(2)]
+            for p in files:
+                p.write_bytes(b"")
+            self.w._run(files, opts)
+
+        # 阶段切换释放 Whisper 显存
+        self.assertTrue(releases, "进入翻译阶段前应释放 Whisper 显存")
+        # 转写阶段前应停掉本会话拉起的翻译服务
+        mock_shutdown.assert_called_once()
+        # 阶段批量强制自动嵌入：translate_stage 收到的 opts 中 pause_before_embed 应为 False
+        self.assertTrue(mock_translate.call_count >= 2)
+        for call in mock_translate.call_args_list:
+            self.assertFalse(call[0][1]["pause_before_embed"])
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.local_service.is_service_running")
+    @patch("subtitle_app.local_service.shutdown_owned")
+    def test_run_staged_warns_on_external_service(self, mock_shutdown, mock_running, mock_translate):
+        """阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）"""
+        mock_running.return_value = True   # 外部服务在跑
+        mock_translate.return_value = None
+
+        self.w._transcribe_stage = lambda item, idx, total, opts: {"path": str(item), "idx": idx, "total": total, "srt": 1}
+
+        opts = self._make_opts(concurrency=2)
+        opts["api_url"] = "http://127.0.0.1:8080/v1/chat/completions"
+
+        with tempfile.TemporaryDirectory() as d:
+            srt = Path(d) / "a.mp4"
+            srt.write_bytes(b"")
+            self.w._run([srt], opts)
+
+        warns = [c[0][0] for c in self.post.call_args_list
+                 if c[0][0].get("level") == "WARNING"]
+        self.assertTrue(warns, "外部翻译服务在跑时应发出 WARNING 提示")
+
 
 if __name__ == "__main__":
     unittest.main()

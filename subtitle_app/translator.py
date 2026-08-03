@@ -19,6 +19,7 @@ from .srt_utils import (
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
+from .local_service import ensure_running
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,21 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     translated_srt: Optional[Path] = None
     if translate_enabled and api_url and api_key:
+        # 本地模式：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
+        if api_url.lower().startswith("http://127.0.0.1:8080"):
+            post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
+            ok, detail, first = ensure_running(on_progress=lambda sec: post({
+                "type": "log",
+                "message": f"正在启动本地模型服务… 已等待 {sec}s（首次加载通常 10~60 秒）",
+                "level": "INFO",
+            }))
+            if not ok:
+                post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
+                                                "请确认 start-local-model.bat 可正常启动，或检查 tools\\llama-cpp 与 models\\hy-mt2 目录。",
+                      "level": "ERROR"})
+                raise RuntimeError(f"本地模型服务不可用：{detail}")
+            if first:
+                post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
         state_path = source_srt.with_name(source_srt.stem + ".translate_state.json")
@@ -116,8 +132,15 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
         trans_concurrency = getattr(cfg.translation, "concurrency_translate", 3)
         send_all = opts.get("send_all", False)
+        _bs = opts.get("translation_batch_size")
+        if _bs is None:
+            # 模式相关默认批量：本地 Hy-MT2 用 config 的 batch_size（20），联网大模型用 100
+            if api_url.lower().startswith("http://127.0.0.1:8080"):
+                _bs = cfg.translation.batch_size or 20
+            else:
+                _bs = getattr(cfg.translation, "batch_size_online", 100)
         client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
-                                 batch_size=opts.get("translation_batch_size", cfg.translation.batch_size),
+                                 batch_size=_bs,
                                  target_lang=opts.get("target_lang", "zh"),
                                  send_all=send_all)
         try:
