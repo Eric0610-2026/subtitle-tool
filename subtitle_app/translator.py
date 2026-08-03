@@ -105,7 +105,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             }))
             if not ok:
                 post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
-                                                "请确认 start-local-model.bat 可正常启动，或检查 tools\\llama-cpp 与 models\\hy-mt2 目录。",
+                                                "请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 127.0.0.1:8080 未被其它程序占用。",
                       "level": "ERROR"})
                 raise RuntimeError(f"本地模型服务不可用：{detail}")
             if first:
