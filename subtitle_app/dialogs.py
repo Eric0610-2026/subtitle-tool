@@ -262,7 +262,8 @@ class ModelConfigDialog(QDialog):
         self.api_key_edit.textChanged.connect(self._on_field_changed)
         key_row.addWidget(self.api_key_edit, 1)
         self.show_key_btn = QPushButton("显示")
-        self.show_key_btn.setFixedWidth(52)
+        # 不锁死宽度：文字在「显示/隐藏」间切换时能完整显示（固定宽度会截断）
+        self.show_key_btn.setMinimumWidth(52)
         self.show_key_btn.setToolTip("显示/隐藏 API Key")
         self.show_key_btn.setCheckable(True)
         self.show_key_btn.clicked.connect(self._toggle_key_visible)

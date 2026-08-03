@@ -528,9 +528,15 @@ def find_existing_subtitle(video: Path) -> Optional[Path]:
 
 
 def match_video_for_subtitle(subtitle: Path, work_dir: Path) -> Optional[Path]:
+    """查找与字幕同名的视频文件（用于字幕内嵌）。
+
+    优先返回非 .mkv 的视频：内嵌输出本身就是 .mkv，避免匹配到同名 mkv
+    导致输出文件自覆盖；无其他格式时仍可回退到 .mkv。
+    """
     stem = safe_stem(subtitle.name).split(".")[0]
-    for ext in VIDEO_EXTS:
-        for base_dir in (work_dir, subtitle.parent):
+    # 固定优先级：非 mkv 的常见容器优先（set 顺序不可靠）
+    for base_dir in (subtitle.parent, work_dir):
+        for ext in sorted(VIDEO_EXTS, key=lambda e: e == ".mkv"):
             candidate = base_dir / f"{stem}{ext}"
             if candidate.exists():
                 return candidate

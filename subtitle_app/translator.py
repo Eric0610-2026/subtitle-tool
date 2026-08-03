@@ -15,6 +15,7 @@ from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
     load_json, save_json, IGNORE_FILE, analyze_subtitle_file, format_quality_report,
+    match_video_for_subtitle,
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
@@ -284,6 +285,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 post({"type": "log", "message": "使用修改后的字幕嵌入", "level": "INFO"})
 
     # ── 优先尝试内嵌字幕到 MKV ──
+    # 视频文件：直接内嵌自身；字幕文件：找同名视频（找不到则只输出外挂字幕）
     mkv_ok = False
     if is_video and ffmpeg and pause_resp is not None and pause_resp.action == "skip":
         pass  # 用户选择跳过嵌入
@@ -318,18 +320,32 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                         modified_srt.unlink(missing_ok=True)
                     except OSError:
                         pass
+    elif not is_video and ffmpeg:
+        # 已有字幕翻译：尝试匹配同名视频做内嵌
+        matched_video = match_video_for_subtitle(item, work_dir)
+        srt_for_embed = translated_srt if (translated_srt and translated_srt.exists()) else None
+        if matched_video and srt_for_embed:
+            mkv_path, mkv_trusted = embed_subtitles_to_video(
+                matched_video, srt_for_embed, ffmpeg, post,
+                register_proc=opts.get("_register_proc"),
+                unregister_proc=opts.get("_unregister_proc"))
+            if mkv_path and mkv_path.exists() and mkv_trusted:
+                mkv_ok = True
+                post({"type": "output_path", "path": str(mkv_path.resolve())})
+                post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
+                # 删除原视频与翻译后的字幕（两者均已备份/可重建）
+                if matched_video.exists():
+                    _safe_unlink(matched_video, post, "原视频")
+                if source_srt and source_srt.exists():
+                    _safe_unlink(source_srt, post, "翻译字幕")
+                _cleanup_files(post, [(translated_srt, "翻译临时字幕")])
     # ── 内嵌失败或非视频 → 整理输出外挂字幕 ──
     if not mkv_ok:
         post({"type": "progress", "percent": 100, "stage": "组织输出", "idx": idx, "total": total})
         post({"type": "log", "message": "正在整理输出文件...", "level": "INFO"})
-        is_retry = opts.get("skip_completed", False)
-        if not is_video:
-            out_dir = output_dir
-            out_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            base_dir = source_srt.parent if is_retry else output_dir
-            out_dir = base_dir / item_stem
-            out_dir.mkdir(parents=True, exist_ok=True)
+        # 视频/音频/字幕统一：外挂字幕直接输出到文件所在目录（不再建「视频名/」子目录）
+        out_dir = output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
         final_srt = out_dir / f"{item_stem}.srt"
 
 

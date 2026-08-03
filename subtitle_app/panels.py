@@ -360,21 +360,24 @@ class PreviewPanel(QFrame):
         }
 
     def _style_item(self, item: QTableWidgetItem, kind: str):
-        """按列类型设置单元格字体与颜色（kind: index/time/text/translation）"""
+        """按列类型设置单元格字体、颜色与对齐（kind: index/time/text/translation）"""
         c = self._palette_colors()
         if kind == "index":
             item.setFont(QFont("Consolas", 8))
             item.setForeground(QBrush(QColor(c["index"])))
-            item.setTextAlignment(Qt.AlignCenter)
+            item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         elif kind == "time":
             item.setFont(QFont("Consolas", 8))
             item.setForeground(QBrush(QColor(c["time"])))
+            item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         elif kind == "text":
             item.setFont(QFont("Consolas", 9))
             item.setForeground(QBrush(QColor(c["text"])))
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         else:  # translation
             item.setFont(QFont("Consolas", 9))
             item.setForeground(QBrush(QColor(c["translation"])))
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
     def _render_structured_preview(self):
         """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
@@ -457,11 +460,12 @@ class PreviewPanel(QFrame):
         self.preview.itemChanged.connect(self._on_item_changed)
 
         self._empty_label = QLabel(
-            "\n\n\n\n                 暂无字幕\n\n                 添加或拖入 .srt 文件后，字幕会显示在这里"
+            "暂无字幕\n\n添加或拖入 .srt 文件后，字幕会显示在这里"
         )
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet("color:#64748b; background:transparent; font-size:13px;")
         self._stack = QStackedWidget()
+        self._stack.setStyleSheet("QStackedWidget { background: transparent; }")
         self._stack.addWidget(self._empty_label)
         self._stack.addWidget(self.preview)
         layout.addWidget(self._stack, 1)

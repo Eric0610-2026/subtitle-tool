@@ -207,9 +207,9 @@ class Transcriber:
         return last_progress_time
 
     def load_whisper_model(self, model_dir: Path, device: str, compute_type: str, post: Callable):
-        """加载 faster-whisper 模型，优先使用缓存（线程安全）"""
+        """加载 faster-whisper 模型，优先使用缓存（线程安全）。
+        仅输出日志与状态，不产生 progress 事件（模型加载不体现在进度条中）。"""
         post({"type": "log", "message": f"加载 Whisper 模型（{device}/{compute_type}）...", "level": "INFO"})
-        post({"type": "progress", "percent": 0, "stage": "加载模型", "detail": "加载 faster-whisper 模型..."})
 
         model_key = f"{model_dir}|{device}|{compute_type}"
 
@@ -217,7 +217,6 @@ class Transcriber:
             cached = self._model_cache.get(model_key)
         if cached:
             model = cached[2]
-            post({"type": "progress", "percent": 100, "stage": "加载模型", "detail": "使用已加载的模型缓存"})
             post({"type": "log", "message": "使用已加载的模型缓存", "level": "INFO"})
             return model
 
@@ -226,7 +225,6 @@ class Transcriber:
                 cached = self._model_cache.get(model_key)
             if cached:
                 model = cached[2]
-                post({"type": "progress", "percent": 100, "stage": "加载模型", "detail": "使用已加载的模型缓存"})
                 post({"type": "log", "message": "使用已加载的模型缓存", "level": "INFO"})
                 return model
 
@@ -244,7 +242,6 @@ class Transcriber:
                 model = WhisperModel(str(model_dir), device=device, compute_type=compute_type)
                 with self._cache_lock:
                     self._model_cache[model_key] = (device, compute_type, model)
-                post({"type": "progress", "percent": 100, "stage": "加载模型", "detail": "模型加载完成"})
                 post({"type": "log", "message": "Whisper 模型加载完成，已缓存到显存", "level": "INFO"})
                 post({"type": "model_loaded"})
             except Exception as e:
@@ -324,8 +321,8 @@ class Transcriber:
                     weights = self._estimate_weights(duration, model_dir)
                     total_w = sum(weights.values())
                     e_end = weights["extract"] / total_w * 100
-                    m_start, m_end = e_end, (weights["extract"] + weights["model"]) / total_w * 100
-                    t_start = m_end
+                    # 模型加载不体现在进度条中：转写阶段直接从音频提取结束处开始
+                    t_start = e_end
 
                     last_progress_time = self.extract_audio_with_progress(
                         video, ffmpeg, duration, audio_path,
@@ -342,14 +339,12 @@ class Transcriber:
                     else:
                         audio_path = video
                     post({"type": "log", "message": f"音频转换完成（{fmt_duration(duration)}）", "level": "INFO"})
-                    m_start, m_end = 15, 30
-                    t_start = 30
+                    t_start = 15
                     weights = None
                 else:
                     post({"type": "log", "message": "跳过音频提取，直接使用源文件...", "level": "INFO"})
                     audio_path = video
-                    m_start, m_end = 0, 15
-                    t_start = 15
+                    t_start = 0
                     weights = None
 
                 # ── 断点续转：裁剪音频（从已转写位置之后开始）──
@@ -386,8 +381,7 @@ class Transcriber:
                               "level": "INFO"})
 
                 model = self.load_whisper_model(
-                    model_dir, device, compute_type,
-                    make_post_mapper(post, m_start, m_end))
+                    model_dir, device, compute_type, post)
 
                 t_post = make_post_mapper(post, t_start, 100)
                 t_post({"type": "log", "message": "开始转写...", "level": "INFO"})

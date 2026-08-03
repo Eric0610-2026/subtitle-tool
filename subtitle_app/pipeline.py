@@ -20,7 +20,7 @@ from typing import Callable, List, Optional, Tuple
 from .config import cfg
 from .srt_utils import (
     VIDEO_EXTS, AUDIO_EXTS, SUB_EXTS, safe_stem,
-    find_existing_subtitle, match_video_for_subtitle, find_tool,
+    find_existing_subtitle, find_tool,
     IGNORE_FILE,
 )
 from .transcriber import Transcriber
@@ -305,14 +305,9 @@ class SubtitleWorker:
                 raise RuntimeError("ffmpeg 未找到，请放在应用目录下")
             if not ffprobe:
                 raise RuntimeError("ffprobe 未找到，请放在应用目录下")
-        elif is_audio:
-            output_dir = item.parent
         else:
-            matched_video = match_video_for_subtitle(item, work_dir)
-            if matched_video:
-                output_dir = matched_video.parent / safe_stem(matched_video.name)
-            else:
-                output_dir = item.parent
+            # 音频与字幕文件：输出都直接写到文件所在目录（字幕不因同名视频进子目录）
+            output_dir = item.parent
         output_dir.mkdir(parents=True, exist_ok=True)
 
         final_srt = output_dir / f"{safe_stem(item.name)}.srt"
