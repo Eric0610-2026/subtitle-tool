@@ -7,7 +7,6 @@
 transcriber / translator / muxer 模块完成。
 """
 import logging
-import queue
 import subprocess
 import threading
 import traceback
@@ -27,8 +26,6 @@ from .transcriber import Transcriber
 from .translator import translate_stage
 
 logger = logging.getLogger(__name__)
-
-_STREAM_END = object()  # pipeline 队列结束标记
 
 
 class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -161,123 +158,102 @@ class SubtitleWorker:
                 post({"type": "error", "message": f"处理出错: {e}", "trace": tb})
             return
 
-        # ── 并行流水线（concurrency>=2）: 转写线程生产 → 翻译消费者消费 ──
-        tq: "queue.Queue" = queue.Queue(maxsize=p_depth - 1)
-        error_info: List[Tuple[Exception, str]] = []
+        # ── 并行模式（concurrency>=2）: GPU 单模型两阶段批量调度 ──
+        # RTX 3060 6GB 显存无法同时驻留 Whisper（~2-3G）与 llama-server（~2.3G）。
+        # 原「转写线程 + 翻译线程池同跑」的流水线必然爆显存；这里改为
+        # 先全部转写 → 释放 Whisper 显存 → 再统一翻译+自动嵌入，从根上错峰。
+        self._run_staged(jobs, opts)
 
-        def _safe_put(val, timeout=0.5):
-            while not self.stop_requested:
-                try:
-                    tq.put(val, timeout=timeout)
-                    return
-                except queue.Full:
-                    continue
-            if val is not None and val is not _STREAM_END:
-                logger.warning("停止时队列满，转写结果可能丢失: 文件索引 %s", getattr(val, "idx", "?"))
+    def _run_staged(self, jobs: List[Path], opts: dict) -> None:
+        """并行批量的 GPU 单模型两阶段调度。
 
-        def transcribe_worker():
+        阶段 1 全部转写（GPU 只驻留 Whisper）→ 释放显存 → 阶段 2 全部翻译 + 自动嵌入
+        （GPU 只驻留 llama.cpp）。避免两者同时占用显存导致 OOM。
+        """
+        post = opts["post"]
+        total = len(jobs)
+        trans_concurrency = max(1, getattr(cfg.translation, "concurrency_translate", 3))
+        translate_errors: List[Tuple[Exception, str]] = []
+
+        # ── 阶段 1：全部转写 ──
+        self._prepare_transcribe_phase(opts, post)
+        post({"type": "log", "message": f"阶段 1/2：开始转写 {total} 个文件（GPU 用于语音识别）…", "level": "INFO"})
+        results: List[dict] = []
+        for idx, item in enumerate(jobs, 1):
+            if self.stop_requested:
+                break
             try:
-                for idx, item in enumerate(jobs, 1):
-                    if self.stop_requested:
-                        break
-                    result = self._transcribe_stage(item, idx, total, opts)
-                    if result is None:
-                        _safe_put(None)
-                    else:
-                        _safe_put(result)
-                _safe_put(_STREAM_END)
+                result = self._transcribe_stage(item, idx, total, opts)
             except Exception as e:
-                if not self.stop_requested:
-                    # 仅非停止场景记录为错误；停止时"用户停止"异常不污染 error_info
-                    tb = traceback.format_exc()
-                    logger.error("转写线程出错: %s\n%s", e, tb)
-                    error_info.append((e, tb))
-                _safe_put(_STREAM_END)
-
-        trans_thread = threading.Thread(target=transcribe_worker, daemon=True)
-        trans_thread.start()
-
-        translate_workers = max(1, getattr(cfg.translation, "concurrency_translate", 3))
-        # daemon 线程池：停止后正在执行的翻译请求不会阻塞进程退出
-        tpool = _DaemonThreadPoolExecutor(max_workers=translate_workers)
-        try:
-            translate_futures = []
-            checked_futures = set()
-            translate_errors: List[Tuple[Exception, str]] = []
-            while True:
                 if self.stop_requested:
-                    # 立即关闭线程池，不等待正在执行的翻译任务
-                    tpool.shutdown(wait=False, cancel_futures=True)
                     break
-                # 清理已完成 future，检查异常（防止异常被静默吞没）
-                done_futures = [f for f in translate_futures if f.done()]
-                translate_futures = [f for f in translate_futures if not f.done()]
-                for f in done_futures:
-                    try:
-                        f.result()
-                    except Exception as e:
-                        tb = traceback.format_exc()
-                        logger.error("翻译任务异常（流水线中捕获）: %s\n%s", e, tb)
-                        translate_errors.append((e, tb))
-                    checked_futures.add(f)
-                try:
-                    result = tq.get(timeout=0.5)
-                except queue.Empty:
-                    if not trans_thread.is_alive() and tq.empty():
-                        break
-                    continue
-                if result is _STREAM_END:
-                    break
-                if result is None:
-                    continue
-                future = tpool.submit(self._translate_stage, result, opts, post)
-                translate_futures.append(future)
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error("翻译阶段出错: %s\n%s", e, tb)
-            self.stop_requested = True
-            post({"type": "error", "message": f"处理出错: {e}", "trace": tb})
+                tb = traceback.format_exc()
+                logger.error("转写出错 %s: %s\n%s", item.name, e, tb)
+                post({"type": "error", "message": f"转写出错: {e}", "trace": tb})
+                return
+            if result is not None:
+                results.append(result)
+        if self.stop_requested:
+            post({"type": "done", "message": "用户已停止处理"})
             return
+        if not results:
+            post({"type": "done", "message": "所有任务处理完成！（没有需要翻译的字幕）"})
+            return
+
+        # ── 阶段切换：释放 Whisper 显存，为翻译模型腾位 ──
+        try:
+            self.transcriber.release_model()
+        except Exception as e:
+            logger.warning("释放语音识别显存失败: %s", e)
+        post({"type": "log", "message": f"阶段 1/2 完成（{len(results)} 个字幕）。正在释放显存并准备翻译模型"
+                                        "（首次加载约需数十秒）…", "level": "INFO"})
+
+        # ── 阶段 2：全部翻译 + 自动嵌入（阶段批量默认自动嵌入，不逐文件暂停预览）──
+        stage_opts = dict(opts)
+        if stage_opts.get("pause_before_embed", False):
+            stage_opts["pause_before_embed"] = False
+            post({"type": "log", "message": "阶段批量模式：自动嵌入字幕，跳过逐文件预览暂停", "level": "INFO"})
+        tpool = _DaemonThreadPoolExecutor(max_workers=trans_concurrency)
+        futures = []
+        try:
+            for r in results:
+                if self.stop_requested:
+                    break
+                futures.append(tpool.submit(self._translate_stage, r, stage_opts, post))
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    logger.error("翻译任务异常: %s\n%s", e, tb)
+                    translate_errors.append((e, tb))
         finally:
-            # 正常退出时等待任务完成；停止路径中线程池已 shutdown(wait=False)
-            if not self.stop_requested:
-                tpool.shutdown(wait=True)
-                # _STREAM_END 可能让主循环早于最后一批 future 退出，
-                # 此处必须读取所有未检查的 future，否则异常会被静默吞没。
-                for future in translate_futures:
-                    if future in checked_futures:
-                        continue
-                    try:
-                        future.result()
-                    except Exception as e:
-                        tb = traceback.format_exc()
-                        logger.error("翻译任务异常（流水线结束时捕获）: %s\n%s", e, tb)
-                        translate_errors.append((e, tb))
-            else:
-                # 停止路径：不等待未完成任务，但已完成的 future 异常仍要记录，
-                # 避免翻译线程因其他原因崩溃时静默无痕
-                for future in translate_futures:
-                    if future in checked_futures or not future.done():
-                        continue
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.warning("翻译任务异常（停止时捕获）: %s", e)
+            tpool.shutdown(wait=True)
 
         if translate_errors:
             e, tb = translate_errors[0]
             post({"type": "error", "message": f"翻译出错: {e}", "trace": tb})
             return
 
-        if error_info:
-            e, tb = error_info[0]
-            post({"type": "error", "message": f"转写出错: {e}", "trace": tb})
-            return
-
         if self.stop_requested:
             post({"type": "done", "message": "用户已停止处理"})
         else:
             post({"type": "done", "message": "所有任务处理完成！"})
+
+    def _prepare_transcribe_phase(self, opts: dict, post: Callable) -> None:
+        """进入转写阶段前的 GPU 清理：停掉本会话拉起的翻译服务；外部服务只提示不强制杀。"""
+        if not str(opts.get("api_url", "")).lower().startswith("http://127.0.0.1:8080"):
+            return
+        try:
+            from .local_service import is_service_running, shutdown_owned
+            shutdown_owned()   # 停掉上次翻译遗留的本会话 llama-server，为 Whisper 腾显存
+            if is_service_running():
+                post({"type": "log",
+                      "message": "检测到本地翻译服务仍在运行（非本会话启动）。转写将占用大量显存，"
+                                 "若提示显存不足请先手动关闭该服务；翻译阶段会自动复用，无需重启",
+                      "level": "WARNING"})
+        except Exception as e:
+            logger.warning("转写前清理本地翻译服务失败: %s", e)
 
     def _transcribe_stage(self, item: Path, idx: int, total: int, opts: dict) -> Optional[dict]:
         """转写阶段：跳过检查 → 音频提取 → Whisper 转写
