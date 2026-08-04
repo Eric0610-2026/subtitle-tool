@@ -492,11 +492,15 @@ class ModelConfigDialog(QDialog):
     # ── 结果 ──
 
     def selected_model(self) -> str:
+        # 手动输入框是最终编辑目标（列表点击只是把它同步进来）；
+        # 用户修改输入框后必须以此为准，否则改动会被列表选中项静默覆盖
+        manual = self.manual_edit.text().strip()
+        if manual:
+            return manual
         item = self.model_list.currentItem()
         if item:
             return item.text().strip()
-        manual = self.manual_edit.text().strip()
-        return manual
+        return ""
 
     def get_values(self) -> dict:
         return {

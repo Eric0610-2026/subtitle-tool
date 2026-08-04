@@ -43,6 +43,23 @@ APP_DIR = Path(__file__).resolve().parent.parent
 LIGHT, DARK = load_theme_colors()
 
 
+def _batch_size_save_field(values: dict) -> Optional[tuple]:
+    """决定「永久保存」批大小时应写入 config 的字段。
+
+    翻译端读取规则（见 translator.py）：本地模式读 `translation.batch_size`，
+    联网模式读 `translation.batch_size_online`。若把自定义值一律写进
+    `batch_size`，联网模式的自定义值重启后会失效，且会污染本地模式默认值。
+    返回 (字段名, 值)；自定义值为 None（等于当前模式默认）时返回 None，
+    表示不覆盖 config 中原值。
+    """
+    bs = values.get("translation_batch_size")
+    if bs is None:
+        return None
+    mode = str(values.get("translation_mode", "local")).lower()
+    field = "batch_size" if mode == "local" else "batch_size_online"
+    return field, bs
+
+
 class SubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -394,9 +411,10 @@ class SubtitleApp(QMainWindow):
         trans["api_url"] = values.get("api_url", "")
         trans["api_key"] = values.get("api_key", "")
         trans["pipeline"] = values.get("pipeline", True)
-        _saved_bs = values.get("translation_batch_size")
-        if _saved_bs is not None:  # 自定义值才写入 config.json；默认值不覆盖，保留本地默认 20
-            trans["batch_size"] = _saved_bs
+        _bs_save = _batch_size_save_field(values)
+        if _bs_save is not None:  # 自定义值才写入 config.json；默认值不覆盖
+            field, _bs_val = _bs_save
+            trans[field] = _bs_val
         trans["pause_before_embed"] = values.get("pause_before_embed", False)
         trans["backup_max_files"] = values.get("backup_max_files", 50)
         # 保存多方案配置

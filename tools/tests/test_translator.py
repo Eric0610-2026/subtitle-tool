@@ -457,5 +457,39 @@ class TestPruneBackups(unittest.TestCase):
             self.assertEqual(len(list(backup_dir.glob("*.srt"))), 5)
 
 
+class TestBatchSizePersistenceField(unittest.TestCase):
+    """永久保存批大小时目标字段选择（qt_app._batch_size_save_field）
+
+    修复：自定义批大小原先一律写入 translation.batch_size，导致联网模式
+    （读 batch_size_online）重启后自定义值失效，且污染本地模式默认值。
+    """
+
+    def _call(self, values: dict):
+        from subtitle_app.qt_app import _batch_size_save_field
+        return _batch_size_save_field(values)
+
+    def test_local_custom_writes_batch_size(self):
+        self.assertEqual(
+            self._call({"translation_mode": "local", "translation_batch_size": 50}),
+            ("batch_size", 50))
+
+    def test_online_custom_writes_batch_size_online(self):
+        self.assertEqual(
+            self._call({"translation_mode": "online", "translation_batch_size": 200}),
+            ("batch_size_online", 200))
+
+    def test_default_value_skips_write(self):
+        """等于当前模式默认（返回 None）时不覆盖 config"""
+        self.assertIsNone(
+            self._call({"translation_mode": "online", "translation_batch_size": None}))
+        self.assertIsNone(
+            self._call({"translation_mode": "local", "translation_batch_size": None}))
+
+    def test_missing_mode_defaults_to_local(self):
+        self.assertEqual(
+            self._call({"translation_batch_size": 30}),
+            ("batch_size", 30))
+
+
 if __name__ == "__main__":
     unittest.main()
