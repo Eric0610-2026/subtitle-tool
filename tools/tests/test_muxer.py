@@ -67,103 +67,71 @@ class TestSanitizeSrtForMux(unittest.TestCase):
 class TestFindSiblingProbe(unittest.TestCase):
     """_find_sibling_probe"""
 
-    def test_finds_ffprobe_exe(self):
+    def test_finds_sibling_or_none(self):
         with tempfile.TemporaryDirectory() as d:
-            ffmpeg = Path(d) / "ffmpeg.exe"
-            ffmpeg.write_text("dummy")
-            ffprobe = Path(d) / "ffprobe.exe"
-            ffprobe.write_text("dummy")
             from subtitle_app.muxer import _find_sibling_probe
-            result = _find_sibling_probe(str(ffmpeg))
-            self.assertEqual(result, str(ffprobe))
-
-    def test_finds_ffprobe_without_ext(self):
-        with tempfile.TemporaryDirectory() as d:
-            ffmpeg = Path(d) / "ffmpeg"
-            ffmpeg.write_text("dummy")
-            ffprobe = Path(d) / "ffprobe"
-            ffprobe.write_text("dummy")
-            from subtitle_app.muxer import _find_sibling_probe
-            result = _find_sibling_probe(str(ffmpeg))
-            self.assertEqual(result, str(ffprobe))
-
-    def test_no_ffprobe_returns_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            ffmpeg = Path(d) / "ffmpeg.exe"
-            ffmpeg.write_text("dummy")
-            from subtitle_app.muxer import _find_sibling_probe
-            result = _find_sibling_probe(str(ffmpeg))
-            self.assertIsNone(result)
+            # 子目录隔离各场景，避免同名 probe 干扰
+            exe = Path(d) / "exe"; exe.mkdir()
+            (exe / "ffmpeg.exe").write_text("dummy")
+            (exe / "ffprobe.exe").write_text("dummy")
+            self.assertEqual(_find_sibling_probe(str(exe / "ffmpeg.exe")),
+                             str(exe / "ffprobe.exe"))
+            bare = Path(d) / "bare"; bare.mkdir()
+            (bare / "ffmpeg").write_text("dummy")
+            (bare / "ffprobe").write_text("dummy")
+            self.assertEqual(_find_sibling_probe(str(bare / "ffmpeg")),
+                             str(bare / "ffprobe"))
+            solo = Path(d) / "solo"; solo.mkdir()
+            (solo / "ffmpeg2.exe").write_text("dummy")
+            self.assertIsNone(_find_sibling_probe(str(solo / "ffmpeg2.exe")))
 
 
 class TestCountExistingSubStreams(unittest.TestCase):
     """_count_existing_sub_streams"""
 
     @patch("subtitle_app.muxer.subprocess.run")
-    def test_returns_count(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0,
-                                          stdout="0\n1\n2\n")
+    def test_counts_streams(self, mock_run):
         from subtitle_app.muxer import _count_existing_sub_streams
-        result = _count_existing_sub_streams(Path("test.mp4"), "ffprobe.exe")
-        self.assertEqual(result, 3)
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_no_ffprobe_returns_zero(self, mock_run):
-        from subtitle_app.muxer import _count_existing_sub_streams
-        result = _count_existing_sub_streams(Path("test.mp4"), None)
-        self.assertEqual(result, 0)
+        # 正常计数
+        mock_run.return_value = MagicMock(returncode=0, stdout="0\n1\n2\n")
+        self.assertEqual(
+            _count_existing_sub_streams(Path("test.mp4"), "ffprobe.exe"), 3)
+        # 无 ffprobe → 0 且不调用
+        mock_run.reset_mock()
+        self.assertEqual(
+            _count_existing_sub_streams(Path("test.mp4"), None), 0)
         mock_run.assert_not_called()
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_error_returns_zero(self, mock_run):
+        # 调用异常 → 0
         mock_run.side_effect = FileNotFoundError
-        from subtitle_app.muxer import _count_existing_sub_streams
-        result = _count_existing_sub_streams(Path("test.mp4"), "ffprobe.exe")
-        self.assertEqual(result, 0)
+        self.assertEqual(
+            _count_existing_sub_streams(Path("test.mp4"), "ffprobe.exe"), 0)
 
 
 class TestProbeDuration(unittest.TestCase):
     """_probe_duration"""
 
     @patch("subtitle_app.muxer.subprocess.run")
-    def test_returns_duration(self, mock_run):
+    def test_probes_duration(self, mock_run):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "test.mp4"
             p.write_text("dummy")
-            mock_run.return_value = MagicMock(returncode=0,
-                                              stdout="123.456\n")
             from subtitle_app.muxer import _probe_duration
-            result = _probe_duration(p, "ffprobe.exe")
-            self.assertAlmostEqual(result, 123.456)
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_no_ffprobe_returns_none(self, mock_run):
-        from subtitle_app.muxer import _probe_duration
-        result = _probe_duration(Path("test.mp4"), None)
-        self.assertIsNone(result)
-        mock_run.assert_not_called()
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_na_stdout_returns_none(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0,
-                                          stdout="N/A\n")
-        from subtitle_app.muxer import _probe_duration
-        result = _probe_duration(Path("test.mp4"), "ffprobe.exe")
-        self.assertIsNone(result)
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_nonexistent_file_returns_none(self, mock_run):
-        from subtitle_app.muxer import _probe_duration
-        result = _probe_duration(Path("nonexistent.mp4"), "ffprobe.exe")
-        self.assertIsNone(result)
-        mock_run.assert_not_called()
-
-    @patch("subtitle_app.muxer.subprocess.run")
-    def test_error_returns_none(self, mock_run):
-        mock_run.side_effect = FileNotFoundError
-        from subtitle_app.muxer import _probe_duration
-        result = _probe_duration(Path("test.mp4"), "ffprobe.exe")
-        self.assertIsNone(result)
+            # 正常返回 Duration
+            mock_run.return_value = MagicMock(returncode=0, stdout="123.456\n")
+            self.assertAlmostEqual(_probe_duration(p, "ffprobe.exe"), 123.456)
+            # 无 ffprobe → None 且不调用
+            mock_run.reset_mock()
+            self.assertIsNone(_probe_duration(p, None))
+            mock_run.assert_not_called()
+            # N/A 输出 → None
+            mock_run.return_value = MagicMock(returncode=0, stdout="N/A\n")
+            self.assertIsNone(_probe_duration(p, "ffprobe.exe"))
+            # 不存在文件 → None
+            mock_run.reset_mock()
+            self.assertIsNone(_probe_duration(Path("nonexistent.mp4"), "ffprobe.exe"))
+            # 调用异常 → None
+            mock_run.side_effect = FileNotFoundError
+            self.assertIsNone(_probe_duration(p, "ffprobe.exe"))
 
 
 class TestVerifyDuration(unittest.TestCase):
@@ -221,28 +189,22 @@ class TestVerifyDuration(unittest.TestCase):
 class TestBuildEmbedCmd(unittest.TestCase):
     """_build_embed_cmd"""
 
-    def test_basic_structure(self):
+    def test_builds_embed_command(self):
         with tempfile.TemporaryDirectory() as d:
             video = Path(d) / "test.mp4"
             srt = Path(d) / "test.srt"
             mkv = Path(d) / "test.mkv"
             from subtitle_app.muxer import _build_embed_cmd
             cmd = _build_embed_cmd("ffmpeg.exe", video, srt, mkv)
-            self.assertIsInstance(cmd, list)
-            self.assertEqual(cmd[0], "ffmpeg.exe")
-            self.assertIn("-y", cmd)
-            self.assertIn(str(video), cmd)
-            self.assertIn(str(srt), cmd)
-            self.assertIn(str(mkv), cmd)
-            # 输入参数个数
-            self.assertIn("-c:v", cmd)
-            self.assertIn("copy", cmd)
-
-    def test_map_arguments(self):
-        from subtitle_app.muxer import _build_embed_cmd
-        cmd = _build_embed_cmd("ffmpeg", Path("v.mp4"), Path("v.srt"),
-                               Path("v.mkv"))
-        # 应该包含 -map 0:v? -map 0:a? -map 1
+        # 基础结构
+        self.assertEqual(cmd[0], "ffmpeg.exe")
+        self.assertIn("-y", cmd)
+        self.assertIn(str(video), cmd)
+        self.assertIn(str(srt), cmd)
+        self.assertIn(str(mkv), cmd)
+        self.assertIn("-c:v", cmd)
+        self.assertIn("copy", cmd)
+        # map 参数：视频/音频/字幕三个输入
         idx_v = cmd.index("-map")
         self.assertEqual(cmd[idx_v + 1], "0:v?")
         self.assertEqual(cmd[idx_v + 3], "0:a?")
@@ -252,23 +214,17 @@ class TestBuildEmbedCmd(unittest.TestCase):
 class TestCleanupFile(unittest.TestCase):
     """_cleanup_file"""
 
-    def test_none_does_nothing(self):
-        from subtitle_app.muxer import _cleanup_file
-        # 不应抛出异常
-        _cleanup_file(None)
-
-    def test_nonexistent_does_nothing(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "nonexistent.tmp"
-            from subtitle_app.muxer import _cleanup_file
-            _cleanup_file(p)  # 不应抛出异常
-
-    def test_removes_file(self):
+    def test_cleanup_noop_and_removes(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "test.tmp"
+            from subtitle_app.muxer import _cleanup_file
+            # None：不抛异常
+            _cleanup_file(None)
+            # 不存在：不抛异常
+            _cleanup_file(p)
+            # 存在：删除
             p.write_text("dummy")
             self.assertTrue(p.exists())
-            from subtitle_app.muxer import _cleanup_file
             _cleanup_file(p)
             self.assertFalse(p.exists())
 
@@ -276,23 +232,19 @@ class TestCleanupFile(unittest.TestCase):
 class TestLogFfmpegError(unittest.TestCase):
     """_log_ffmpeg_error"""
 
-    def test_posts_error_messages(self):
-        posts = []
+    def test_posts_error(self):
         proc = MagicMock()
         proc.returncode = 1
         from subtitle_app.muxer import _log_ffmpeg_error
+        # 有 stderr 内容
+        posts = []
         _log_ffmpeg_error(posts.append, "ffmpeg -i test.mp4", proc,
                           "error: something went wrong")
-        # 应该至少有 2 条 post（错误 + stderr 开头）
         self.assertGreaterEqual(len(posts), 2)
         self.assertEqual(posts[0]["type"], "log")
         self.assertIn("ffmpeg 返回 1", posts[0]["message"])
-
-    def test_empty_stderr(self):
+        # 空 stderr
         posts = []
-        proc = MagicMock()
-        proc.returncode = 1
-        from subtitle_app.muxer import _log_ffmpeg_error
         _log_ffmpeg_error(posts.append, "cmd", proc, "")
         self.assertIn("无错误输出", posts[1]["message"])
 
@@ -300,31 +252,23 @@ class TestLogFfmpegError(unittest.TestCase):
 class TestEmbedSubtitlesMissingFiles(unittest.TestCase):
     """embed_subtitles_to_video 缺文件时必须返回 (None, False)，避免解包崩溃"""
 
-    def test_missing_video_returns_tuple(self):
+    def test_missing_input_returns_empty_tuple(self):
         from subtitle_app.muxer import embed_subtitles_to_video
+        posts = []
+        # 缺视频
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "a.srt"
             srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
-            video = Path(d) / "missing.mp4"
-            posts = []
-            result = embed_subtitles_to_video(video, srt, "ffmpeg.exe", posts.append)
-            self.assertIsInstance(result, tuple)
-            self.assertEqual(len(result), 2)
-            mkv_path, trusted = result
-            self.assertIsNone(mkv_path)
-            self.assertFalse(trusted)
-
-    def test_missing_srt_returns_tuple(self):
-        from subtitle_app.muxer import embed_subtitles_to_video
+            result = embed_subtitles_to_video(Path(d) / "missing.mp4", srt,
+                                              "ffmpeg.exe", posts.append)
+            self.assertEqual(result, (None, False))
+        # 缺字幕
         with tempfile.TemporaryDirectory() as d:
             video = Path(d) / "a.mp4"
             video.write_bytes(b"dummy")
-            srt = Path(d) / "missing.srt"
-            posts = []
-            mkv_path, trusted = embed_subtitles_to_video(
-                video, srt, "ffmpeg.exe", posts.append)
-            self.assertIsNone(mkv_path)
-            self.assertFalse(trusted)
+            result = embed_subtitles_to_video(video, Path(d) / "missing.srt",
+                                              "ffmpeg.exe", posts.append)
+            self.assertEqual(result, (None, False))
 
 
 if __name__ == "__main__":

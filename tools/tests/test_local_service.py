@@ -42,14 +42,14 @@ class ShutdownRunningTest(unittest.TestCase):
         return patch("subtitle_app.local_service.subprocess.run",
                      return_value=unittest.mock.MagicMock(stdout=stdout_text))
 
-    def test_no_listener_no_kill(self):
-        with self._netstat_mock("  TCP    127.0.0.1:9999    0.0.0.0:0    LISTENING   1\n") as mrun:
-            with patch("subtitle_app.local_service._port_listening", return_value=False):
-                ok = local_service.shutdown_running()
+    def test_no_listener_and_kills_listening(self):
+        # 无 8080 监听 → 不动，不触发 netstat
+        with self._netstat_mock("  TCP    127.0.0.1:9999    0.0.0.0:0    LISTENING   1\n") as mrun, \
+             patch("subtitle_app.local_service._port_listening", return_value=False):
+            ok = local_service.shutdown_running()
         self.assertFalse(ok)
         mrun.assert_not_called()  # 无监听时不应触发 netstat
-
-    def test_kills_listening_pid_on_8080(self):
+        # 8080 被监听 → taskkill 杀掉该 pid
         netstat_out = (
             "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       34368\n"
             "  TCP    127.0.0.1:9000    0.0.0.0:0              LISTENING       7777\n"
@@ -88,14 +88,12 @@ class LocalServiceTest(unittest.TestCase):
     def tearDown(self):
         _reset_state()
 
-    def test_probe_false_on_unused_port(self):
+    def test_probe_and_listening_detection(self):
         # 未监听端口：连接失败/超时均视为不可用
         with patch.object(local_service, "_PORT", 59999), \
                 patch.object(local_service, "_HOST", "127.0.0.1"):
             self.assertFalse(local_service._probe(0.3))
             self.assertFalse(local_service._port_listening(0.2))
-
-    def test_port_listening_detects_occupied(self):
         # 自占一个端口：_port_listening 应识别出已被监听
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -109,12 +107,12 @@ class LocalServiceTest(unittest.TestCase):
         finally:
             s.close()
 
-    def test_find_model_none_on_empty(self):
+    def test_find_model_empty_and_first_gguf(self):
+        # 空目录 → None
         with tempfile.TemporaryDirectory() as d, \
                 patch.object(local_service, "_MODELS_DIR", Path(d)):
             self.assertIsNone(local_service._find_model())
-
-    def test_find_model_first_gguf(self):
+        # 有 gguf → 返回第一个（文件名排序后）
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             (p / "Hy-MT2-1.8B-Q8_0.gguf").write_bytes(b"x")

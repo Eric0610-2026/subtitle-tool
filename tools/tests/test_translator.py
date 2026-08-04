@@ -73,42 +73,30 @@ class TestTranslateStage(unittest.TestCase):
 class TestTranslateOnlyEarlyReturn(unittest.TestCase):
     """translate_only 的早期返回路径"""
 
-    def test_early_return_if_stopped(self):
-        """is_stopped() 返回 True 时直接返回"""
+    def test_early_returns(self):
+        """两个 is_stopped 检查点：translate 前直接返回 / parse 后返回"""
+        from subtitle_app.translator import translate_only
+        # 第一个检查点为真 → 直接返回，无 post
         with tempfile.TemporaryDirectory() as d:
             srt_path = Path(d) / "test.srt"
             _make_srt(srt_path)
             item = Path(d) / "test.mp4"
             item.write_text("dummy")
-
             opts = {"work_dir": d, "language": "en", "translate_enabled": False,
                     "_is_stopped": MagicMock(return_value=True)}
             posts = []
-
-            from subtitle_app.translator import translate_only
             translate_only(srt_path, Path(d), item, 0, 1, opts, posts.append)
-
-            # 应该没有 post 调用（第一个 status 已在 translate_stage 中发出）
             self.assertEqual(len(posts), 0)
-
-    def test_early_return_if_stopped_after_parse(self):
-        """第二个 is_stopped 检查点"""
+        # 第一个为假、parse 后第二个为真 → 只有 log
         with tempfile.TemporaryDirectory() as d:
             srt_path = Path(d) / "test.srt"
             _make_srt(srt_path)
             item = Path(d) / "test.mp4"
             item.write_text("dummy")
-
-            opts = {"work_dir": d, "language": "en", "translate_enabled": False}
+            opts = {"work_dir": d, "language": "en", "translate_enabled": False,
+                    "_is_stopped": MagicMock(side_effect=[False, True])}
             posts = []
-            # 第一次返回 False（通过第一个检查），第二次返回 True（在 parse 后返回）
-            is_stopped = MagicMock(side_effect=[False, True])
-            opts["_is_stopped"] = is_stopped
-
-            from subtitle_app.translator import translate_only
             translate_only(srt_path, Path(d), item, 0, 1, opts, posts.append)
-
-            # 应该有 log 消息（解析字幕），然后停止
             self.assertGreater(len(posts), 0)
             self.assertEqual(posts[0]["type"], "log")
 
@@ -436,56 +424,46 @@ class TestTranslateOnlyProgressFile(unittest.TestCase):
 class TestPreviewTranslation(unittest.TestCase):
     """_preview_translation：预览译文列不应重复显示原文"""
 
-    def test_bilingual_merged_text_strips_original(self):
+    def test_strips_original_only_when_leading(self):
         from subtitle_app.translator import _preview_translation
-        # 双语模式 final_texts = "原文\n译文"
-        self.assertEqual(_preview_translation("Hello", "Hello\n你好"), "你好")
-
-    def test_plain_translation_unchanged(self):
-        from subtitle_app.translator import _preview_translation
-        self.assertEqual(_preview_translation("Hello", "你好"), "你好")
-
-    def test_multi_line_translation_kept(self):
-        from subtitle_app.translator import _preview_translation
-        # 译文本身含多行：去掉原文前缀后保留全部译文行
-        self.assertEqual(
-            _preview_translation("Hello", "Hello\n第一行\n第二行"),
-            "第一行\n第二行",
-        )
-
-    def test_translation_not_starting_with_src_not_stripped(self):
-        from subtitle_app.translator import _preview_translation
-        # 译文不以原文开头（如模型整句重译），不做错误拆分
-        self.assertEqual(
-            _preview_translation("Hello", "你好世界\n再见"), "你好世界\n再见")
+        cases = [
+            # 双语合并 "原文\n译文" → 只取译文
+            ("Hello", "Hello\n你好", "你好"),
+            # 纯译文原样
+            ("Hello", "你好", "你好"),
+            # 译文本身多行，去掉原文前缀后保留全部译文行
+            ("Hello", "Hello\n第一行\n第二行", "第一行\n第二行"),
+            # 译文不以原文开头（整句重译）不拆分
+            ("Hello", "你好世界\n再见", "你好世界\n再见"),
+        ]
+        for src, t, expected in cases:
+            with self.subTest(t=t):
+                self.assertEqual(_preview_translation(src, t), expected)
 
 
 class TestPruneBackups(unittest.TestCase):
     """_prune_backups：备份保留上限，超出删除最旧"""
 
-    def test_prune_keeps_newest(self):
+    def test_prune_limits_and_disabled(self):
+        from subtitle_app.translator import _prune_backups
         import os
         import time
-        from subtitle_app.translator import _prune_backups
+        # 超出上限 → 保留最新 max 份，删最旧
         with tempfile.TemporaryDirectory() as d:
-            backup_dir = Path(d)
             for i in range(5):
-                p = backup_dir / f"test_{i}.srt"
+                p = Path(d) / f"test_{i}.srt"
                 p.write_text("x", encoding="utf-8")
-                t = time.time() - (5 - i) * 10  # test_4 最新，test_0 最旧
+                t = time.time() - (5 - i) * 10   # test_4 最新，test_0 最旧
                 os.utime(p, (t, t))
-            _prune_backups(backup_dir, 3)
-            remaining = sorted(p.name for p in backup_dir.glob("*.srt"))
-            self.assertEqual(remaining, ["test_2.srt", "test_3.srt", "test_4.srt"])
-
-    def test_prune_disabled_when_zero(self):
-        from subtitle_app.translator import _prune_backups
+            _prune_backups(Path(d), 3)
+            self.assertEqual(sorted(p.name for p in Path(d).glob("*.srt")),
+                             ["test_2.srt", "test_3.srt", "test_4.srt"])
+        # max=0 → 不清理（禁用）
         with tempfile.TemporaryDirectory() as d:
-            backup_dir = Path(d)
             for i in range(5):
-                (backup_dir / f"t{i}.srt").write_text("x", encoding="utf-8")
-            _prune_backups(backup_dir, 0)
-            self.assertEqual(len(list(backup_dir.glob("*.srt"))), 5)
+                (Path(d) / f"t{i}.srt").write_text("x", encoding="utf-8")
+            _prune_backups(Path(d), 0)
+            self.assertEqual(len(list(Path(d).glob("*.srt"))), 5)
 
 
 class TestBatchSizePersistenceField(unittest.TestCase):
@@ -495,30 +473,24 @@ class TestBatchSizePersistenceField(unittest.TestCase):
     （读 batch_size_online）重启后自定义值失效，且污染本地模式默认值。
     """
 
-    def _call(self, values: dict):
+    def test_field_selection(self):
         from subtitle_app.qt_app import _batch_size_save_field
-        return _batch_size_save_field(values)
-
-    def test_local_custom_writes_batch_size(self):
+        # 本地自定义 → batch_size
         self.assertEqual(
-            self._call({"translation_mode": "local", "translation_batch_size": 50}),
+            _batch_size_save_field({"translation_mode": "local", "translation_batch_size": 50}),
             ("batch_size", 50))
-
-    def test_online_custom_writes_batch_size_online(self):
+        # 联网自定义 → batch_size_online
         self.assertEqual(
-            self._call({"translation_mode": "online", "translation_batch_size": 200}),
+            _batch_size_save_field({"translation_mode": "online", "translation_batch_size": 200}),
             ("batch_size_online", 200))
-
-    def test_default_value_skips_write(self):
-        """等于当前模式默认（返回 None）时不覆盖 config"""
+        # 等于默认值 → None 不覆盖 config
         self.assertIsNone(
-            self._call({"translation_mode": "online", "translation_batch_size": None}))
+            _batch_size_save_field({"translation_mode": "online", "translation_batch_size": None}))
         self.assertIsNone(
-            self._call({"translation_mode": "local", "translation_batch_size": None}))
-
-    def test_missing_mode_defaults_to_local(self):
+            _batch_size_save_field({"translation_mode": "local", "translation_batch_size": None}))
+        # 缺 mode → 默认 local
         self.assertEqual(
-            self._call({"translation_batch_size": 30}),
+            _batch_size_save_field({"translation_batch_size": 30}),
             ("batch_size", 30))
 
 
