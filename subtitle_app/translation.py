@@ -277,17 +277,6 @@ class TranslationClient:
                 if ctx_list:
                     context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
                     context_text = "\n".join(context_lines) + "\n"
-                self.post_ui({
-                    "type": "translation_monitor",
-                    "percent": 0,
-                    "stage": "翻译",
-                    "detail": f"批次 {batch_id}/{total_batches} · 正在请求大模型（{len(batch)} 句）",
-                    "batch_id": batch_id,
-                    "total_batches": total_batches,
-                    "batch_sentences": len(batch),
-                    "total_sentences": len(unique_texts),
-                    "completed_sentences": 0,
-                })
                 future = executor.submit(self._translate_batch, batch, context_text, 0)
                 batch_futures.append((future, batch, text_to_gsid, batch_id, main_para))
 
@@ -300,11 +289,14 @@ class TranslationClient:
                         translations = future.result(timeout=15)
                         break
                     except (concurrent.futures.TimeoutError, TimeoutError):
+                        is_local = ("127.0.0.1" in self.api_url or "localhost" in self.api_url
+                                    or "::1" in self.api_url)
+                        slow_hint = "本地模型推理中" if is_local else "API 响应较慢"
                         self.post_ui({
                             "type": "progress",
                             "percent": (completed_count / max(total_batches, 1)) * 100,
                             "stage": "翻译",
-                            "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（API 响应较慢，已完成 {completed_count}/{total_batches} 批）",
+                            "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（{slow_hint}，已完成 {completed_count}/{total_batches} 批）",
                             "total": len(blocks), "cache": len(self.cache),
                         })
                 try:
@@ -336,17 +328,6 @@ class TranslationClient:
                         "updated_at": datetime.now().isoformat(),
                     })
                 completed_count += 1
-                self.post_ui({
-                    "type": "translation_monitor",
-                    "percent": (completed_count / max(total_batches, 1)) * 100,
-                    "stage": "翻译",
-                    "detail": f"批次 {batch_id}/{total_batches} 完成，已处理 {completed_count}/{total_batches} 批",
-                    "batch_id": batch_id,
-                    "total_batches": total_batches,
-                    "batch_sentences": len(batch),
-                    "total_sentences": len(unique_texts),
-                    "completed_sentences": min(len(unique_texts), sum(len(item[1]) for item in batch_futures[:completed_count])),
-                })
                 self.post_ui({
                     "type": "progress",
                     "percent": (completed_count / max(total_batches, 1)) * 100,
@@ -458,9 +439,7 @@ class TranslationClient:
             # 修正缩进：正确处理递归拆分，增加深度限制
             if len(texts) > 1 and depth < MAX_RECURSION_DEPTH:
                 logger.warning("批量翻译失败（深度 %d），拆分为小批次重试: %s", depth, e)
-                mid = len(texts) // 2
-                return (self._translate_batch(texts[:mid], context, depth + 1) +
-                        self._translate_batch(texts[mid:], context, depth + 1))
+                return self._translate_split(texts, context, depth)
             elif depth >= MAX_RECURSION_DEPTH:
                 logger.error("翻译递归深度超过限制 %d，返回原文", MAX_RECURSION_DEPTH)
                 return [{"id": i + 1, "zh": t} for i, t in enumerate(texts)]
@@ -475,15 +454,30 @@ class TranslationClient:
         except Exception as e:
             logger.warning("翻译响应解析失败（深度 %d），拆分为小批次重试: %s", depth, e)
             if len(texts) > 1 and depth < MAX_RECURSION_DEPTH:
-                mid = len(texts) // 2
-                return (self._translate_batch(texts[:mid], context, depth + 1) +
-                        self._translate_batch(texts[mid:], context, depth + 1))
+                return self._translate_split(texts, context, depth)
             elif depth >= MAX_RECURSION_DEPTH:
                 logger.error("翻译响应解析失败，超过递归深度限制 %d，返回原文", MAX_RECURSION_DEPTH)
                 return [{"id": i + 1, "zh": t} for i, t in enumerate(texts)]
             else:
                 logger.warning("单句翻译响应解析失败，尝试纯文本模式: %s", e)
                 return self._call_api_single_plain(texts[0])
+
+    def _translate_split(self, texts: List[str], context: str, depth: int = 0) -> List[Dict]:
+        """批量翻译在 API 侧失败时拆半重试；对第二个子批的 id 重新编号以避免回填错位。"""
+        mid = len(texts) // 2
+        left = self._translate_batch(texts[:mid], context, depth + 1)
+        right = self._translate_batch(texts[mid:], context, depth + 1)
+        # 两个子批的 id 都从 1 开始；不重排会导致按 id 回填时后批覆盖前批、译文串位
+        offset = len(left)
+        renumbered = []
+        for item in right:
+            if isinstance(item, dict) and item.get("id") is not None:
+                try:
+                    item = {**item, "id": int(item["id"]) + offset}
+                except (TypeError, ValueError):
+                    pass
+            renumbered.append(item)
+        return left + renumbered
 
     def _call_api(self, payload: dict, headers: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")
@@ -776,16 +770,21 @@ def _apply_batch_translations(
         if 1 <= sid <= len(batch) and zh:
             by_id[sid] = zh
 
-    # 顺序回退：当 id 覆盖不足时，按列表顺序补齐
-    ordered_zh: List[str] = []
-    for it in norm:
-        ordered_zh.append(str(it.get("zh") or "").strip())
+    # 顺序回退仅当返回值与输入条数一致时使用，防止条数不足时把相邻句子译文错位对齐
+    if len(norm) == len(batch):
+        ordered_zh: List[str] = [str(it.get("zh") or "").strip() for it in norm]
+    else:
+        ordered_zh: List[str] = []
 
     for i, orig_text in enumerate(batch):
         zh = by_id.get(i + 1, "")
-        if not zh and i < len(ordered_zh):
+        if not zh and ordered_zh and i < len(ordered_zh):
             zh = ordered_zh[i]
         if not zh:
+            continue
+        if zh == orig_text:
+            # 模型把原文当译文返回（拒译/未答）：不当有效译文，不写缓存，留待单条补翻
+            applied.append((orig_text, ""))
             continue
         key = sentence_cache_key(orig_text, model, is_bilingual)
         with cache_lock:

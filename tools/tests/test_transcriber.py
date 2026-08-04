@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
     Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
-    _MODEL_SPEED, _model_speed_lock, _parse_ffmpeg_time,
+    _MODEL_SPEED, _model_speed_lock, _parse_ffmpeg_time, _dedupe_adjacent_blocks,
 )
 from subtitle_app.srt_utils import SubtitleBlock
 
@@ -230,11 +230,33 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertTrue(all(b.end - b.start <= MAX_BLOCK_DURATION + 1e-6 for b in out))
 
     def test_two_char_forced_split_has_text_each(self):
+        # 修复：<=3 字符的短文本不再被切成单字符块，整块保留并把时长压到上限
         blocks = [SubtitleBlock(1, 100.0, 145.0, "Hi")]
         out = split_long_blocks(blocks)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].text, "Hi")
+        self.assertAlmostEqual(out[0].end - out[0].start, MAX_BLOCK_DURATION)
+
+    def test_short_text_not_chunked_into_single_char(self):
+        # 4 字符长时长 → 每段至少 2 字符，不产出 1 字符块
+        blocks = [SubtitleBlock(1, 0.0, 60.0, "abcd")]
+        out = split_long_blocks(blocks)
+        self.assertTrue(out)
+        self.assertTrue(all(len(b.text.strip()) >= 2 for b in out))
+        self.assertEqual("".join(b.text for b in out), "abcd")
+
+    def test_dedupe_adjacent_duplicates_merged(self):
+        # 合并相邻文本完全相同的块（Whisper 对循环语音的重复输出）
+        blocks = [
+            SubtitleBlock(1, 0.0, 5.0, "やらして"),
+            SubtitleBlock(2, 5.0, 10.0, "やらして"),
+            SubtitleBlock(3, 10.0, 15.0, "违います"),
+            SubtitleBlock(4, 15.0, 20.0, ""),
+        ]
+        out = _dedupe_adjacent_blocks(blocks)
         self.assertEqual(len(out), 2)
-        self.assertEqual("".join(b.text for b in out), "Hi")
-        self.assertTrue(all(b.text.strip() for b in out))
+        self.assertEqual([b.text for b in out], ["やらして", "违います"])
+        self.assertEqual([b.index for b in out], [1, 2])
 
     def test_empty_input_dropped(self):
         blocks = [
