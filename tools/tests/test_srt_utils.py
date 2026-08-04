@@ -7,7 +7,7 @@ from pathlib import Path
 
 from subtitle_app.srt_utils import (
     seconds_to_srt_time, srt_time_to_seconds, fmt_duration,
-    SubtitleBlock, parse_srt, write_srt, split_sentences,
+    SubtitleBlock, parse_srt, parse_srt_text, write_srt, split_sentences,
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
     load_json, save_json, fmt_job_display, find_existing_subtitle,
     match_video_for_subtitle,
@@ -208,6 +208,28 @@ class TestAnalyzeSubtitleQuality(unittest.TestCase):
             # 第 2 条 content 为空 → empty
             self.assertGreaterEqual(report["counts"]["empty"], 1)
             self.assertGreaterEqual(report["counts"]["gap"], 1)
+
+    def test_blank_block_in_middle_kept(self):
+        """空文本块不在文件末尾时也必须被解析保留（修复前会被正则丢弃）"""
+        blocks = parse_srt_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\nWorld\n",
+        )
+        self.assertEqual([b.text for b in blocks], ["Hello", "", "World"])
+        report = analyze_subtitle_quality(blocks)
+        self.assertGreaterEqual(report["counts"]["empty"], 1)
+
+    def test_missing_blank_line_no_merge(self):
+        """块间缺空行（畸形输入）时，不能把下一块序号+时间戳吞进上一块文本"""
+        blocks = parse_srt_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nWorld\n",
+        )
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual([b.text for b in blocks], ["Hello", "World"])
+        self.assertEqual([b.start for b in blocks], [1.0, 3.0])
+        self.assertEqual([b.end for b in blocks], [2.0, 4.0])
 
 
 if __name__ == "__main__":

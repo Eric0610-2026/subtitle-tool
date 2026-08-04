@@ -28,7 +28,10 @@ def _sanitize_srt_for_mux(srt_path: Path) -> Path:
         return srt_path
     before = [(b.start, b.end) for b in blocks]
     sanitize_blocks(blocks)
-    if all(a == c and b == d for (a, b), (c, d) in zip(before, [(b.start, b.end) for b in blocks])):
+    after = [(b.start, b.end) for b in blocks]
+    # 先比较块数：sanitize_blocks 会就地过滤空文本块，块数可能减少；
+    # 若只用 zip 比较公共前缀，末尾空块被过滤时会被误判为"未变化"而跳过净化。
+    if len(before) == len(after) and all(a == c and b == d for (a, b), (c, d) in zip(before, after)):
         return srt_path
     out = srt_path.parent / (srt_path.stem + ".mux.sanitized.srt")
     write_srt(out, blocks, [b.text for b in blocks])

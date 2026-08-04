@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
     Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
-    _MODEL_SPEED, _model_speed_lock,
+    _MODEL_SPEED, _model_speed_lock, _parse_ffmpeg_time,
 )
 from subtitle_app.srt_utils import SubtitleBlock
 
@@ -116,6 +116,27 @@ class TestReadStderrLoop(unittest.TestCase):
 
         Transcriber._read_stderr_loop(BrokenStream(), lines, lock, done)
         self.assertTrue(done.is_set())
+
+
+class TestParseFfmpegTime(unittest.TestCase):
+    """_parse_ffmpeg_time：小数位数不固定，须按实际位数换算"""
+
+    def test_nine_digits_fraction(self):
+        # 修复前 ms/1e6 会把 110000000 当 110 秒，实际应为 4.11 秒
+        self.assertAlmostEqual(
+            _parse_ffmpeg_time("frame= 12 time=00:00:04.110000000"), 4.11)
+
+    def test_six_digits_fraction(self):
+        self.assertAlmostEqual(
+            _parse_ffmpeg_time("time=00:01:02.250000"), 62.25)
+
+    def test_three_digits_fraction(self):
+        self.assertAlmostEqual(
+            _parse_ffmpeg_time("time=00:00:00.500"), 0.5)
+
+    def test_no_time_returns_none(self):
+        self.assertIsNone(_parse_ffmpeg_time("frame= 0 fps=0.0"))
+        self.assertIsNone(_parse_ffmpeg_time(""))
 
 
 class TestEstimateWeights(unittest.TestCase):

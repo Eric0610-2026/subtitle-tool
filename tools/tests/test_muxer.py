@@ -36,6 +36,27 @@ class TestSanitizeSrtForMux(unittest.TestCase):
             result = _sanitize_srt_for_mux(p)
             self.assertEqual(result, p)
 
+    def test_trailing_blank_block_is_sanitized(self):
+        """末尾空白文本块必须被净化过滤，不能误判为未变化而返回原文件"""
+        from subtitle_app.srt_utils import parse_srt
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "blank_tail.srt"
+            # 直接写原始 SRT：第一块正常，末尾块文本为空白行（strip 后为空）
+            p.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+                "\n"
+                "2\n00:00:03,000 --> 00:00:04,000\n   \n",
+                encoding="utf-8",
+            )
+            from subtitle_app.muxer import _sanitize_srt_for_mux
+            result = _sanitize_srt_for_mux(p)
+            self.assertNotEqual(result, p)  # 必须走净化写出，而不是返回原文件
+            cleaned = parse_srt(result)
+            self.assertEqual(len(cleaned), 1)
+            self.assertEqual(cleaned[0].text, "Hello")
+            self.assertEqual(cleaned[0].start, 1.0)
+            self.assertEqual(cleaned[0].end, 2.0)
+
     def test_nonexistent_file_returns_same_path(self):
         """不存在的文件应返回原路径（在 parse_srt 中抛出异常）"""
         from subtitle_app.muxer import _sanitize_srt_for_mux

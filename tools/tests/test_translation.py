@@ -3,8 +3,9 @@
 """translation 单元测试（适配当前代码）"""
 import unittest
 import tempfile
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from subtitle_app.srt_utils import SubtitleBlock
 
 from subtitle_app.translation import (
@@ -103,6 +104,29 @@ class TestTranslationClient(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             c = self._client(d, batch_size=10)
             self.assertEqual(c.get_cache_size(), 0)
+
+    def test_curl_fallback_tmp_file_unique_per_thread(self):
+        """并发 403 fallback 时各线程的临时文件必须唯一，不能共写一个文件"""
+        from subtitle_app import translation as tr
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=10)
+            seen = {}
+
+            def fake_save_json(path, payload):
+                seen[threading.get_ident()] = str(path)
+
+            ok_resp = MagicMock(returncode=0, stdout='{"id": 1}')
+            with patch.object(tr.shutil, "which", return_value="curl.exe"), \
+                    patch.object(tr, "save_json", side_effect=fake_save_json), \
+                    patch.object(tr, "subprocess_run_safe", return_value=ok_resp):
+                threads = [threading.Thread(
+                    target=lambda: c._curl_fallback({"text": "x"}, {"A": "b"}))
+                    for _ in range(4)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            self.assertEqual(len(seen), 4)  # 4 个线程各自生成了不同文件名
 
 
 class TestRecursionProtection(unittest.TestCase):
