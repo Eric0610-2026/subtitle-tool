@@ -212,8 +212,10 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         previews = [p for p in posts if p["type"] == "preview"]
         self.assertGreater(len(previews), 0)
         lines = previews[0]["message"].split("\n")
-        # 双语模式下应有翻译内容或原文
-        self.assertIn("Hello", lines[0])
+        # 双语模式下预览为标准 SRT 块：序号/时间/原文/译文
+        self.assertEqual(lines[0], "1")
+        self.assertIn("-->", lines[1])
+        self.assertEqual(lines[2], "Hello")
 
     def test_translate_only_mode(self):
         """仅翻译模式：只输出中文"""

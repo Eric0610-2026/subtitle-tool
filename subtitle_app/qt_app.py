@@ -33,7 +33,7 @@ from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog
 from .muxer import embed_subtitles_to_video
 from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
-from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, TranslationMonitorDialog, _silent_text_input, _silent_double_input
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
 from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
 from .notifier import notify as system_notify
 
@@ -133,6 +133,7 @@ class SubtitleApp(QMainWindow):
         }
         self._build_ui()
         self._apply_style()
+        self._model_status_refreshed = False
         self._update_model_status()  # 初始化「当前模型」标签
 
         self._add_log_entry("应用就绪")
@@ -256,10 +257,8 @@ class SubtitleApp(QMainWindow):
 
     def _build_progress_and_log(self, bl):
         """构建进度 + 日志面板"""
-        self.progress_panel = ProgressPanel(details_cb=self._show_translation_monitor)
+        self.progress_panel = ProgressPanel()
         self.progress_panel.setObjectName("progressPanel")
-        self.translation_monitor_dialog = TranslationMonitorDialog(self)
-        self.translation_monitor = self.translation_monitor_dialog.monitor
         self.log_panel = LogPanel()
         self.log_panel.setObjectName("logPanel")
         self.log_panel.log_list.installEventFilter(self)
@@ -821,14 +820,9 @@ class SubtitleApp(QMainWindow):
         w = max(label.width(), 200)
         label.setText(fm.elidedText(text, Qt.ElideRight, w))
 
-    def _show_translation_monitor(self):
-        self.translation_monitor_dialog.show()
-        self.translation_monitor_dialog.raise_()
-        self.translation_monitor_dialog.activateWindow()
-
     def _reset_progress(self):
         self.progress_panel.reset()
-        self.translation_monitor.reset()
+        self._model_status_refreshed = False
 
     def _stop(self):
         if not (self.worker.thread and self.worker.thread.is_alive()):
@@ -1113,6 +1107,10 @@ class SubtitleApp(QMainWindow):
             p.translate_bar.setValue(int(pct))
             p.translate_bar.setFormat(f"{int(pct)}%")
             p.translate_detail.setText(detail)
+            # 翻译阶段已开始：本地模型可能已加载，刷新「当前模型」标签（不再是 whisper）
+            if not self._model_status_refreshed:
+                self._model_status_refreshed = True
+                self._update_model_status()
         elif stage in ("组织输出", "完成", "跳过"):
             p.transcribe_bar.setValue(100)
             p.transcribe_bar.setFormat("100%")
@@ -1139,7 +1137,6 @@ class SubtitleApp(QMainWindow):
 
     def _handle_done(self, e):
         p = self.progress_panel
-        self.translation_monitor.finish()
         msg = e.get("message", "完成")
         self._add_log_entry(msg, "INFO")
         p.transcribe_bar.setValue(100)
@@ -1191,7 +1188,6 @@ class SubtitleApp(QMainWindow):
                 f"🌍 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
             "current": lambda e: self._set_elided(self.progress_panel.transcribe_label, f"🎤 {e.get('message', '')}"),
             "progress": self._handle_progress,
-            "translation_monitor": lambda e: self.translation_monitor.update_progress(e),
             "counter": lambda e: self.progress_panel.counter_label.setText(
                 f"已转写 {e.get('generated',0)}/{e.get('total',0)} | "
                 f"已翻译 {e.get('translated',0)}/{e.get('total',0)} | "

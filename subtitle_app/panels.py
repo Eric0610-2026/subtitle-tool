@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QListWidget, QListWidgetItem, QPushButton,
     QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
     QDoubleSpinBox, QLineEdit, QMessageBox,
-    QAbstractSpinBox, QToolButton,
+    QAbstractSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStackedWidget,
 )
@@ -72,122 +72,9 @@ def _silent_double_input(parent, title: str, label: str,
     return spin.value(), result == QDialog.Accepted
 
 
-class TranslationMonitor(QGroupBox):
-    """可折叠翻译监视器：展示批次、句子、速度和最近翻译结果。"""
-
-    def __init__(self, parent=None):
-        super().__init__("翻译监视器", parent)
-        self._expanded = True
-        self._started_at = None
-        self._total_sentences = 0
-        self._completed_sentences = 0
-        self._build_ui()
-
-    def _build_ui(self):
-        self.setCheckable(True)
-        self.setChecked(True)
-        self.toggled.connect(self._toggle_content)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
-
-        self.summary = QLabel("等待翻译任务…")
-        self.summary.setObjectName("translationMonitorSummary")
-        layout.addWidget(self.summary)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFormat("0%")
-        self.progress.setFixedHeight(17)
-        layout.addWidget(self.progress)
-
-        self.stats = QLabel("批次 --/--  ·  句子 --/--  ·  速度 --  ·  剩余 --")
-        self.stats.setObjectName("translationMonitorStats")
-        layout.addWidget(self.stats)
-
-        self.recent = QListWidget()
-        self.recent.setObjectName("translationRecentList")
-        self.recent.setMaximumHeight(112)
-        self.recent.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.recent)
-        self._content_widgets = [self.summary, self.progress, self.stats, self.recent]
-
-    def _toggle_content(self, checked):
-        for widget in self._content_widgets:
-            widget.setVisible(checked)
-        self._expanded = checked
-
-    def reset(self):
-        self._started_at = None
-        self._total_sentences = 0
-        self._completed_sentences = 0
-        self.summary.setText("等待翻译任务…")
-        self.progress.setValue(0)
-        self.progress.setFormat("0%")
-        self.stats.setText("批次 --/--  ·  句子 --/--  ·  速度 --  ·  剩余 --")
-        self.recent.clear()
-
-    def update_progress(self, event):
-        if self._started_at is None:
-            self._started_at = time.monotonic()
-        detail = event.get("detail", "")
-        batch_id = event.get("batch_id")
-        total_batches = event.get("total_batches")
-        if batch_id is None or total_batches is None:
-            m = re.search(r"批次\s+(\d+)/(\d+)", detail)
-            batch_id = int(m.group(1)) if m else None
-            total_batches = int(m.group(2)) if m else None
-        self._total_sentences = max(self._total_sentences, int(event.get("total_sentences") or 0))
-        self._completed_sentences = max(self._completed_sentences, int(event.get("completed_sentences") or 0))
-        pct = max(0, min(100, int(event.get("percent", 0))))
-        self.progress.setValue(pct)
-        self.progress.setFormat(f"{pct}%")
-        self.summary.setText(detail or "正在请求大模型…")
-        batch_text = f"批次 {batch_id}/{total_batches}" if batch_id and total_batches else "批次 --/--"
-        elapsed = max(time.monotonic() - self._started_at, 0.1)
-        speed = self._completed_sentences / elapsed * 60 if self._completed_sentences else 0
-        speed_text = f"{speed:.1f} 句/分钟" if speed else "计算中"
-        self.stats.setText(
-            f"{batch_text}  ·  句子约 {self._completed_sentences}/{self._total_sentences or '--'}  ·  "
-            f"速度 {speed_text}  ·  剩余 {max(0, 100 - pct)}%")
-        if detail and (not self.recent.count() or self.recent.item(0).text() != detail):
-            self.recent.insertItem(0, detail)
-            while self.recent.count() > 10:
-                self.recent.takeItem(10)
-
-    def finish(self):
-        self.progress.setValue(100)
-        self.progress.setFormat("100%")
-        self.summary.setText("翻译完成")
-
-
-class TranslationMonitorDialog(QDialog):
-    """翻译监视器二级页面。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("翻译进度详情")
-        self.setMinimumSize(520, 360)
-        self.resize(620, 420)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        self.monitor = TranslationMonitor(self)
-        # 二级页面始终展开，避免用户打开后还要再次点击标题。
-        self.monitor.setChecked(True)
-        layout.addWidget(self.monitor)
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.hide)
-        row = QHBoxLayout()
-        row.addStretch()
-        row.addWidget(close_btn)
-        layout.addLayout(row)
-
-
 class ProgressPanel(QFrame):
-    def __init__(self, parent=None, details_cb=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._details_cb = details_cb
         self._start_time: Optional[float] = None
         self._build_ui()
 
@@ -222,12 +109,6 @@ class ProgressPanel(QFrame):
         title.setStyleSheet("font-weight:600; font-size:12px; padding:2px 0;")
         title.setFixedHeight(20)
         header.addWidget(title)
-        self.details_btn = QToolButton()
-        self.details_btn.setText("详情")
-        self.details_btn.setToolTip("打开翻译监视器")
-        self.details_btn.setAutoRaise(True)
-        self.details_btn.clicked.connect(self._open_details)
-        header.addWidget(self.details_btn)
         header.addStretch()
         layout.addLayout(header)
         self.overall_label = QLabel("总进度：等待中")
@@ -261,9 +142,6 @@ class ProgressPanel(QFrame):
         bot = QHBoxLayout()
         self.detail_label = QLabel("已用 --:-- | 剩余 --:-- | 预计 --")
         bot.addWidget(self.detail_label, 1)
-    def _open_details(self):
-        if self._details_cb:
-            self._details_cb()
 
     def reset(self):
         self.overall_progress.setValue(0)

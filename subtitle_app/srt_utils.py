@@ -394,7 +394,8 @@ def split_sentences(text: str) -> List[str]:
         para = para.strip()
         if not para:
             continue
-        parts = re.split(r"(?<=[。！？])", para)
+        # 日文与中文共用 U+3002；补充日文常用的 ．｡… 全角/半角句点，避免长句无法断句
+        parts = re.split(r"(?<=[。！？．｡…])", para)
         for part in parts:
             if not part.strip():
                 continue

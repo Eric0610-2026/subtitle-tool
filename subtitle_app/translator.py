@@ -202,7 +202,14 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
         post({"type": "counter", "generated": idx, "translated": idx,
               "total": total, "cache": client.get_cache_size()})
-        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts, 1)]
+        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析
+        preview_lines = []
+        for b, t in zip(blocks, final_texts):
+            preview_lines.append(str(b.index))
+            preview_lines.append(b.timing)
+            preview_lines.append(b.text)
+            preview_lines.append(t)
+            preview_lines.append("")
         post({"type": "preview", "message": "\n".join(preview_lines)})
 
         if state_path and state_path.exists():
@@ -213,7 +220,14 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 logger.warning("删除翻译状态文件失败: %s", e)
     else:
         final_texts = [block.text for block in blocks]
-        preview_lines = [f"{i:>4}  {t}" for i, t in enumerate(final_texts, 1)]
+        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析
+        preview_lines = []
+        for b, t in zip(blocks, final_texts):
+            preview_lines.append(str(b.index))
+            preview_lines.append(b.timing)
+            preview_lines.append(b.text)
+            preview_lines.append(t)
+            preview_lines.append("")
         post({"type": "preview", "message": "\n".join(preview_lines)})
         # 即使不翻译，也生成临时字幕文件用于嵌入 MKV
         post({"type": "log", "message": "AI 翻译已关闭，使用原文字幕嵌入", "level": "INFO"})

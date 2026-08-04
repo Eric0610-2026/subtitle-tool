@@ -244,6 +244,9 @@ class Transcriber:
                         del m
                     except (KeyError, AttributeError):
                         pass
+                if old_keys:
+                    # 淘汰旧模型后清空 CUDA 缓存，避免显存碎片累计
+                    self.clear_cache()
             try:
                 model = WhisperModel(str(model_dir), device=device, compute_type=compute_type)
                 with self._cache_lock:
@@ -482,8 +485,10 @@ class Transcriber:
                             "detail": f"{len(blocks)} 段 | {time_info} | {detected_lang}",
                             "generated": idx, "total": total})
                     if len(blocks) <= 8 or len(blocks) % 10 == 0:
-                        time_range = f"[{seg_time_str}]"
-                        t_post({"type": "preview_append", "message": f"{len(blocks):>4} {time_range}  {seg.text.strip()}\n"})
+                        # 标准 SRT 块结构（序号/时间/文本），供预览表格解析
+                        time_range = f"{seconds_to_srt_time(seg_start)} --> {seconds_to_srt_time(seg_end)}"
+                        t_post({"type": "preview_append",
+                                "message": f"{len(blocks)}\n{time_range}\n{seg.text.strip()}"})
                     # ── 定期写入断点文件 ──
                     if checkpoint_enabled and partial_srt and len(blocks) % checkpoint_interval == 0:
                         try:
@@ -494,6 +499,8 @@ class Transcriber:
                 blocks = split_long_blocks(blocks)
                 # split 可能在强制切分路径上再生空块，再净化一次
                 sanitize_blocks(blocks)
+                # Whisper 对循环/重复音频会连续输出相同文本，合并相邻重复块
+                blocks = _dedupe_adjacent_blocks(blocks)
                 Transcriber._write_partial_srt(source_srt, blocks)
                 # 构建 SRT 完整预览（跳过空文本，避免预览/保存出现空时间轴）
                 preview_lines = []
@@ -595,6 +602,21 @@ class Transcriber:
 MAX_BLOCK_DURATION = 15.0  # 单条字幕最大时长（秒）
 
 
+def _dedupe_adjacent_blocks(blocks: List[SubtitleBlock]) -> List[SubtitleBlock]:
+    """合并相邻文本完全相同的块（Whisper 对循环语音会连续输出相同 segment）。"""
+    result: List[SubtitleBlock] = []
+    for b in blocks:
+        text = b.text.strip()
+        if not text:
+            continue
+        if result and result[-1].text.strip() == text:
+            continue
+        result.append(b)
+    for i, b in enumerate(result, 1):
+        b.index = i
+    return result
+
+
 def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLOCK_DURATION) -> List[SubtitleBlock]:
     """将时长超过 max_duration 的块按句子切分为多条。
 
@@ -618,7 +640,8 @@ def split_long_blocks(blocks: List[SubtitleBlock], max_duration: float = MAX_BLO
             # 无法按句子切分：按字符均分到不超过 n 段，且段数不超过字符数，
             # 杜绝 chars_per_chunk==0 时产生空 text 的 15s 占位条。
             n = max(2, int((dur + max_duration - 0.001) // max_duration))
-            n = min(n, len(text))
+            # 防止短文本被切成单字符块：每段至少 2 个字符；文本过短（<=3 字符）整块保留
+            n = min(n, len(text) // 2)
             if n <= 1:
                 # 文本太短无法再切：保留原文，但把显示时长压到 max_duration
                 result.append(SubtitleBlock(

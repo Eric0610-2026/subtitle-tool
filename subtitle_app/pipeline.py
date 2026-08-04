@@ -194,9 +194,17 @@ class SubtitleWorker:
             if result is not None:
                 results.append(result)
         if self.stop_requested:
+            try:
+                self.transcriber.release_model()
+            except Exception:
+                pass
             post({"type": "done", "message": "用户已停止处理"})
             return
         if not results:
+            try:
+                self.transcriber.release_model()
+            except Exception:
+                pass
             post({"type": "done", "message": "所有任务处理完成！（没有需要翻译的字幕）"})
             return
 
@@ -385,4 +393,9 @@ class SubtitleWorker:
         """保留兼容性——供外部调用者或测试使用"""
         result = self._transcribe_stage(item, idx, total, opts)
         if result is not None:
+            # 串行模式：转写后先释放 Whisper 再进入翻译，避免双模型同时驻留显存
+            try:
+                self.transcriber.release_model()
+            except Exception as e:
+                logger.warning("释放语音识别显存失败: %s", e)
             self._translate_stage(result, opts, opts["post"])

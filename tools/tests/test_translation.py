@@ -330,5 +330,49 @@ class TestSharedCache(unittest.TestCase):
             self.assertNotIn("only_b", ca.cache)
 
 
+class TestApplyBatchTranslations(unittest.TestCase):
+    """_apply_batch_translations 的 id 对齐与缓存保护"""
+
+    @staticmethod
+    def _run(batch, translations, t2g=None):
+        from subtitle_app.translation import _apply_batch_translations
+        sent_trans, cache = {}, {}
+        lock = threading.Lock()
+        t2g = t2g or {t: [i] for i, t in enumerate(batch)}
+        applied = _apply_batch_translations(batch, translations, t2g, sent_trans,
+                                            cache, lock, "m", True)
+        return sent_trans, cache, applied
+
+    def test_zh_equal_orig_not_cached(self):
+        # 模型把原文当译文返回（拒译）：不固化进缓存，也不当作有效译文
+        sent_trans, cache, applied = self._run(
+            ["你好", "世界"], [{"id": 1, "zh": "你好"}])
+        self.assertEqual(cache, {})
+        self.assertNotIn(0, sent_trans)
+        self.assertEqual(applied[0], ("你好", ""))
+
+    def test_wrong_count_no_order_fallback(self):
+        # 返回条数不足时不做硬顺序回退：第 j 条译文不会错配给第 i 条
+        sent_trans, cache, applied = self._run(
+            ["A", "B", "C"], [{"id": 2, "zh": "译B"}])
+        self.assertEqual(sent_trans.get(1), "译B")
+        self.assertNotIn(0, sent_trans)
+        self.assertNotIn(2, sent_trans)
+
+
+class TestTranslateSplit(unittest.TestCase):
+    """递归拆批后第二个子批的 id 需重新编号，避免回填错位"""
+
+    def test_second_half_ids_renumbered(self):
+        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+                              lambda *a: None, batch_size=10)
+        c._translate_batch = lambda texts, context="", depth=0: [
+            {"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
+        out = c._translate_split(["a", "b", "c", "d"], "", 0)
+        ids = [item["id"] for item in out]
+        self.assertEqual(ids, [1, 2, 3, 4])
+        self.assertEqual([item["zh"] for item in out], ["译a", "译b", "译c", "译d"])
+
+
 if __name__ == "__main__":
     unittest.main()
