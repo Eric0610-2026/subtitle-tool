@@ -21,27 +21,22 @@ class TestApiForbiddenError(unittest.TestCase):
 
 
 class TestExtractJson(unittest.TestCase):
-    def test_direct(self):
-        self.assertEqual(_extract_json('{"items": []}'), {"items": []})
-
-    def test_code_block(self):
-        self.assertEqual(_extract_json('```json\n{"a":1}\n```'), {"a": 1})
-
-    def test_bare_braces(self):
-        self.assertEqual(_extract_json('前缀 {"b":2} 后缀'), {"b": 2})
-
-    def test_invalid(self):
+    def test_json_variants(self):
+        cases = [
+            ('{"items": []}', {"items": []}),          # 直接 JSON
+            ('```json\n{"a":1}\n```', {"a": 1}),       # 代码块包裹
+            ('前缀 {"b":2} 后缀', {"b": 2}),            # 裸花括号
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(_extract_json(raw), expected)
         self.assertIsNone(_extract_json("完全不是json xyz"))
 
 
 class TestComposeSentences(unittest.TestCase):
-    def test_cjk_no_space(self):
+    def test_compose_variants(self):
         self.assertEqual(_compose_sentences(["你好", "世界"]), "你好世界")
-
-    def test_english_space(self):
         self.assertEqual(_compose_sentences(["Hello", "world"]), "Hello world")
-
-    def test_mixed(self):
         self.assertEqual(_compose_sentences(["你好", "world"]), "你好 world")
 
 
@@ -50,17 +45,16 @@ class TestParseResponse(unittest.TestCase):
         self.client = TranslationClient("url", "key", "m",
                                         Path(tempfile.mktemp()), lambda *a: None)
 
-    def test_openai_format(self):
+    def test_response_formats(self):
+        # OpenAI 格式
         resp = {"choices": [{"message": {"content": '{"items":[{"id":1,"zh":"你好"}]}'}}]}
         items = self.client._parse_translation_response(resp)
         self.assertEqual(items[0]["zh"], "你好")
-
-    def test_string_list(self):
+        # 字符串列表
         resp = {"items": ["你好", "世界"]}
         items = self.client._parse_translation_response(resp)
         self.assertEqual([i["zh"] for i in items], ["你好", "世界"])
-
-    def test_dict_list_alias(self):
+        # dict 列表 text 别名
         resp = {"items": [{"id": 1, "text": "你好"}]}
         items = self.client._parse_translation_response(resp)
         self.assertEqual(items[0]["zh"], "你好")
@@ -72,23 +66,22 @@ class TestTranslationClient(unittest.TestCase):
         return TranslationClient("url", "key", "m",
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
-    def test_default_batch_size(self):
-        # 默认批次大小应跟随 config 的 translation.batch_size（Hy-MT2 本地化调参后为 20）
+    def test_translate_blocks_and_cache(self):
+        # 默认批次大小应跟随 config 的 translation.batch_size
         from subtitle_app.config import cfg
         c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()), lambda *a: None)
         self.assertEqual(c.batch_size, cfg.translation.batch_size)
-
-    def test_translate_blocks_basic(self):
+        # 基本翻译 + 空缓存大小
         with tempfile.TemporaryDirectory() as d:
             c = self._client(d, batch_size=10)
+            self.assertEqual(c.get_cache_size(), 0)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello"),
                       SubtitleBlock(index=2, start=1, end=2, text="World")]
             c._translate_batch = lambda texts, context="", depth=0: [
                 {"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
-            res = c.translate_blocks(blocks, "en", is_bilingual=True)
-            self.assertEqual(res, ["译Hello", "译World"])
-
-    def test_cache_hit_skips_api(self):
+            self.assertEqual(c.translate_blocks(blocks, "en", is_bilingual=True),
+                             ["译Hello", "译World"])
+        # 第二次调用缓存命中，不再调 _translate_batch
         with tempfile.TemporaryDirectory() as d:
             c = self._client(d, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
@@ -96,14 +89,8 @@ class TestTranslationClient(unittest.TestCase):
             c._translate_batch = mock
             c.translate_blocks(blocks, "en", is_bilingual=True)
             self.assertEqual(mock.call_count, 1)
-            # 第二次：缓存命中，不再调用 _translate_batch
             c.translate_blocks(blocks, "en", is_bilingual=True)
             self.assertEqual(mock.call_count, 1)
-
-    def test_get_cache_size(self):
-        with tempfile.TemporaryDirectory() as d:
-            c = self._client(d, batch_size=10)
-            self.assertEqual(c.get_cache_size(), 0)
 
     def test_curl_fallback_tmp_file_unique_per_thread(self):
         """并发 403 fallback 时各线程的临时文件必须唯一，不能共写一个文件"""
@@ -132,44 +119,35 @@ class TestTranslationClient(unittest.TestCase):
 class TestRecursionProtection(unittest.TestCase):
     """递归深度保护测试"""
 
-    def test_depth_limit_returns_original(self):
+    def test_depth_limit_and_single_text_fallback(self):
         from subtitle_app.translation import MAX_RECURSION_DEPTH
         client = TranslationClient("url", "key", "m",
                                    Path(tempfile.mktemp()), lambda *a: None, batch_size=5)
-        texts = ["a", "b", "c"]
-        # 模拟总是失败的 translate_batch，应在超过递归深度后返回原文
+        # 超过递归深度 → 返回原文
         def always_fail(texts_, context="", depth=0):
             raise RuntimeError("mock fail")
         client._call_api = always_fail
-        # depth 从 0 开始，超过 MAX_RECURSION_DEPTH 时直接返回原文
-        result = client._translate_batch(texts, depth=MAX_RECURSION_DEPTH)
-        self.assertEqual(len(result), 3)
-        for item, orig in zip(result, texts):
-            self.assertEqual(item["zh"], orig)
-
-    def test_single_text_fallback_plain(self):
-        client = TranslationClient("url", "key", "m",
-                                   Path(tempfile.mktemp()), lambda *a: None, batch_size=5)
-        # 模拟 API 总是失败，单句走纯文本兜底
+        result = client._translate_batch(["a", "b", "c"], depth=MAX_RECURSION_DEPTH)
+        self.assertEqual([item["zh"] for item in result], ["a", "b", "c"])
+        # 单句 API 失败 → 纯文本兜底
         def raise_err(payload, headers):
             raise RuntimeError("fail")
         client._call_api = raise_err
         result = client._translate_batch(["hello"])
         self.assertEqual(result[0]["zh"], "hello")
 
-    def test_translate_blocks_chinese_skip(self):
-        """中文跳过在 _translate_only 层实现，translate_blocks 本身不做 CJK 判定"""
+    def test_skip_and_cache_paths(self):
+        """中文源/缓存全命中时返回译文；缓存第二次命中不调 API"""
+        # 中文源：translate_blocks 直接返回（跳过判定在 _translate_only 层）
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="你好世界")]
             mock = MagicMock(return_value=[{"id": 1, "zh": "你好世界"}])
             c._translate_batch = mock
-            res = c.translate_blocks(blocks, "zh", is_bilingual=True)
-            self.assertEqual(res, ["你好世界"])
-
-    def test_translate_blocks_with_cache_all_hit(self):
-        """全部缓存命中时不调用 API，且返回正确的译文而非原文"""
+            self.assertEqual(c.translate_blocks(blocks, "zh", is_bilingual=True),
+                             ["你好世界"])
+        # 缓存全命中：第二次不再调 API，且返回译文而非原文
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -179,14 +157,13 @@ class TestRecursionProtection(unittest.TestCase):
             res = c.translate_blocks(blocks, "en", is_bilingual=True)
             mock.assert_called_once()
             self.assertEqual(res, ["你好世界"])
-            # 第二次：缓存命中，不再调用 _translate_batch，且返回译文
             mock.reset_mock()
             res2 = c.translate_blocks(blocks, "en", is_bilingual=True)
             mock.assert_not_called()
             self.assertEqual(res2, ["你好世界"])
 
-    def test_empty_cache_does_not_skip_translate(self):
-        """缓存里的空串不应阻止重新翻译"""
+    def test_empty_cache_and_state_retried(self):
+        """缓存/断点 state 里的空串不应阻止重新翻译"""
         from subtitle_app.srt_utils import sentence_cache_key
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
@@ -196,11 +173,9 @@ class TestRecursionProtection(unittest.TestCase):
             c.cache[key] = ""
             c._translate_batch = lambda texts, context="", depth=0: [
                 {"id": 1, "zh": "你好"}]
-            res = c.translate_blocks(blocks, "en", is_bilingual=True)
-            self.assertEqual(res, ["你好"])
-
-    def test_empty_state_done_retried(self):
-        """断点 state 中的空 done 应被忽略并重新翻译"""
+            self.assertEqual(c.translate_blocks(blocks, "en", is_bilingual=True),
+                             ["你好"])
+        # 断点 state 中空 done → 忽略并重新翻译
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -245,49 +220,31 @@ class TestRecursionProtection(unittest.TestCase):
 class TestSentenceSplitting(unittest.TestCase):
     """句子拆分扩展测试"""
 
-    def test_abbreviation_protection(self):
-        from subtitle_app.srt_utils import split_sentences
-        sents = split_sentences("Dr. Smith is here.")
+    def test_abbreviation_chinese_and_cache_key(self):
+        from subtitle_app.srt_utils import split_sentences, sentence_cache_key
         # Dr. 不应触发句子分割
-        self.assertEqual(len(sents), 1)
-
-    def test_chinese_sentence_split(self):
-        from subtitle_app.srt_utils import split_sentences
-        text = "你好。世界！今天天气怎么样？"
-        sents = split_sentences(text)
+        self.assertEqual(len(split_sentences("Dr. Smith is here.")), 1)
+        # 中文标点拆分
+        sents = split_sentences("你好。世界！今天天气怎么样？")
         self.assertGreaterEqual(len(sents), 3)
-
-    def test_cache_key_consistency(self):
-        from subtitle_app.srt_utils import sentence_cache_key
+        # 缓存 key：确定性 + 大小写归一化 + 模型区分
         k1 = sentence_cache_key("Hello", "m", True)
-        k2 = sentence_cache_key("Hello", "m", True)
-        k3 = sentence_cache_key("hello", "m", True)
-        self.assertEqual(k1, k2)
-        # 大小写归一化
-        self.assertEqual(k1, k3)
-
-    def test_cache_key_different_model(self):
-        from subtitle_app.srt_utils import sentence_cache_key
-        k1 = sentence_cache_key("Hello", "m1", True)
-        k2 = sentence_cache_key("Hello", "m2", True)
-        self.assertNotEqual(k1, k2)
+        self.assertEqual(k1, sentence_cache_key("Hello", "m", True))
+        self.assertEqual(k1, sentence_cache_key("hello", "m", True))
+        self.assertNotEqual(k1, sentence_cache_key("Hello", "m2", True))
 
 
 class TestChineseDetection(unittest.TestCase):
     """中文检测扩展测试"""
 
-    def test_japanese_kana_not_chinese(self):
+    def test_japanese_and_bilingual_detection(self):
         from subtitle_app.srt_utils import has_chinese
+        # 纯假名 → 非中文
         self.assertFalse(has_chinese("こんにちは", "zh"))
         self.assertFalse(has_chinese("カタカナです", "zh"))
-
-    def test_japanese_kanji_with_kana(self):
-        from subtitle_app.srt_utils import has_chinese
-        # 日文汉字 + 假名 = 不应判定为中文
+        # 日文汉字 + 假名 → 非中文
         self.assertFalse(has_chinese("返事をください"))
-
-    def test_bilingual_line(self):
-        from subtitle_app.srt_utils import has_chinese
+        # 含中文字符 → 是中文
         self.assertTrue(has_chinese("Hello\n你好世界"))
 
 
@@ -295,7 +252,8 @@ class TestSharedCache(unittest.TestCase):
     """进程级共享缓存：多个 TranslationClient 共享同一内存 dict，
     写回磁盘时不再互相覆盖（并发流水线回归测试）"""
 
-    def test_clients_share_same_cache_dict(self):
+    def test_shared_cache_share_persist_switch(self):
+        # 同一路径共享同一 dict；后写回不丢先写回的条目
         with tempfile.TemporaryDirectory() as d:
             cache_path = Path(d) / "cache.json"
             c1 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
@@ -303,22 +261,12 @@ class TestSharedCache(unittest.TestCase):
             c1.cache["k1"] = "v1"
             self.assertEqual(c2.cache.get("k1"), "v1")
             c2.cache["k2"] = "v2"
-            self.assertEqual(c1.cache.get("k2"), "v2")
-
-    def test_save_cache_persists_all_shared_entries(self):
-        with tempfile.TemporaryDirectory() as d:
-            cache_path = Path(d) / "cache.json"
-            c1 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
-            c2 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
-            c1.cache["k1"] = "v1"
-            c2.cache["k2"] = "v2"
             c2._save_cache()  # 后写回的 client 不能丢先写回的条目
             from subtitle_app.srt_utils import load_json
             disk = load_json(cache_path, {})
             self.assertEqual(disk.get("k1"), "v1")
             self.assertEqual(disk.get("k2"), "v2")
-
-    def test_shared_cache_switches_on_path_change(self):
+        # 换路径 → 切换独立缓存
         with tempfile.TemporaryDirectory() as d:
             path_a = Path(d) / "a.json"
             path_b = Path(d) / "b.json"
@@ -343,15 +291,13 @@ class TestApplyBatchTranslations(unittest.TestCase):
                                             cache, lock, "m", True)
         return sent_trans, cache, applied
 
-    def test_zh_equal_orig_not_cached(self):
+    def test_zh_equal_orig_and_wrong_count(self):
         # 模型把原文当译文返回（拒译）：不固化进缓存，也不当作有效译文
         sent_trans, cache, applied = self._run(
             ["你好", "世界"], [{"id": 1, "zh": "你好"}])
         self.assertEqual(cache, {})
         self.assertNotIn(0, sent_trans)
         self.assertEqual(applied[0], ("你好", ""))
-
-    def test_wrong_count_no_order_fallback(self):
         # 返回条数不足时不做硬顺序回退：第 j 条译文不会错配给第 i 条
         sent_trans, cache, applied = self._run(
             ["A", "B", "C"], [{"id": 2, "zh": "译B"}])

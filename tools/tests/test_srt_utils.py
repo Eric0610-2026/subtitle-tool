@@ -16,15 +16,15 @@ from subtitle_app.srt_utils import (
 
 
 class TestTimeUtils(unittest.TestCase):
-    def test_seconds_to_srt_time_basic(self):
+    def test_time_conversions_and_format(self):
+        # 秒 → SRT 时间
         self.assertEqual(seconds_to_srt_time(0), "00:00:00,000")
         self.assertEqual(seconds_to_srt_time(3661.5), "01:01:01,500")
-
-    def test_srt_time_to_seconds_roundtrip(self):
+        # 往返
         for sec in (0, 1.0, 59.999, 3661.5, 7200.123):
-            self.assertAlmostEqual(srt_time_to_seconds(seconds_to_srt_time(sec)), sec, places=2)
-
-    def test_fmt_duration(self):
+            self.assertAlmostEqual(
+                srt_time_to_seconds(seconds_to_srt_time(sec)), sec, places=2)
+        # 时长格式化
         self.assertEqual(fmt_duration(0), "00:00")
         self.assertEqual(fmt_duration(65), "01:05")
         self.assertEqual(fmt_duration(3661), "1:01:01")
@@ -41,17 +41,13 @@ class TestSrtRoundtrip(unittest.TestCase):
             encoding="utf-8")
         return p
 
-    def test_parse_srt(self):
+    def test_parse_and_write_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             blocks = parse_srt(self._sample(Path(d)))
             self.assertEqual(len(blocks), 2)
             self.assertEqual(blocks[0].text, "你好世界")
             self.assertAlmostEqual(blocks[0].start, 1.0)
             self.assertAlmostEqual(blocks[0].end, 3.0)
-
-    def test_write_srt_roundtrip(self):
-        with tempfile.TemporaryDirectory() as d:
-            blocks = parse_srt(self._sample(Path(d)))
             out = Path(d) / "out.srt"
             write_srt(out, blocks, [b.text for b in blocks])
             re = parse_srt(out)
@@ -64,29 +60,24 @@ class TestSrtRoundtrip(unittest.TestCase):
 
 
 class TestSplitSentences(unittest.TestCase):
-    def test_chinese(self):
-        self.assertEqual(split_sentences("你好。世界！你好吗？"), ["你好。", "世界！", "你好吗？"])
-
-    def test_english_period(self):
+    def test_cjk_english_and_empty(self):
+        self.assertEqual(split_sentences("你好。世界！你好吗？"),
+                         ["你好。", "世界！", "你好吗？"])
         self.assertEqual(split_sentences("Hello world. How are you? I am fine."),
                          ["Hello world.", "How are you?", "I am fine."])
-
-    def test_empty(self):
         self.assertEqual(split_sentences(""), [])
 
 
 class TestCacheKey(unittest.TestCase):
-    def test_deterministic(self):
+    def test_deterministic_and_distinguishing(self):
+        # 确定性 + 长度
         a = sentence_cache_key("Hello", "m", True)
-        b = sentence_cache_key("Hello", "m", True)
-        self.assertEqual(a, b)
+        self.assertEqual(a, sentence_cache_key("Hello", "m", True))
         self.assertEqual(len(a), 64)
-
-    def test_distinguishes_mode(self):
+        # 区分双语/纯译文模式
         self.assertNotEqual(sentence_cache_key("Hello", "m", True),
                             sentence_cache_key("Hello", "m", False))
-
-    def test_distinguishes_model(self):
+        # 区分模型
         self.assertNotEqual(sentence_cache_key("Hello", "m1", True),
                             sentence_cache_key("Hello", "m2", True))
 
@@ -97,34 +88,27 @@ class TestToSimplified(unittest.TestCase):
 
 
 class TestHasChinese(unittest.TestCase):
-    def test_true(self):
+    def test_detects_chinese(self):
         self.assertTrue(has_chinese("这是中文"))
         self.assertTrue(has_chinese("Hello\n世界"))
-
-    def test_false(self):
         self.assertFalse(has_chinese("This is English"))
         self.assertFalse(has_chinese("Hello\nWorld"))
 
 
 class TestSafeStem(unittest.TestCase):
-    def test_truncates(self):
-        self.assertLessEqual(len(safe_stem("x" * 200 + ".mp4")), 80)
-
-    def test_normal(self):
+    def test_normal_and_truncated(self):
         self.assertEqual(safe_stem("movie.mp4"), "movie")
+        self.assertLessEqual(len(safe_stem("x" * 200 + ".mp4")), 80)
 
 
 class TestJsonAtomic(unittest.TestCase):
-    def test_save_load(self):
+    def test_save_load_and_missing_default(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "c.json"
             save_json(p, {"a": 1})
             self.assertEqual(load_json(p, {}), {"a": 1})
-
-    def test_default(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "missing.json"
-            self.assertEqual(load_json(p, {"x": 9}), {"x": 9})
+            missing = Path(d) / "missing.json"
+            self.assertEqual(load_json(missing, {"x": 9}), {"x": 9})
 
 
 class TestJobDisplay(unittest.TestCase):
@@ -138,55 +122,52 @@ class TestJobDisplay(unittest.TestCase):
 
 
 class TestFindSubtitle(unittest.TestCase):
-    def test_find_existing(self):
+    def test_find_existing_and_match_video(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            vid = d / "movie.mp4"
+            # 子目录隔离：find_existing 只认同名/带语言后缀字幕
+            zh_dir = d / "zh"; zh_dir.mkdir()
+            vid = zh_dir / "movie.mp4"
             vid.write_text("x")
-            sub = d / "movie.zh.srt"
-            sub.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
-            self.assertEqual(find_existing_subtitle(vid), sub)
-
-    def test_match_video(self):
-        with tempfile.TemporaryDirectory() as d:
-            d = Path(d)
-            vid = d / "movie.mp4"
-            vid.write_text("x")
-            sub = d / "movie.srt"
-            sub.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
-            self.assertEqual(match_video_for_subtitle(sub, d), vid)
+            zh = zh_dir / "movie.zh.srt"
+            zh.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            self.assertEqual(find_existing_subtitle(vid), zh)
+            # match_video 从 .srt 反查视频
+            mv_dir = d / "mv"; mv_dir.mkdir()
+            mv = mv_dir / "movie.srt"
+            mv.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            (mv_dir / "movie.mp4").write_text("x")
+            self.assertEqual(match_video_for_subtitle(mv, mv_dir), mv_dir / "movie.mp4")
 
 
 class TestAnalyzeSubtitleQuality(unittest.TestCase):
     """质量报告：计数 + 样例，覆盖空条/过长/间隙等硬伤"""
 
-    def test_clean_blocks_zero_issues(self):
-        blocks = [
+    def test_clean_and_detects_issues(self):
+        # 干净字幕：0 问题
+        clean = [
             SubtitleBlock(1, 0.0, 2.0, "Hello"),
             SubtitleBlock(2, 2.5, 4.0, "World"),
         ]
-        report = analyze_subtitle_quality(blocks)
+        report = analyze_subtitle_quality(clean)
         self.assertEqual(report["total_issues"], 0)
         self.assertEqual(report["total_cues"], 2)
         self.assertTrue(all(v == 0 for v in report["counts"].values()))
         lines = format_quality_report(report)
         self.assertTrue(any("通过" in ln for ln in lines))
-
-    def test_detects_empty_long_gap_overlap(self):
-        blocks = [
+        # 含 too_long/empty/gap/overlap/too_short 的坏字幕
+        bad = [
             SubtitleBlock(1, 0.0, 20.0, "long cue"),          # too_long
             SubtitleBlock(2, 20.0, 21.0, "   "),              # empty
             SubtitleBlock(3, 40.0, 41.0, "after gap"),        # gap > 10
             SubtitleBlock(4, 40.5, 41.5, "overlap"),          # overlap with #3
             SubtitleBlock(5, 42.0, 42.1, "tiny"),             # too_short
         ]
-        report = analyze_subtitle_quality(blocks, sample_limit=10)
+        report = analyze_subtitle_quality(bad, sample_limit=10)
         c = report["counts"]
-        self.assertGreaterEqual(c["too_long"], 1)
-        self.assertGreaterEqual(c["empty"], 1)
-        self.assertGreaterEqual(c["gap"], 1)
-        self.assertGreaterEqual(c["overlap"], 1)
-        self.assertGreaterEqual(c["too_short"], 1)
+        for key in ("too_long", "empty", "gap", "overlap", "too_short"):
+            with self.subTest(key=key):
+                self.assertGreaterEqual(c[key], 1)
         self.assertGreater(report["total_issues"], 0)
         self.assertTrue(report["samples"])
         lines = format_quality_report(report)

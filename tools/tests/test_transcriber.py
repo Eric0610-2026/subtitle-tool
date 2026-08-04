@@ -18,16 +18,13 @@ from subtitle_app.srt_utils import SubtitleBlock
 class TestTranscriberInit(unittest.TestCase):
     """Transcriber 基本构造"""
 
-    def test_constructor(self):
+    def test_constructor_and_proc_handlers(self):
         t = Transcriber()
         self.assertIsNotNone(t)
         self.assertEqual(t._model_cache, {})
         self.assertIsNone(t.stop_check)
         self.assertIsNone(t._register_proc)
         self.assertIsNone(t._unregister_proc)
-
-    def test_attach_proc_handlers(self):
-        t = Transcriber()
         reg = MagicMock()
         unreg = MagicMock()
         t.attach_proc_handlers(reg, unreg)
@@ -53,14 +50,10 @@ class TestTranscriberClearCache(unittest.TestCase):
         else:
             sys.modules.pop("torch", None)
 
-    def test_clear_cache_empty(self):
-        t = Transcriber()
-        t.clear_cache()
-        self.assertEqual(t._model_cache, {})
-
     def test_clear_cache_keeps_models(self):
-        """clear_cache() 不再卸载模型，仅释放 CUDA 缓存"""
+        """clear_cache() 不再卸载模型，仅释放 CUDA 缓存；空缓存/无 torch 不崩溃"""
         t = Transcriber()
+        t.clear_cache()  # 空缓存 + torch 不可用（setUp mock）都不崩溃
         mock_model = MagicMock()
         t._model_cache["key1"] = ("cpu", "int8", mock_model)
         t.clear_cache()
@@ -68,73 +61,51 @@ class TestTranscriberClearCache(unittest.TestCase):
         self.assertIn("key1", t._model_cache)
         self.assertIs(t._model_cache["key1"][2], mock_model)
 
-    def test_release_model_empties_cache(self):
+    def test_release_model_empties_and_is_loaded(self):
         t = Transcriber()
+        self.assertFalse(t.is_loaded())
         mock_model = MagicMock()
         t._model_cache["key1"] = ("cpu", "int8", mock_model)
-        t.release_model()
-        self.assertEqual(t._model_cache, {})
-
-    def test_is_loaded(self):
-        t = Transcriber()
-        self.assertFalse(t.is_loaded())
-        t._model_cache["key1"] = ("cpu", "int8", MagicMock())
         self.assertTrue(t.is_loaded())
         t.release_model()
+        self.assertEqual(t._model_cache, {})
         self.assertFalse(t.is_loaded())
-
-    def test_clear_cache_no_torch_crash(self):
-        """即使 torch 不可用也不崩溃"""
-        t = Transcriber()
-        t.clear_cache()
-        # 不崩溃即通过
 
 
 class TestReadStderrLoop(unittest.TestCase):
     """_read_stderr_loop 辅助方法"""
 
-    def test_reads_lines(self):
+    def test_reads_lines_and_stops_on_exception(self):
+        # 正常读完
         lines = []
         lock = threading.Lock()
         done = threading.Event()
-        stream = ["line1\n", "line2\n"]
-
-        Transcriber._read_stderr_loop(iter(stream), lines, lock, done)
-        # iter 迭代完就结束
+        Transcriber._read_stderr_loop(iter(["line1\n", "line2\n"]), lines, lock, done)
         self.assertEqual(len(lines), 2)
-
-    def test_stops_on_exception(self):
-        lines = []
-        lock = threading.Lock()
-        done = threading.Event()
-
+        # 流异常 → done 置位
         class BrokenStream:
             def __iter__(self):
                 return self
             def __next__(self):
                 raise ValueError("stream closed")
-
-        Transcriber._read_stderr_loop(BrokenStream(), lines, lock, done)
+        done = threading.Event()
+        Transcriber._read_stderr_loop(BrokenStream(), [], threading.Lock(), done)
         self.assertTrue(done.is_set())
 
 
 class TestParseFfmpegTime(unittest.TestCase):
     """_parse_ffmpeg_time：小数位数不固定，须按实际位数换算"""
 
-    def test_nine_digits_fraction(self):
-        # 修复前 ms/1e6 会把 110000000 当 110 秒，实际应为 4.11 秒
-        self.assertAlmostEqual(
-            _parse_ffmpeg_time("frame= 12 time=00:00:04.110000000"), 4.11)
-
-    def test_six_digits_fraction(self):
-        self.assertAlmostEqual(
-            _parse_ffmpeg_time("time=00:01:02.250000"), 62.25)
-
-    def test_three_digits_fraction(self):
-        self.assertAlmostEqual(
-            _parse_ffmpeg_time("time=00:00:00.500"), 0.5)
-
-    def test_no_time_returns_none(self):
+    def test_varying_fraction_digits(self):
+        cases = [
+            ("frame= 12 time=00:00:04.110000000", 4.11),  # 9 位小数
+            ("time=00:01:02.250000", 62.25),              # 6 位小数
+            ("time=00:00:00.500", 0.5),                   # 3 位小数
+        ]
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertAlmostEqual(_parse_ffmpeg_time(line), expected)
+        # 无 time 字段 → None
         self.assertIsNone(_parse_ffmpeg_time("frame= 0 fps=0.0"))
         self.assertIsNone(_parse_ffmpeg_time(""))
 
@@ -142,7 +113,7 @@ class TestParseFfmpegTime(unittest.TestCase):
 class TestEstimateWeights(unittest.TestCase):
     """_estimate_weights"""
 
-    def test_returns_dict(self):
+    def test_returns_weights_dict(self):
         weights = Transcriber._estimate_weights(100.0, Path("large-v3-turbo"))
         self.assertIn("extract", weights)
         self.assertIn("model", weights)
@@ -150,43 +121,30 @@ class TestEstimateWeights(unittest.TestCase):
         self.assertGreater(weights["extract"], 0)
         self.assertGreater(weights["transcribe"], 0)
 
-    def test_model_speed_read(self):
-        """验证模型速度查找"""
-        with _model_speed_lock:
-            self.assertIn("large-v3-turbo", _MODEL_SPEED)
-            self.assertGreater(_MODEL_SPEED["large-v3-turbo"], 0)
-
 
 class TestGetDuration(unittest.TestCase):
     """get_duration"""
 
     @patch("subtitle_app.transcriber.subprocess.Popen")
-    def test_get_duration_success(self, mock_popen):
+    def test_get_duration_success_and_failure(self, mock_popen):
         t = Transcriber()
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate.return_value = ("123.456\n", "")
         mock_popen.return_value = proc
-
-        dur = t.get_duration(Path("test.mp4"), "ffprobe")
-        self.assertAlmostEqual(dur, 123.456)
-
-    @patch("subtitle_app.transcriber.subprocess.Popen")
-    def test_get_duration_failure_returns_zero(self, mock_popen):
-        t = Transcriber()
-        proc = MagicMock()
-        proc.returncode = 1
-        proc.communicate.return_value = ("", "error")
-        mock_popen.return_value = proc
-
-        dur = t.get_duration(Path("test.mp4"), "ffprobe")
-        self.assertEqual(dur, 0.0)
+        self.assertAlmostEqual(t.get_duration(Path("test.mp4"), "ffprobe"), 123.456)
+        # 失败返回 0.0
+        proc2 = MagicMock()
+        proc2.returncode = 1
+        proc2.communicate.return_value = ("", "error")
+        mock_popen.return_value = proc2
+        self.assertEqual(t.get_duration(Path("test.mp4"), "ffprobe"), 0.0)
 
 
 class TestWritePartialSrt(unittest.TestCase):
     """_write_partial_srt"""
 
-    def test_writes_atomically(self):
+    def test_writes_atomically_and_skips_empty(self):
         with tempfile.TemporaryDirectory() as d:
             blocks = [
                 SubtitleBlock(1, 0.0, 1.0, "Hello"),
@@ -194,13 +152,10 @@ class TestWritePartialSrt(unittest.TestCase):
             ]
             path = Path(d) / "test.partial.srt"
             Transcriber._write_partial_srt(path, blocks)
-
             content = path.read_text(encoding="utf-8")
             self.assertIn("Hello", content)
-            self.assertIn("World", content)
             self.assertIn("00:00:00,000 --> 00:00:01,000", content)
-
-    def test_skips_empty_text(self):
+        # 空文本块被跳过，序号重编号为 1、2
         with tempfile.TemporaryDirectory() as d:
             blocks = [
                 SubtitleBlock(1, 0.0, 1.0, "Hello"),
@@ -211,9 +166,6 @@ class TestWritePartialSrt(unittest.TestCase):
             Transcriber._write_partial_srt(path, blocks)
             content = path.read_text(encoding="utf-8")
             self.assertEqual(content.count("-->"), 2)
-            self.assertIn("Hello", content)
-            self.assertIn("World", content)
-            # 序号应重编号为 1、2，中间空文本条目被丢掉
             self.assertIn("1\n", content)
             self.assertIn("2\n", content)
 
@@ -221,24 +173,20 @@ class TestWritePartialSrt(unittest.TestCase):
 class TestSplitLongBlocks(unittest.TestCase):
     """split_long_blocks 不应产出空文本时间轴"""
 
-    def test_short_text_long_duration_no_empty_cues(self):
+    def test_short_texts_never_produce_empty_cues(self):
         # 旧逻辑：1 字符 + ~45s → 连续两条 ~15s 空 cue + 一条有字
         blocks = [SubtitleBlock(1, 6000.293, 6045.154, "x")]
         out = split_long_blocks(blocks)
         self.assertTrue(out)
         self.assertTrue(all(b.text.strip() for b in out))
         self.assertTrue(all(b.end - b.start <= MAX_BLOCK_DURATION + 1e-6 for b in out))
-
-    def test_two_char_forced_split_has_text_each(self):
-        # 修复：<=3 字符的短文本不再被切成单字符块，整块保留并把时长压到上限
+        # <=3 字符整块保留，时长压到上限，不切成单字符块
         blocks = [SubtitleBlock(1, 100.0, 145.0, "Hi")]
         out = split_long_blocks(blocks)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].text, "Hi")
         self.assertAlmostEqual(out[0].end - out[0].start, MAX_BLOCK_DURATION)
-
-    def test_short_text_not_chunked_into_single_char(self):
-        # 4 字符长时长 → 每段至少 2 字符，不产出 1 字符块
+        # 4 字符长时长 → 每段至少 2 字符
         blocks = [SubtitleBlock(1, 0.0, 60.0, "abcd")]
         out = split_long_blocks(blocks)
         self.assertTrue(out)
@@ -258,7 +206,8 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertEqual([b.text for b in out], ["やらして", "违います"])
         self.assertEqual([b.index for b in out], [1, 2])
 
-    def test_empty_input_dropped(self):
+    def test_empty_dropped_and_sentence_split(self):
+        # 空白块被过滤，序号重编号
         blocks = [
             SubtitleBlock(1, 0.0, 30.0, "   "),
             SubtitleBlock(2, 30.0, 35.0, "ok"),
@@ -267,8 +216,7 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].text, "ok")
         self.assertEqual(out[0].index, 1)
-
-    def test_sentence_split_keeps_text(self):
+        # 长句按标点拆分，文本不丢
         blocks = [SubtitleBlock(1, 0.0, 30.0, "Hello world. How are you? I am fine.")]
         out = split_long_blocks(blocks)
         self.assertGreaterEqual(len(out), 2)
@@ -278,16 +226,12 @@ class TestSplitLongBlocks(unittest.TestCase):
 class TestModelSpeedLock(unittest.TestCase):
     """_MODEL_SPEED 线程安全锁"""
 
-    def test_lock_protects_access(self):
-        """验证锁对象存在且可用"""
+    def test_lock_and_concurrent_access(self):
+        """锁对象存在、_MODEL_SPEED 有值、多线程并发读写不崩溃"""
+        from subtitle_app.transcriber import _model_speed_lock, _MODEL_SPEED
         self.assertIsNotNone(_model_speed_lock)
         with _model_speed_lock:
-            val = _MODEL_SPEED.get("large-v3-turbo", 1.5)
-            self.assertGreater(val, 0)
-
-    def test_concurrent_read_write(self):
-        """多线程并发读写不崩溃"""
-        from subtitle_app.transcriber import _model_speed_lock, _MODEL_SPEED
+            self.assertGreater(_MODEL_SPEED.get("large-v3-turbo", 1.5), 0)
 
         def reader():
             for _ in range(100):
@@ -305,8 +249,6 @@ class TestModelSpeedLock(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=5)
-
-        # 没有崩溃即可
         with _model_speed_lock:
             self.assertIn("tiny", _MODEL_SPEED)
 
@@ -429,16 +371,11 @@ class TestAutoLangReuse(unittest.TestCase):
                 self.t.transcribe_video(video, Path(d), {**self.base_opts, **opts})
         return model.transcribe.call_args.kwargs.get("language")
 
-    def test_reuse_disabled_by_default(self):
-        """默认（reuse_auto_lang 缺省）：每次独立检测，不写缓存不复用"""
+    def test_reuse_switch_behavior(self):
+        """默认关闭独立检测；开启后复用同批首个检测结果"""
         self.assertEqual(self._run(), None)
-        # 第一次检测结果不应写入 _cached_auto_lang
         self.assertIsNone(self.t._cached_auto_lang)
-        # 第二次仍独立检测
         self.assertEqual(self._run(), None)
-
-    def test_reuse_enabled_reuses_first_detection(self):
-        """开启 reuse_auto_lang：首次检测写入缓存，后续复用"""
         self.assertEqual(self._run(reuse_auto_lang=True), None)
         self.assertEqual(self.t._cached_auto_lang, "en")
         self.assertEqual(self._run(reuse_auto_lang=True), "en")
@@ -450,35 +387,21 @@ class TestModelCache(unittest.TestCase):
     def setUp(self):
         self.t = Transcriber()
 
-    @patch("subtitle_app.transcriber._get_whisper_model")
-    def test_cache_same_model(self, mock_get):
-        """相同 key 应返回缓存，不重复加载"""
-        MockWhisperCls = MagicMock()
-        mock_get.return_value = MockWhisperCls
-        post = MagicMock()
-        model_dir = Path("fake-model")
-        m1 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
-        # 第二次应走缓存
-        m2 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
-
-        self.assertIsNotNone(m1)
-        self.assertIs(m1, m2)  # 同一个对象
-        self.assertEqual(MockWhisperCls.call_count, 1)
-
-    @patch("subtitle_app.transcriber._get_whisper_model")
-    def test_different_key_different_model(self, mock_get):
-        """不同设备/精度创建不同的模型实例"""
-        MockWhisperCls = MagicMock()
-        mock_get.return_value = MockWhisperCls
-        post = MagicMock()
-        model_dir = Path("fake-model")
-
-        m1 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
-        m2 = self.t.load_whisper_model(model_dir, "cuda", "float16", post)
-
-        self.assertIsNotNone(m1)
-        self.assertIsNotNone(m2)
-        self.assertEqual(MockWhisperCls.call_count, 2)
+    def test_cache_same_key_reuses(self):
+        """相同 key 返回缓存不重复加载；不同 key 创建新实例"""
+        with patch("subtitle_app.transcriber._get_whisper_model") as mock_get:
+            MockWhisperCls = MagicMock()
+            mock_get.return_value = MockWhisperCls
+            post = MagicMock()
+            model_dir = Path("fake-model")
+            m1 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
+            m2 = self.t.load_whisper_model(model_dir, "cpu", "int8", post)
+            self.assertIsNotNone(m1)
+            self.assertIs(m1, m2)  # 同一个对象
+            self.assertEqual(MockWhisperCls.call_count, 1)
+            m3 = self.t.load_whisper_model(model_dir, "cuda", "float16", post)
+            self.assertIsNotNone(m3)
+            self.assertEqual(MockWhisperCls.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -13,16 +13,12 @@ from subtitle_app.pipeline import SubtitleWorker
 class TestSubtitleWorkerInit(unittest.TestCase):
     """SubtitleWorker 基本构造"""
 
-    def test_constructor(self):
+    def test_constructor_and_stop_requested(self):
         w = SubtitleWorker()
         self.assertIsNotNone(w)
         self.assertFalse(w.stop_requested)
         self.assertIsNone(w.thread)
         self.assertIsNotNone(w.transcriber)
-
-    def test_stop_requested_property(self):
-        w = SubtitleWorker()
-        self.assertFalse(w.stop_requested)
         w.stop_requested = True
         self.assertTrue(w.stop_requested)
         w.stop_requested = False
@@ -35,46 +31,35 @@ class TestSubtitleWorkerProcManagement(unittest.TestCase):
     def setUp(self):
         self.w = SubtitleWorker()
 
-    def test_register_and_unregister(self):
+    def test_register_unregister_and_missing(self):
         proc = MagicMock()
         proc.poll.return_value = None  # 进程仍在运行
         self.w._register_proc(proc)
         self.assertIn(proc, self.w._active_procs)
         self.w._unregister_proc(proc)
         self.assertNotIn(proc, self.w._active_procs)
+        # 注销不存在的进程不报错
+        self.w._unregister_proc(MagicMock())
 
-    def test_unregister_nonexistent(self):
-        """注销不存在的进程不报错"""
-        proc = MagicMock()
-        # 不应抛出异常
-        self.w._unregister_proc(proc)
-
-    def test_terminate_all_procs(self):
+    def test_terminate_all_and_timeout_kill(self):
         proc1 = MagicMock()
         proc1.poll.return_value = None
         proc2 = MagicMock()
         proc2.poll.return_value = 0  # 已退出
-
         self.w._register_proc(proc1)
         self.w._register_proc(proc2)
         self.w._terminate_all_procs()
-
         proc1.terminate.assert_called_once()
         proc1.wait.assert_called_once_with(timeout=5)
         proc2.terminate.assert_not_called()  # 已退出，不终止
-
-    def test_terminate_timeout_falls_back_to_kill(self):
-        """terminate 超时后调用 kill"""
+        # terminate 超时 → kill 兜底
         proc = MagicMock()
         proc.poll.return_value = None
         proc.wait.side_effect = [subprocess.TimeoutExpired("cmd", 5), None]
-
         self.w._register_proc(proc)
         self.w._terminate_all_procs()
-
         proc.terminate.assert_called_once()
-        # 第一次 wait 超时，第二次是 kill 后 wait
-        self.assertEqual(proc.wait.call_count, 2)
+        self.assertEqual(proc.wait.call_count, 2)  # 第一次 wait 超时，第二次是 kill 后 wait
         proc.kill.assert_called_once()
 
 
@@ -82,34 +67,21 @@ class TestStartAndStop(unittest.TestCase):
     """启动和停止"""
 
     @patch("subtitle_app.pipeline.Transcriber")
-    def test_start_creates_thread(self, MockTranscriber):
+    def test_start_stop_and_unstarted_safety(self, MockTranscriber):
         w = SubtitleWorker()
-        jobs = [Path("test.mp4")]
-        opts = {"work_dir": "/tmp", "post": MagicMock()}
-
-        w.start(jobs, opts)
-
+        w.start([Path("test.mp4")], {"work_dir": "/tmp", "post": MagicMock()})
         self.assertIsNotNone(w.thread)
         self.assertTrue(w.thread.daemon)
         self.assertTrue(w.thread.is_alive())
-        # 让线程退出
-        w.stop_requested = True
-        w.thread.join(timeout=2)
-        self.assertFalse(w.thread.is_alive())
-
-    @patch("subtitle_app.pipeline.Transcriber")
-    def test_stop_sets_event(self, MockTranscriber):
-        w = SubtitleWorker()
-        w.start([Path("test.mp4")], {"work_dir": "/tmp", "post": MagicMock()})
-
+        # stop 置位并让线程退出
         w.stop()
         self.assertTrue(w.stop_requested)
-
-    def test_stop_without_start(self):
-        """未 start 时 stop 应安全"""
-        w = SubtitleWorker()
+        w.thread.join(timeout=2)
+        self.assertFalse(w.thread.is_alive())
+        # 未 start 时 stop 应安全
+        w2 = SubtitleWorker()
         try:
-            w.stop()
+            w2.stop()
         except Exception:
             self.fail("stop() on unstarted worker raised exception")
 
@@ -120,17 +92,14 @@ class TestIdxPost(unittest.TestCase):
     def setUp(self):
         self.w = SubtitleWorker()
 
-    def test_idx_post_adds_idx_to_progress(self):
+    def test_idx_post_adds_idx_and_passthrough(self):
         post = MagicMock()
         wrapped = self.w._idx_post(post, 3, 10)
-
+        # progress 事件补 idx/total
         wrapped({"type": "progress", "percent": 50})
         post.assert_called_once_with({"type": "progress", "percent": 50, "idx": 3, "total": 10})
-
-    def test_idx_post_passthrough_non_progress(self):
-        post = MagicMock()
-        wrapped = self.w._idx_post(post, 3, 10)
-
+        # 非 progress 事件原样透传
+        post.reset_mock()
         wrapped({"type": "log", "message": "hello"})
         post.assert_called_once_with({"type": "log", "message": "hello"})
 
@@ -196,22 +165,14 @@ class TestTranscribeStage(unittest.TestCase):
             mock_transcriber.transcribe_video.assert_called_once()
 
     @patch("subtitle_app.pipeline.find_tool")
-    def test_transcribe_stage_missing_file(self, mock_find_tool):
-        """不存在的文件应抛出异常"""
+    def test_transcribe_stage_missing_and_unsupported(self, mock_find_tool):
+        """不存在的文件与不支持格式都应抛出 RuntimeError"""
         mock_find_tool.return_value = None
-
         with self.assertRaises(RuntimeError):
             self.w._transcribe_stage(Path("/nonexistent/file.mp4"), 1, 1, self.base_opts)
-
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_transcribe_stage_unsupported_format(self, mock_find_tool):
-        """不支持的文件格式应抛出异常"""
-        mock_find_tool.return_value = None
-
         with tempfile.TemporaryDirectory() as d:
             bad_file = Path(d) / "test.xyz"
             bad_file.write_text("data", encoding="utf-8")
-
             with self.assertRaises(RuntimeError) as ctx:
                 self.w._transcribe_stage(bad_file, 1, 1, self.base_opts)
             self.assertIn("不支持的文件格式", str(ctx.exception))
@@ -298,71 +259,19 @@ class TestRun(unittest.TestCase):
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")
-    def test_run_serial_completes(self, mock_find_tool, mock_translate):
-        """串行模式（concurrency=1）完成后发出 done 事件"""
+    def test_run_serial_and_parallel_complete(self, mock_find_tool, mock_translate):
+        """串行（concurrency=1）与并行（concurrency=2）完成后都发出 done 事件"""
         mock_find_tool.return_value = None
-        opts = {
-            "work_dir": str(Path.cwd()),
-            "model_dir": "fake",
-            "language": "auto",
-            "device": "cpu",
-            "compute_type": "int8",
-            "translate_enabled": False,
-            "extract_audio": True,
-            "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
-            "skip_completed": False,
-            "post": self.post,
-            "concurrency": 1,
-            "_is_stopped": lambda: False,
-            "_register_proc": MagicMock(),
-            "_unregister_proc": MagicMock(),
-        }
-
-        with tempfile.TemporaryDirectory() as d:
-            srt = Path(d) / "test.srt"
-            srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
-
-            self.w._run([srt], opts)
-            done_calls = [c for c in self.post.call_args_list
-                          if c[0][0].get("type") == "done"]
-            self.assertTrue(len(done_calls) >= 1, "串行模式应发出 done 事件")
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_run_parallel_completes(self, mock_find_tool, mock_translate):
-        """并行流水线模式（concurrency=2）完成后发出 done 事件"""
-        mock_find_tool.return_value = None
-        opts = {
-            "work_dir": str(Path.cwd()),
-            "model_dir": "fake",
-            "language": "auto",
-            "device": "cpu",
-            "compute_type": "int8",
-            "translate_enabled": False,
-            "extract_audio": True,
-            "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
-            "skip_completed": False,
-            "post": self.post,
-            "concurrency": 2,
-            "_is_stopped": lambda: False,
-            "_register_proc": MagicMock(),
-            "_unregister_proc": MagicMock(),
-        }
-
-        with tempfile.TemporaryDirectory() as d:
-            srt = Path(d) / "test.srt"
-            srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
-
-            self.w._run([srt], opts)
-            done_calls = [c for c in self.post.call_args_list
-                          if c[0][0].get("type") == "done"]
-            self.assertTrue(len(done_calls) >= 1, "并行模式应发出 done 事件")
+        for concurrency in (1, 2):
+            with self.subTest(concurrency=concurrency):
+                self.post.reset_mock()
+                with tempfile.TemporaryDirectory() as d:
+                    srt = Path(d) / "test.srt"
+                    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+                    self.w._run([srt], self._make_opts(concurrency))
+                done_calls = [c for c in self.post.call_args_list
+                              if c[0][0].get("type") == "done"]
+                self.assertTrue(len(done_calls) >= 1)
 
 
     @patch("subtitle_app.pipeline.translate_stage")
@@ -371,25 +280,7 @@ class TestRun(unittest.TestCase):
         """_STREAM_END 提前结束消费循环时，仍应上报翻译 future 的异常"""
         mock_find_tool.return_value = None
         mock_translate.side_effect = RuntimeError("translation failed")
-        opts = {
-            "work_dir": str(Path.cwd()),
-            "model_dir": "fake",
-            "language": "auto",
-            "device": "cpu",
-            "compute_type": "int8",
-            "translate_enabled": False,
-            "extract_audio": True,
-            "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
-            "skip_completed": False,
-            "post": self.post,
-            "concurrency": 2,
-            "_is_stopped": lambda: False,
-            "_register_proc": MagicMock(),
-            "_unregister_proc": MagicMock(),
-        }
+        opts = self._make_opts(2)
 
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "test.srt"
@@ -425,28 +316,19 @@ class TestRun(unittest.TestCase):
         }
 
     @patch("subtitle_app.pipeline.translate_stage")
-    def test_run_serial_stop_is_not_error(self, mock_translate):
-        """回归：串行模式用户停止时，转写线程的「用户停止」异常不得报为 error"""
-        self.w.stop_requested = True
-        with patch.object(SubtitleWorker, "_transcribe_stage",
-                          side_effect=RuntimeError("用户停止")):
-            self.w._run([Path("test.mp4")], self._make_opts(1))
-
-        types = [c[0][0].get("type") for c in self.post.call_args_list]
-        self.assertNotIn("error", types, "停止不应发出 error 事件")
-        self.assertIn("done", types, "停止应发出 done 事件")
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    def test_run_parallel_stop_is_not_error(self, mock_translate):
-        """回归：并行流水线用户停止时，不得把「用户停止」报为 error"""
-        self.w.stop_requested = True
-        with patch.object(SubtitleWorker, "_transcribe_stage",
-                          side_effect=RuntimeError("用户停止")):
-            self.w._run([Path("test.mp4"), Path("test2.mp4")], self._make_opts(2))
-
-        types = [c[0][0].get("type") for c in self.post.call_args_list]
-        self.assertNotIn("error", types, "停止不应发出 error 事件")
-        self.assertIn("done", types, "停止应发出 done 事件")
+    def test_run_stop_is_not_error(self, mock_translate):
+        """回归：串行/并行用户停止时，转写线程的「用户停止」异常不得报为 error"""
+        for concurrency, files in ((1, ["test.mp4"]), (2, ["test.mp4", "test2.mp4"])):
+            with self.subTest(concurrency=concurrency):
+                self.w.stop_requested = True
+                self.post.reset_mock()
+                with patch.object(SubtitleWorker, "_transcribe_stage",
+                                  side_effect=RuntimeError("用户停止")):
+                    self.w._run([Path(f) for f in files], self._make_opts(concurrency))
+                types = [c[0][0].get("type") for c in self.post.call_args_list]
+                self.assertNotIn("error", types, "停止不应发出 error 事件")
+                self.assertIn("done", types, "停止应发出 done 事件")
+                self.w.stop_requested = False
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.local_service.is_service_running")
