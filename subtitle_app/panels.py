@@ -25,6 +25,17 @@ from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
 
+# 转写实时预览只保留最近这么多块，避免 long 视频块数无限累积导致每次全量重建表格而卡顿
+MAX_LIVE_PREVIEW_BLOCKS = 300
+
+
+def _trim_live_preview(raw: str, max_blocks: int = MAX_LIVE_PREVIEW_BLOCKS) -> str:
+    """实时预览文本裁剪：只保留最近 max_blocks 个 SRT 块（块间以空行分隔）"""
+    parts = raw.split("\n\n")
+    if len(parts) > max_blocks:
+        return "\n\n".join(parts[-max_blocks:])
+    return raw
+
 
 def _silent_text_input(parent, title: str, label: str) -> tuple:
     """无声音的文本输入对话框"""
@@ -394,6 +405,8 @@ class PreviewPanel(QFrame):
 
     def append(self, text: str):
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
+        # 只保留最近若干块：实时预览跟随转写速度，避免长视频数千块时全量重建卡死 UI
+        self._raw_text = _trim_live_preview(self._raw_text)
         self._render_structured_preview()
         self.preview.scrollToBottom()
 

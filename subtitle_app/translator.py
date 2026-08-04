@@ -55,6 +55,19 @@ def _prune_backups(backup_dir: Path, max_files: int) -> None:
             pass
 
 
+def _preview_translation(src: str, t: str) -> str:
+    """翻译预览译文列文本。
+
+    双语模式下 final_texts 元素已是"原文\\n译文"合并文本（见 translate_stage），
+    若译文行以原文开头则去掉原文前缀，避免预览表格译文列重复显示原文。
+    """
+    if "\n" in t:
+        head, _, tail = t.partition("\n")
+        if head.strip() == src.strip():
+            return tail.strip()
+    return t.strip()
+
+
 def translate_stage(result: dict, opts: dict, post: Callable) -> None:
     """翻译阶段入口：消费转写结果，执行翻译+整理输出"""
     post({"type": "translate_status", "file": result["item"].name,
@@ -202,13 +215,14 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
         post({"type": "counter", "generated": idx, "translated": idx,
               "total": total, "cache": client.get_cache_size()})
-        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析
+        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；
+        # 双语模式下 final_texts 已是"原文\n译文"合并文本，译文列只取纯译文行，避免原文重复显示
         preview_lines = []
         for b, t in zip(blocks, final_texts):
             preview_lines.append(str(b.index))
             preview_lines.append(b.timing)
-            preview_lines.append(b.text)
-            preview_lines.append(t)
+            preview_lines.append(b.text.strip())
+            preview_lines.append(_preview_translation(b.text, t))
             preview_lines.append("")
         post({"type": "preview", "message": "\n".join(preview_lines)})
 
@@ -220,7 +234,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 logger.warning("删除翻译状态文件失败: %s", e)
     else:
         final_texts = [block.text for block in blocks]
-        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析
+        # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；单语模式译文列即原文
         preview_lines = []
         for b, t in zip(blocks, final_texts):
             preview_lines.append(str(b.index))

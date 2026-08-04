@@ -216,6 +216,8 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertEqual(lines[0], "1")
         self.assertIn("-->", lines[1])
         self.assertEqual(lines[2], "Hello")
+        # 译文列只含纯译文，不得重复显示原文（双语模式下 final_texts 已是"原文\n译文"）
+        self.assertEqual(lines[3], "Hello（中文）")
 
     def test_translate_only_mode(self):
         """仅翻译模式：只输出中文"""
@@ -429,6 +431,33 @@ class TestTranslateOnlyProgressFile(unittest.TestCase):
             data = json.loads(progress_file.read_text(encoding="utf-8"))
             self.assertIn("done", data)
             self.assertIn(str(item.resolve()), data["done"])
+
+
+class TestPreviewTranslation(unittest.TestCase):
+    """_preview_translation：预览译文列不应重复显示原文"""
+
+    def test_bilingual_merged_text_strips_original(self):
+        from subtitle_app.translator import _preview_translation
+        # 双语模式 final_texts = "原文\n译文"
+        self.assertEqual(_preview_translation("Hello", "Hello\n你好"), "你好")
+
+    def test_plain_translation_unchanged(self):
+        from subtitle_app.translator import _preview_translation
+        self.assertEqual(_preview_translation("Hello", "你好"), "你好")
+
+    def test_multi_line_translation_kept(self):
+        from subtitle_app.translator import _preview_translation
+        # 译文本身含多行：去掉原文前缀后保留全部译文行
+        self.assertEqual(
+            _preview_translation("Hello", "Hello\n第一行\n第二行"),
+            "第一行\n第二行",
+        )
+
+    def test_translation_not_starting_with_src_not_stripped(self):
+        from subtitle_app.translator import _preview_translation
+        # 译文不以原文开头（如模型整句重译），不做错误拆分
+        self.assertEqual(
+            _preview_translation("Hello", "你好世界\n再见"), "你好世界\n再见")
 
 
 class TestPruneBackups(unittest.TestCase):
