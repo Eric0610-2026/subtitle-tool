@@ -52,6 +52,21 @@ _ADAPT_ALPHA = 0.2
 # 模型加载锁，防止并发加载同一模型
 _model_load_lock = threading.Lock()
 
+# ffmpeg stderr 进度行示例：time=00:00:04.110000000（小数位数不固定：3/6/9 位等）
+_FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
+
+
+def _parse_ffmpeg_time(line: str) -> Optional[float]:
+    """解析 ffmpeg 进度时间，返回秒。
+
+    小数位数不固定，不能当作固定 6 位微秒；按实际位数换算（如 4.110000000 -> 4.11）。
+    """
+    m = _FFMPEG_TIME_RE.search(line)
+    if m:
+        h, mi, s, frac = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        return h * 3600 + mi * 60 + s + int(frac) / (10 ** len(frac))
+    return None
+
 
 class Transcriber:
     """封装音频提取、模型缓存与 Whisper 转写"""
@@ -141,15 +156,6 @@ class Transcriber:
                                   args=(proc.stderr, stderr_lines, stderr_lock, stderr_done),
                                   daemon=True)
         reader.start()
-
-        time_pattern = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
-
-        def _parse_ffmpeg_time(line: str) -> Optional[float]:
-            m = time_pattern.search(line)
-            if m:
-                h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-                return h * 3600 + mi * 60 + s + ms / 1000000
-            return None
 
         last_progress_time = 0.0
         last_report = 0.0
@@ -348,37 +354,43 @@ class Transcriber:
                     weights = None
 
                 # ── 断点续转：裁剪音频（从已转写位置之后开始）──
-                if checkpoint_enabled and resume_offset > 0.0 and ffmpeg:
-                    trimmed_path = temp_dir / "audio_trimmed.wav"
-                    trim_cmd = [
-                        ffmpeg, "-y",
-                        "-ss", str(resume_offset),
-                        "-i", str(audio_path),
-                        "-acodec", cfg.whisper.audio_codec,
-                        "-ar", str(cfg.whisper.audio_sample_rate),
-                        "-ac", str(cfg.whisper.audio_channels),
-                        str(trimmed_path),
-                    ]
-                    trim_proc = subprocess.Popen(
-                        trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, encoding="utf-8", errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW)
-                    if self._register_proc:
-                        self._register_proc(trim_proc)
-                    try:
-                        trim_proc.wait(timeout=60)
-                    finally:
-                        if self._unregister_proc:
-                            self._unregister_proc(trim_proc)
-                    if trim_proc.returncode != 0 or not trimmed_path.exists():
-                        logger.warning("音频裁剪失败，回退为从头转写")
+                if checkpoint_enabled and resume_offset > 0.0:
+                    if not ffmpeg:
+                        # 无法裁剪时若继续沿用旧段落，会从整段开头再转一遍旧内容导致 SRT 重复。
+                        logger.warning("缺少 ffmpeg，无法按断点裁剪音频续转，回退为从头转写，避免字幕重复")
                         completed_blocks = []
                         resume_offset = 0.0
                     else:
-                        audio_path = trimmed_path
-                        post({"type": "log",
-                              "message": f"音频已裁剪：从 {fmt_duration(resume_offset)} 开始",
-                              "level": "INFO"})
+                        trimmed_path = temp_dir / "audio_trimmed.wav"
+                        trim_cmd = [
+                            ffmpeg, "-y",
+                            "-ss", str(resume_offset),
+                            "-i", str(audio_path),
+                            "-acodec", cfg.whisper.audio_codec,
+                            "-ar", str(cfg.whisper.audio_sample_rate),
+                            "-ac", str(cfg.whisper.audio_channels),
+                            str(trimmed_path),
+                        ]
+                        trim_proc = subprocess.Popen(
+                            trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+                        if self._register_proc:
+                            self._register_proc(trim_proc)
+                        try:
+                            trim_proc.wait(timeout=60)
+                        finally:
+                            if self._unregister_proc:
+                                self._unregister_proc(trim_proc)
+                        if trim_proc.returncode != 0 or not trimmed_path.exists():
+                            logger.warning("音频裁剪失败，回退为从头转写")
+                            completed_blocks = []
+                            resume_offset = 0.0
+                        else:
+                            audio_path = trimmed_path
+                            post({"type": "log",
+                                  "message": f"音频已裁剪：从 {fmt_duration(resume_offset)} 开始",
+                                  "level": "INFO"})
 
                 model = self.load_whisper_model(
                     model_dir, device, compute_type, post)
@@ -403,7 +415,7 @@ class Transcriber:
                 #    检测结果以跳过重复检测（适合单一语言目录）。──
                 reuse_lang = opts.get(
                     "reuse_auto_lang", getattr(cfg.whisper, "reuse_auto_lang", False))
-                if language != "auto":
+                if language and language != "auto":
                     transcribe_lang = language
                 elif reuse_lang and self._cached_auto_lang:
                     transcribe_lang = self._cached_auto_lang

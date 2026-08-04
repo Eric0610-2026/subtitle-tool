@@ -15,7 +15,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Lock, get_ident
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import cfg
@@ -525,7 +525,9 @@ class TranslationClient:
         curl = shutil.which("curl.exe") or shutil.which("curl")
         if not curl:
             raise RuntimeError("curl not found")
-        tmp_file = self.cache_path.parent / f".curl_payload_{int(time.time())}_{id(self)}.json"
+        # 并发翻译时多个线程可能同时触发 403 fallback：文件名必须含线程唯一标识，
+        # 否则同一秒内多线程会写同一个临时文件，载荷互相覆盖甚至被提前删除。
+        tmp_file = self.cache_path.parent / f".curl_payload_{int(time.time())}_{get_ident()}_{id(self)}.json"
         save_json(tmp_file, payload)
         try:
             header_args = []
