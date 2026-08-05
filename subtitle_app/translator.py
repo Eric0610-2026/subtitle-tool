@@ -35,6 +35,25 @@ class PauseResponse:
 # ── 备份目录：统一存到 logs/srt_backup（相对于项目根目录）──
 _BACKUP_DIR = Path(__file__).resolve().parent.parent / "logs" / "srt_backup"
 
+# ── 进度文件写锁 ──
+# 并行翻译阶段多个 worker 同时收尾写 cache/.subtitle_ignore.json：
+# 无锁读改写会互相覆盖（丢已完成条目），且共用 tmp 名写盘会抛异常中止整轮。
+_progress_file_lock = threading.Lock()
+
+
+def _record_progress(work_dir, item: Path) -> None:
+    """记录已处理文件到 cache/.subtitle_ignore.json（加锁，防并行覆盖丢条目）"""
+    with _progress_file_lock:
+        progress_file = Path(work_dir) / IGNORE_FILE
+        progress_data = load_json(progress_file, {})
+        done_list = progress_data.setdefault("done", [])
+        abs_path = str(item.resolve())
+        if abs_path not in done_list:
+            done_list.append(abs_path)
+        # 清理历史里遗留的费用字段（功能已移除）
+        progress_data.pop("file_cost", None)
+        save_json(progress_file, progress_data)
+
 
 def _prune_backups(backup_dir: Path, max_files: int) -> None:
     """保留最近 max_files 份 SRT 备份，超出部分按修改时间删除最旧的。
@@ -411,15 +430,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         post({"type": "output_path", "path": str(final_srt.resolve())})
 
     # ── 记录进度 ──
-    progress_file = Path(opts["work_dir"]) / IGNORE_FILE
-    progress_data = load_json(progress_file, {})
-    done_list = progress_data.setdefault("done", [])
-    abs_path = str(item.resolve())
-    if abs_path not in done_list:
-        done_list.append(abs_path)
-    # 清理历史里遗留的费用字段（功能已移除）
-    progress_data.pop("file_cost", None)
-    save_json(progress_file, progress_data)
+    _record_progress(opts["work_dir"], item)
     post({"type": "language", "message": f"语言：{language}"})
 
 

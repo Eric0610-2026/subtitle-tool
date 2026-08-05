@@ -271,5 +271,344 @@ class TestEmbedSubtitlesMissingFiles(unittest.TestCase):
             self.assertEqual(result, (None, False))
 
 
+class TestProbeFirstSubStream(unittest.TestCase):
+    """_probe_first_sub_stream"""
+
+    @patch("subtitle_app.muxer.subprocess.run")
+    def test_probes_first_sub_stream(self, mock_run):
+        from subtitle_app.muxer import _probe_first_sub_stream
+        # 无 ffprobe → None 且不调用
+        self.assertIsNone(_probe_first_sub_stream(None, Path("test.mkv")))
+        mock_run.assert_not_called()
+        # 正常返回
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"streams": [{"index": 1, "codec_name": "subrip", '
+                   '"tags": {"language": "eng"}}]}')
+        info = _probe_first_sub_stream("ffprobe.exe", Path("test.mkv"))
+        self.assertEqual(info["index"], 1)
+        self.assertEqual(info["codec_name"], "subrip")
+        self.assertEqual(info["language"], "eng")
+        # 无字幕流 → None
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"streams": []}')
+        self.assertIsNone(_probe_first_sub_stream("ffprobe.exe", Path("test.mkv")))
+        # 调用异常 → None
+        mock_run.side_effect = FileNotFoundError
+        self.assertIsNone(_probe_first_sub_stream("ffprobe.exe", Path("test.mkv")))
+
+
+class TestExtractEmbeddedSubtitle(unittest.TestCase):
+    """extract_embedded_subtitle"""
+
+    def setUp(self):
+        self._sibling_patcher = patch("subtitle_app.muxer._find_sibling_probe")
+        self.mock_sibling = self._sibling_patcher.start()
+        self.mock_sibling.return_value = "ffprobe.exe"
+        self._probe_patcher = patch("subtitle_app.muxer._probe_first_sub_stream")
+        self.mock_probe = self._probe_patcher.start()
+        self._run_patcher = patch("subtitle_app.muxer._run_ffmpeg")
+        self.mock_run = self._run_patcher.start()
+
+    def tearDown(self):
+        self._probe_patcher.stop()
+        self._sibling_patcher.stop()
+        self._run_patcher.stop()
+
+    def _video(self, d):
+        v = Path(d) / "movie.mkv"
+        v.write_bytes(b"dummy")
+        return v
+
+    def _mock_success(self, cmd, post, timeout, register_proc=None, unregister_proc=None,
+                      timeout_msg=None):
+        """模拟 ffmpeg 成功：创建输出 SRT 文件"""
+        out = Path(cmd[-1])
+        out.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+        proc = MagicMock()
+        proc.returncode = 0
+        return proc, "", ""
+
+    def _mock_failure(self, cmd, post, timeout, register_proc=None, unregister_proc=None,
+                      timeout_msg=None):
+        """模拟 ffmpeg 失败：不创建输出文件"""
+        proc = MagicMock()
+        proc.returncode = 1
+        return proc, "", "some error"
+
+    def test_missing_file(self):
+        from subtitle_app.muxer import extract_embedded_subtitle
+        posts = []
+        srt, status = extract_embedded_subtitle(Path("missing.mkv"), "ffmpeg.exe", posts.append)
+        self.assertIsNone(srt)
+        self.assertIn("不存在", status)
+        self.mock_run.assert_not_called()
+
+    def test_image_subtitle_refused(self):
+        """图像字幕（如 hdmv_pgs_subtitle）必须拒绝，不能尝试转 SRT"""
+        self.mock_probe.return_value = {"index": 1, "codec_name": "hdmv_pgs_subtitle", "language": "eng"}
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, status = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+        self.assertIsNone(srt)
+        self.assertIn("图像字幕", status)
+        self.mock_run.assert_not_called()
+
+    def test_successful_extract(self):
+        """文本字幕流 → ffmpeg 成功 → 返回 SRT 路径"""
+        self.mock_probe.return_value = {"index": 0, "codec_name": "subrip", "language": "eng"}
+        self.mock_run.side_effect = self._mock_success
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, status = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+            out = Path(d) / "movie.srt"
+            self.assertEqual(srt, out)
+            self.assertTrue(out.exists())
+            self.assertIn("提取完成", status)
+            # ffmpeg 命令应包含 -map 0:s:0 与 srt 编码
+            cmd = self.mock_run.call_args[0][0]
+            self.assertIn("-map", cmd)
+            self.assertIn("0:s:0", cmd)
+            self.assertIn("-c:s", cmd)
+            self.assertIn("srt", cmd)
+            self.assertIn(str(out), cmd)
+
+    def test_conflict_name_appends_suffix(self):
+        """同名 SRT 已存在 → 使用 _extracted1.srt 避免覆盖"""
+        self.mock_probe.return_value = {"index": 0, "codec_name": "srt", "language": ""}
+        self.mock_run.side_effect = self._mock_success
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            (Path(d) / "movie.srt").write_text("old", encoding="utf-8")
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, _ = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(srt, Path(d) / "movie_extracted1.srt")
+            self.assertTrue((Path(d) / "movie_extracted1.srt").exists())
+            # 已有文件未被覆盖
+            self.assertEqual((Path(d) / "movie.srt").read_text(encoding="utf-8"), "old")
+
+    def test_conflict_name_second_extract_uses_next_index(self):
+        """movie_extracted1.srt 也已存在 → 使用 _extracted2.srt，绝不静默覆盖"""
+        self.mock_probe.return_value = {"index": 0, "codec_name": "srt", "language": ""}
+        self.mock_run.side_effect = self._mock_success
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            (Path(d) / "movie.srt").write_text("old", encoding="utf-8")
+            (Path(d) / "movie_extracted1.srt").write_text("old1", encoding="utf-8")
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, _ = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(srt, Path(d) / "movie_extracted2.srt")
+            self.assertEqual((Path(d) / "movie_extracted1.srt").read_text(encoding="utf-8"), "old1")
+
+    def test_ffmpeg_failure_cleans_partial(self):
+        """ffmpeg 失败且无输出 → 清理可能的部分文件，返回 None"""
+        self.mock_probe.return_value = {"index": 0, "codec_name": "subrip", "language": ""}
+        self.mock_run.side_effect = self._mock_failure
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, status = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+            self.assertIsNone(srt)
+            self.assertIn("失败", status)
+            self.assertFalse((Path(d) / "movie.srt").exists())
+
+    def test_no_probe_info_still_attempts(self):
+        """探测无结果（无 ffprobe）→ 仍尝试直接提取"""
+        self.mock_probe.return_value = None
+        self.mock_run.side_effect = self._mock_success
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import extract_embedded_subtitle
+            posts = []
+            srt, _ = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(srt, Path(d) / "movie.srt")
+
+
+class TestConvertToMp4(unittest.TestCase):
+    """convert_to_mp4 及辅助函数"""
+
+    def _video(self, d, name="movie.mkv"):
+        v = Path(d) / name
+        v.write_bytes(b"dummy")
+        return v
+
+    def _mock_success(self, cmd, post, timeout, register_proc=None, unregister_proc=None,
+                      timeout_msg=None):
+        """模拟 ffmpeg 成功：创建输出 MP4 文件（需大于 _MP4_MIN_SIZE）"""
+        out = Path(cmd[-1])
+        out.write_bytes(b"x" * 2048)
+        proc = MagicMock()
+        proc.returncode = 0
+        return proc, "", ""
+
+    def _mock_failure(self, cmd, post, timeout, register_proc=None, unregister_proc=None,
+                      timeout_msg=None):
+        """模拟 ffmpeg 失败：不创建输出文件"""
+        proc = MagicMock()
+        proc.returncode = 1
+        return proc, "", "some error"
+
+    def test_next_mp4_path(self):
+        """_next_mp4_path：优先同名，已存在则 _convertedN"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import _next_mp4_path
+            self.assertEqual(_next_mp4_path(v), Path(d) / "movie.mp4")
+            (Path(d) / "movie.mp4").write_bytes(b"x")
+            self.assertEqual(_next_mp4_path(v), Path(d) / "movie_converted1.mp4")
+            (Path(d) / "movie_converted1.mp4").write_bytes(b"x")
+            self.assertEqual(_next_mp4_path(v), Path(d) / "movie_converted2.mp4")
+
+    def test_build_mp4_cmd_excludes_subs(self):
+        """_build_mp4_cmd：默认 copy，且 -sn 排除字幕流"""
+        from subtitle_app.muxer import _build_mp4_cmd
+        cmd = _build_mp4_cmd("ffmpeg.exe", Path("a.mkv"), Path("a.mp4"))
+        self.assertIn("-sn", cmd)
+        self.assertIn("-c:v", cmd)
+        self.assertIn("copy", cmd)
+        self.assertIn("-movflags", cmd)
+        self.assertIn("+faststart", cmd)
+        # 不应出现字幕映射
+        self.assertNotIn("0:s", cmd)
+        # 降级参数生效
+        cmd2 = _build_mp4_cmd("ffmpeg.exe", Path("a.mkv"), Path("a.mp4"),
+                              video_codec="libx264", audio_codec="aac")
+        self.assertIn("libx264", cmd2)
+        self.assertIn("aac", cmd2)
+
+    def test_success_stream_copy(self):
+        """流复制成功 + 时长验证通过 → (mp4, True)"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=self._mock_success) as mock_run, \
+                 patch("subtitle_app.muxer._verify_duration", return_value=(True, "ok")) as mock_verify:
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, Path(d) / "movie.mp4")
+            self.assertTrue(mp4.exists())
+            self.assertTrue(trustworthy)
+            self.assertEqual(mock_run.call_count, 1)  # 首次即成功，不降级
+            mock_verify.assert_called_once()
+
+    def test_fallback_audio_reencode(self):
+        """流复制失败 → 降级音频重编码 → 成功"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            calls = {"n": 0}
+            def flaky(cmd, post, timeout, register_proc=None, unregister_proc=None,
+                      timeout_msg=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    proc = MagicMock()
+                    proc.returncode = 1
+                    return proc, "", "copy failed"
+                return self._mock_success(cmd, post, timeout)
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=flaky) as mock_run, \
+                 patch("subtitle_app.muxer._verify_duration", return_value=(True, "ok")):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, Path(d) / "movie.mp4")
+            self.assertTrue(trustworthy)
+            self.assertEqual(mock_run.call_count, 2)
+            # 第二次尝试应使用 aac 音频
+            cmd2 = mock_run.call_args_list[1][0][0]
+            self.assertIn("aac", cmd2)
+
+    def test_all_attempts_fail(self):
+        """三轮全失败 → (None, False) 且无残留文件"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=self._mock_failure):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertIsNone(mp4)
+            self.assertFalse(trustworthy)
+            self.assertFalse((Path(d) / "movie.mp4").exists())
+            self.assertFalse((Path(d) / "movie_converted1.mp4").exists())
+
+    def test_duration_verify_fail_keeps_file(self):
+        """转换成功但时长验证失败 → 继续降级尝试，最终保留 mp4 但 is_trustworthy=False"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            calls = {"n": 0}
+            def succeed_after_verify(cmd, post, timeout, register_proc=None, unregister_proc=None,
+                                     timeout_msg=None):
+                calls["n"] += 1
+                return self._mock_success(cmd, post, timeout)
+            # 第一级：验证失败；第二级：验证通过
+            verify_results = [False, True]
+            def verify_side(v, m, ff):
+                return verify_results.pop(0), "detail"
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=succeed_after_verify) as mock_run, \
+                 patch("subtitle_app.muxer._verify_duration", side_effect=verify_side):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, Path(d) / "movie.mp4")
+            self.assertTrue(trustworthy)  # 第二级重编码修复了时长问题
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_duration_verify_fail_all_levels(self):
+        """所有级别时长验证都失败 → 保留 mp4 候选但 is_trustworthy=False"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=self._mock_success), \
+                 patch("subtitle_app.muxer._verify_duration", return_value=(False, "时长不符")):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, Path(d) / "movie.mp4")
+            self.assertFalse(trustworthy)
+
+    def test_already_mp4_skips(self):
+        """源已是 MP4 → 直接返回原路径 (True)，不调用 ffmpeg"""
+        with tempfile.TemporaryDirectory() as d:
+            v = Path(d) / "movie.mp4"
+            v.write_bytes(b"dummy")
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._run_ffmpeg") as mock_run:
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, v)
+            self.assertTrue(trustworthy)
+            mock_run.assert_not_called()
+
+    def test_best_file_cleaned_by_later_timeout(self):
+        """第一级验证失败记录 best，后续级别超时清理文件 → 返回 (None, False) 而非坏候选"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._video(d)
+            from subtitle_app.muxer import convert_to_mp4
+            calls = {"n": 0}
+            def level1_success_then_timeouts(cmd, post, timeout, register_proc=None,
+                                             unregister_proc=None, timeout_msg=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return self._mock_success(cmd, post, timeout)
+                return None  # 后续级别超时
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=level1_success_then_timeouts), \
+                 patch("subtitle_app.muxer._verify_duration", return_value=(False, "时长不符")):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertIsNone(mp4)
+            self.assertFalse(trustworthy)
+            self.assertFalse((Path(d) / "movie.mp4").exists())
+
+    def test_missing_file(self):
+        """文件不存在 → (None, False)"""
+        from subtitle_app.muxer import convert_to_mp4
+        mp4, trustworthy = convert_to_mp4(Path("missing.mkv"), "ffmpeg.exe", [].append)
+        self.assertIsNone(mp4)
+        self.assertFalse(trustworthy)
+
+
 if __name__ == "__main__":
     unittest.main()

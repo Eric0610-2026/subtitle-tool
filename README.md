@@ -132,6 +132,7 @@ python subtitle_app/subtitle_app.py
 
 - **翻译开关**：不勾选翻译时，仅执行语音转写，生成原文 SRT
 - **MKV 内嵌**：在「更多设置」中可开启「嵌入前暂停」，在弹窗中预览/编辑字幕后再决定是否嵌入
+- **提取内嵌字幕**：点击「📤 提取字幕」按钮，选择含内嵌字幕的视频文件（如 MKV），批量提取其第一个字幕流为独立 SRT；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。勾选「提取后转为 MP4」可同时将视频转换为 MP4（不带字幕，流复制优先、失败自动降级重编码），时长验证通过后删除原文件
 - **并行流水线**：在配置文件的 `translation.concurrency_pipeline` 中设置并行度（默认 2），数值越高批量处理越快
 - **断点续翻**：如处理过程中断，重新添加相同文件会自动检测未完成状态并从中断处继续
 
@@ -152,7 +153,7 @@ python subtitle_app/subtitle_app.py
 | `whisper.language` | 识别语言 | `auto`（自动检测） |
 | `whisper.compute_type` | 计算精度 | `int8_float16` |
 | `whisper.vad_filter` | VAD 语音活动检测过滤 | `true` |
-| `whisper.reuse_auto_lang` | auto 模式下复用同批首个检测语言（混合语言目录请保持关闭） | `false` |
+| `whisper.reuse_auto_lang` | auto 模式下复用同批首个检测语言（混合语言目录请保持关闭） | `true` |
 | `translation.api_url` | 翻译 API 地址 | — |
 | `translation.api_key` | 翻译 API 密钥 | — |
 | `translation.model` | 翻译模型名称 | — |
@@ -181,7 +182,7 @@ python subtitle_app/subtitle_app.py
 │   ├── translator.py              # 翻译阶段编排（翻译 → 落盘 → MKV 内嵌）
 │   ├── pipeline.py                # 并行流水线编排（转写→翻译 多线程）
 │   ├── srt_utils.py               # SRT 解析/写入、进度跟踪、繁简转换
-│   ├── muxer.py                   # MKV 字幕软内嵌
+│   ├── muxer.py                   # MKV 字幕软内嵌、SRT 提取
 │   ├── config.py                  # JSON 配置加载模块
 │   ├── config.example.json        # 配置模板（不含密钥）
 │   └── config.json                # 本地配置（含 API 密钥，不提交到仓库）

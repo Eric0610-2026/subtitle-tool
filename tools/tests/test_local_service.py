@@ -4,7 +4,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from subtitle_app import local_service
 
@@ -42,26 +42,57 @@ class ShutdownRunningTest(unittest.TestCase):
         return patch("subtitle_app.local_service.subprocess.run",
                      return_value=unittest.mock.MagicMock(stdout=stdout_text))
 
-    def test_no_listener_and_kills_listening(self):
+    @staticmethod
+    def _shutdown_with(netstat_out, tasklist_out):
+        """用 fake subprocess.run 驱动 shutdown_running，返回 (ok, 全部命令调用)"""
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[0] == "netstat":
+                return MagicMock(stdout=netstat_out)
+            if cmd[0] in ("tasklist", "taskkill"):
+                return MagicMock(stdout=tasklist_out if cmd[0] == "tasklist" else "")
+            raise AssertionError(f"unexpected cmd: {cmd}")
+
+        with patch("subtitle_app.local_service.subprocess.run", side_effect=fake_run), \
+                patch("subtitle_app.local_service._port_listening", return_value=True):
+            ok = local_service.shutdown_running()
+        return ok, calls
+
+    def test_no_listener_no_action(self):
         # 无 8080 监听 → 不动，不触发 netstat
         with self._netstat_mock("  TCP    127.0.0.1:9999    0.0.0.0:0    LISTENING   1\n") as mrun, \
              patch("subtitle_app.local_service._port_listening", return_value=False):
             ok = local_service.shutdown_running()
         self.assertFalse(ok)
         mrun.assert_not_called()  # 无监听时不应触发 netstat
-        # 8080 被监听 → taskkill 杀掉该 pid
+
+    def test_kills_only_llama_server_listener(self):
+        """8080 监听者中只杀 llama-server.exe，其他进程不动
+
+        tasklist 带 /FI "IMAGENAME eq llama-server.exe" 过滤，只会返回
+        llama-server 行（fake 数据需模拟这一过滤效果）。
+        """
         netstat_out = (
             "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       34368\n"
-            "  TCP    127.0.0.1:9000    0.0.0.0:0              LISTENING       7777\n"
+            "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       99999\n"
         )
-        with self._netstat_mock(netstat_out) as mrun, \
-             patch("subtitle_app.local_service._port_listening", return_value=True):
-            ok = local_service.shutdown_running()
+        tasklist_out = '"llama-server.exe","34368","Console","1","12,345 K"\n'
+        ok, calls = self._shutdown_with(netstat_out, tasklist_out)
         self.assertTrue(ok)
-        taskkill_calls = [c for c in mrun.call_args_list
-                          if c.args and c.args[0] and c.args[0][0] == "taskkill"]
+        taskkill_calls = [c for c in calls if c[0] == "taskkill"]
         self.assertEqual(len(taskkill_calls), 1)
-        self.assertIn("34368", taskkill_calls[0].args[0])
+        self.assertIn("34368", taskkill_calls[0])  # llama-server 被杀
+        self.assertFalse(any("99999" in c for c in taskkill_calls))  # python.exe 不杀
+
+    def test_non_llama_listener_not_killed(self):
+        """8080 被其他程序占用（非 llama-server.exe）→ 不杀、返回 False"""
+        netstat_out = "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       77777\n"
+        tasklist_out = ""  # /FI 过滤后无 llama-server 行
+        ok, calls = self._shutdown_with(netstat_out, tasklist_out)
+        self.assertFalse(ok)
+        self.assertFalse(any(c[0] == "taskkill" for c in calls), "非 llama-server 不得被杀")
 
     def test_shutdown_owned_force_kills_when_terminate_ineffective(self):
         """terminate 后进程仍存活 → taskkill 兜底强杀，避免退出卡顿/残留"""
@@ -188,7 +219,10 @@ class LocalServiceTest(unittest.TestCase):
         p.terminate = lambda: got.append(1) or setattr(p, "returncode", 0)
         local_service._owned_proc = p
         local_service._started_by_us = True
-        local_service.shutdown_owned()
+        # poll() 恒返回 None 会触发 taskkill 兜底分支；patch 掉避免真实执行
+        # （中文系统 taskkill 输出 GBK，text=True 按 UTF-8 解码会抛 UnicodeDecodeError）
+        with patch("subtitle_app.local_service.subprocess.run"):
+            local_service.shutdown_owned()
         self.assertTrue(got)
         self.assertIsNone(local_service._owned_proc)
 

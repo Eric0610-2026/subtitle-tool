@@ -193,6 +193,22 @@ def _listening_pids(timeout: float = 3.0) -> set:
     return pids
 
 
+def _llama_server_pids(timeout: float = 3.0) -> set:
+    """tasklist 定位进程名为 llama-server.exe 的所有 pid（CSV 输出，兼容带逗号的列）"""
+    out = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq llama-server.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True, timeout=timeout)
+    pids = set()
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith('"'):
+            continue
+        cols = line.strip('"').split('","')
+        if len(cols) >= 2 and cols[1].strip().isdigit():
+            pids.add(cols[1].strip())
+    return pids
+
+
 def shutdown_owned() -> None:
     """关闭本会话拉起的 llama-server；terminate 无效时 taskkill 兜底，避免残留"""
     global _owned_proc, _started_by_us
@@ -216,15 +232,16 @@ def shutdown_owned() -> None:
 def shutdown_running() -> bool:
     """按端口关闭 127.0.0.1:8080 上仍运行的 llama-server（无论由谁启动）。
 
-    用于应用退出时兜底清理：直接以 netstat 的 TCP 监听状态定位 pid 并 taskkill，
+    只清理进程名为 llama-server.exe 的监听者：其他程序占用 8080 不碰，
+    避免误杀用户的其他服务。仍以 netstat 的 TCP 监听状态定位 pid，
     不依赖 /health 探测（服务半死/忙时 health 可能挂起导致漏杀与 UI 卡顿）。
     """
     try:
         if not _port_listening(0.3):  # TCP connect 快速判断（无监听超快返回），避免无服务时也跑 netstat
             return False
-        pids = _listening_pids()
+        pids = _listening_pids() & _llama_server_pids()
         if not pids:
-            return False  # 8080 上没有监听，无需清理
+            return False  # 8080 上没有 llama-server 监听，无需清理
         killed = False
         for pid in pids:
             try:

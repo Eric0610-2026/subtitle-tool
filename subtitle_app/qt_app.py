@@ -30,8 +30,8 @@ from .srt_utils import (
     analyze_subtitle_file, format_quality_report,
 )
 from .config import cfg
-from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog
-from .muxer import embed_subtitles_to_video
+from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
+from .muxer import embed_subtitles_to_video, extract_embedded_subtitle, convert_to_mp4
 from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
 from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
 from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
@@ -116,7 +116,7 @@ class SubtitleApp(QMainWindow):
             "extract_audio": cfg.whisper.extract_audio,
             "vad_filter": cfg.whisper.vad_filter,
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
-            "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", False),
+            "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", True),
             "target_lang": cfg.translation.target_lang,
             "translation_mode": getattr(cfg.translation, "mode", "local"),
             "translation_model": _active_preset["model"],
@@ -332,6 +332,7 @@ class SubtitleApp(QMainWindow):
         ar.addWidget(self._make_btn("📋 历史", self._show_history, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("💾 缓存", self._show_cache, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📦 嵌入字幕", self._manual_embed, object_name="bottomBtn"))
+        ar.addWidget(self._make_btn("📤 提取字幕", self._manual_extract, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 导出", self._export_log, object_name="bottomBtn"))
         ar.addStretch()
         main.addLayout(ar)
@@ -402,7 +403,7 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["compute_type"] = values.get("compute_type", "int8_float16")
         raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
         raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
-        raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", False)
+        raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", True)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
         trans["mode"] = values.get("translation_mode", "local")
@@ -757,7 +758,7 @@ class SubtitleApp(QMainWindow):
             "translate_enabled": self.trans_cb.isChecked(),
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
-            "reuse_auto_lang": s.get("reuse_auto_lang", False),
+            "reuse_auto_lang": s.get("reuse_auto_lang", True),
             "api_url": api_url,
             "api_key": api_key,
             "translation_model": tmodel,
@@ -801,6 +802,9 @@ class SubtitleApp(QMainWindow):
     def _start(self):
         if self.worker.thread and self.worker.thread.is_alive():
             QMessageBox.warning(self, "提示", "正在处理中")
+            return
+        if getattr(self, "_manual_embedding", False) or getattr(self, "_manual_extracting", False):
+            QMessageBox.warning(self, "提示", "后台嵌入/提取任务正在执行中，请等待完成")
             return
         jobs = self._active_jobs()
         total = len(self._get_jobs())
@@ -1006,6 +1010,164 @@ class SubtitleApp(QMainWindow):
         else:
             QMessageBox.warning(self, "嵌入失败", "所有文件嵌入失败，请查看日志")
 
+    # ─── 手动提取内嵌字幕 ───
+
+    def _manual_extract(self):
+        """打开提取字幕对话框，批量提取 MKV 内嵌的第一个字幕流为 SRT。
+
+        提取在后台线程执行（daemon），UI 保持响应；完成后通过
+        manual_extract_done 事件弹窗汇总结果。
+        """
+        if getattr(self, "_manual_extracting", False):
+            QMessageBox.warning(self, "提示", "提取任务正在执行中，请等待完成")
+            return
+        if self.worker.thread and self.worker.thread.is_alive():
+            QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再提取")
+            return
+        ffmpeg = find_tool("ffmpeg.exe", APP_DIR) or find_tool("ffmpeg", APP_DIR)
+        if not ffmpeg:
+            QMessageBox.warning(self, "错误", "未找到 ffmpeg，请放在应用目录下")
+            return
+
+        dlg = ExtractDialog(self, self.video_dir.text())
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        files = dlg.get_files()
+        if not files:
+            return
+        convert_mp4 = dlg.should_convert_to_mp4()
+        extra = "\n\n勾选了「提取后转为 MP4」：提取完成后将转换格式，并在转换验证通过后删除原文件。" if convert_mp4 else ""
+        if not self._confirm("确认提取",
+                f"确定要提取这 {len(files)} 个文件的内嵌字幕？{extra}\n\n"
+                "任务将在后台执行，界面可正常操作，完成后会弹出结果提示。"):
+            return
+
+        self._manual_extracting = True
+        self._add_log_entry(f"📤 开始后台提取 {len(files)} 个字幕...")
+        import threading
+        threading.Thread(target=self._manual_extract_worker,
+                         args=(files, ffmpeg, convert_mp4), daemon=True).start()
+
+    def _manual_extract_worker(self, files: list, ffmpeg: str, convert_mp4: bool = False) -> None:
+        """后台提取线程：逐个执行 ffmpeg 提取，可选转 MP4，日志经信号桥回传 UI。
+
+        异常路径也要保证发送 manual_extract_done 复位状态，避免
+        _manual_extracting 永久锁死提取功能；窗口关闭（_closing）后
+        不再发信号，daemon 线程随进程退出。
+        """
+        total = len(files)
+        success = 0
+
+        def post(msg):
+            if msg.get("type") == "log":
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": msg.get("message", ""),
+                    "level": msg.get("level", "INFO"),
+                })
+
+        try:
+            for i, video in enumerate(files, 1):
+                if getattr(self, "_closing", False):
+                    break
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": f"📤 [{i}/{total}] 提取: {video.name}",
+                })
+                srt, status = extract_embedded_subtitle(video, ffmpeg, post)
+                if srt and srt.exists():
+                    success += 1
+                    self.signal_bridge.post({
+                        "type": "log", "message": f"✅ [{i}/{total}] {status}",
+                    })
+                    try:
+                        self.signal_bridge.post({
+                            "type": "output_path", "path": str(srt),
+                        })
+                    except Exception:
+                        pass
+                    if convert_mp4:
+                        self._convert_and_cleanup(video, ffmpeg, post, i, total)
+                else:
+                    self.signal_bridge.post({
+                        "type": "log", "message": f"❌ [{i}/{total}] 提取失败: {video.name} — {status}",
+                        "level": "WARNING",
+                    })
+        except Exception as e:
+            logger.error("后台提取线程异常: %s\n%s", e, traceback.format_exc())
+            try:
+                self.signal_bridge.post({
+                    "type": "log", "message": f"后台提取线程异常: {e}", "level": "ERROR",
+                })
+            except Exception:
+                pass
+        finally:
+            # 无论成功/异常/关闭，都复位标志；窗口已关闭时 UI 侧跳过弹窗
+            try:
+                self.signal_bridge.post({
+                    "type": "manual_extract_done", "success": success, "total": total,
+                })
+            except Exception:
+                pass
+
+    def _convert_and_cleanup(self, video, ffmpeg: str, post, i: int, total: int) -> None:
+        """提取成功后转 MP4；转换验证通过才删除原 MKV，否则保留并警告。
+
+        删除原文件是对用户不可逆的操作，因此只在 convert_to_mp4 明确
+        返回 is_trustworthy=True（时长验证通过）时执行。
+        """
+        mp4, trustworthy = convert_to_mp4(video, ffmpeg, post)
+        if mp4 and mp4.exists():
+            self.signal_bridge.post({
+                "type": "log", "message": f"✅ [{i}/{total}] 转换完成: {mp4.name}",
+            })
+            try:
+                self.signal_bridge.post({
+                    "type": "output_path", "path": str(mp4),
+                })
+            except Exception:
+                pass
+            # 防误删：mp4 与源是同一文件（源本身就是 .mp4 跳过转换）时绝不删除
+            same_file = Path(mp4).resolve() == Path(video).resolve()
+            if trustworthy and not same_file:
+                try:
+                    video.unlink()
+                    self.signal_bridge.post({
+                        "type": "log",
+                        "message": f"✅ [{i}/{total}] 已删除原文件: {video.name}",
+                    })
+                except OSError as e:
+                    self.signal_bridge.post({
+                        "type": "log",
+                        "message": f"删除原文件失败: {e}（保留原文件）", "level": "WARNING",
+                    })
+            elif not trustworthy:
+                self.signal_bridge.post({
+                    "type": "log",
+                    "message": f"⚠️ [{i}/{total}] 时长验证未通过，保留原文件: {video.name}",
+                    "level": "WARNING",
+                })
+            # same_file 时（源已是 MP4）无需删除，静默跳过
+        else:
+            self.signal_bridge.post({
+                "type": "log",
+                "message": f"❌ [{i}/{total}] 转换失败，保留原文件: {video.name}",
+                "level": "WARNING",
+            })
+
+    def _on_manual_extract_done(self, e):
+        """后台提取结束：恢复状态并弹出结果汇总（窗口关闭中则跳过弹窗）"""
+        self._manual_extracting = False
+        if getattr(self, "_closing", False):
+            return
+        success = e.get("success", 0)
+        total = e.get("total", 0)
+        if success:
+            QMessageBox.information(self, "提取完成", f"成功提取 {success}/{total} 个文件")
+        else:
+            QMessageBox.warning(self, "提取失败", "所有文件提取失败，请查看日志")
+
     def _add_log_entry(self, message: str, level: str = "INFO", trace: str = None) -> None:
         # 持久化到日志文件
         py_level = getattr(logging, level.upper(), logging.INFO)
@@ -1203,6 +1365,7 @@ class SubtitleApp(QMainWindow):
             "error": self._handle_error,
             "model_loaded": lambda e: self._update_model_status(),
             "manual_embed_done": self._on_manual_embed_done,
+            "manual_extract_done": self._on_manual_extract_done,
         }
 
     def _handle_output_path(self, e):

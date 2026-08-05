@@ -420,6 +420,39 @@ class TestTranslateOnlyProgressFile(unittest.TestCase):
             self.assertIn("done", data)
             self.assertIn(str(item.resolve()), data["done"])
 
+    def test_record_progress_concurrent_no_lost_update(self):
+        """回归：并行线程同时记录进度 → 不抛异常、全部条目保留（无丢失更新）"""
+        import threading
+
+        from subtitle_app.translator import _record_progress
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            items = [d / f"f{i}.mp4" for i in range(8)]
+            for p in items:
+                p.write_bytes(b"")
+            barrier = threading.Barrier(len(items))
+            errors = []
+
+            def worker(i):
+                barrier.wait()
+                try:
+                    _record_progress(str(d), items[i])
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+
+            ts = [threading.Thread(target=worker, args=(i,)) for i in range(len(items))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+
+            self.assertEqual(errors, [], f"并发记录进度不应抛异常: {errors}")
+            from subtitle_app.srt_utils import IGNORE_FILE, load_json
+            data = load_json(d / IGNORE_FILE, {})
+            self.assertEqual(len(data.get("done", [])), len(items),
+                             "并发写进度文件丢失了条目")
+
 
 class TestPreviewTranslation(unittest.TestCase):
     """_preview_translation：预览译文列不应重复显示原文"""

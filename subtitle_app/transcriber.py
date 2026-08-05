@@ -417,7 +417,7 @@ class Transcriber:
                 #    仅当显式开启 whisper.reuse_auto_lang 时，才复用同批首个
                 #    检测结果以跳过重复检测（适合单一语言目录）。──
                 reuse_lang = opts.get(
-                    "reuse_auto_lang", getattr(cfg.whisper, "reuse_auto_lang", False))
+                    "reuse_auto_lang", getattr(cfg.whisper, "reuse_auto_lang", True))
                 if language and language != "auto":
                     transcribe_lang = language
                 elif reuse_lang and self._cached_auto_lang:

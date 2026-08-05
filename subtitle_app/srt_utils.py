@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -150,7 +151,9 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # 临时文件名带线程标识：并行场景下多个线程可能同时写同一文件，
+    # 共用同一 tmp 名会互相截断/删除导致异常；唯一名保证各自原子替换（后写者胜）。
+    tmp = path.with_suffix(path.suffix + ".tmp." + str(threading.get_ident()))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

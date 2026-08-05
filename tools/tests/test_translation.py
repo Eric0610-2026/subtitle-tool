@@ -4,6 +4,7 @@
 import unittest
 import tempfile
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from subtitle_app.srt_utils import SubtitleBlock
@@ -114,6 +115,75 @@ class TestTranslationClient(unittest.TestCase):
                 for t in threads:
                     t.join()
             self.assertEqual(len(seen), 4)  # 4 个线程各自生成了不同文件名
+
+
+class TestParagraphContext(unittest.TestCase):
+    """段落上下文（Bug #3）：同段批次串行带上文，跨段批次互不阻塞"""
+
+    @staticmethod
+    def _client(d, **kw):
+        return TranslationClient("url", "key", "m",
+                                 Path(d) / "cache.json", lambda *a: None, **kw)
+
+    @staticmethod
+    def _fake_translate(calls):
+        def fake(texts, context="", depth=0):
+            calls.append((list(texts), context))
+            return [{"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
+        return fake
+
+    def test_same_para_batch_gets_previous_translation_as_context(self):
+        """同段两批（batch_size=1）：第二批的 context 应包含第一批的译文"""
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            # 两字幕时间连续（gap=0）→ 同一段落
+            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello one"),
+                      SubtitleBlock(index=2, start=1, end=2, text="Hello two")]
+            calls = []
+            c._translate_batch = self._fake_translate(calls)
+            c.translate_blocks(blocks, "en", is_bilingual=True)
+            self.assertEqual(len(calls), 2)
+            # 第一批无上文
+            self.assertEqual(calls[0][1], "")
+            # 第二批带上第一批译文（段内上下文连续）
+            self.assertIn("（上文）译Hello one", calls[1][1])
+
+    def test_cross_para_batches_not_blocked(self):
+        """不同段落的批次不互相等待：一批阻塞时另一批仍开始执行"""
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            # 时间间隔超过 PARAGRAPH_GAP → 不同段落
+            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello one"),
+                      SubtitleBlock(index=2, start=10, end=11, text="Hello two")]
+            entered = threading.Event()
+            release = threading.Event()
+            calls = []
+
+            def fake(texts, context="", depth=0):
+                calls.append((list(texts), context))
+                if len(calls) == 1:
+                    entered.set()      # 第一个批次开始且阻塞
+                    release.wait(5)
+                return [{"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
+
+            c._translate_batch = fake
+            out = {}
+            t = threading.Thread(target=lambda: out.setdefault(
+                "r", c.translate_blocks(blocks, "en", is_bilingual=True)))
+            t.start()
+            try:
+                self.assertTrue(entered.wait(3), "第一批应已开始")
+                deadline = time.time() + 3
+                while len(calls) < 2 and time.time() < deadline:
+                    time.sleep(0.05)
+                # 第一批仍在阻塞，第二批（不同段）已开始 → 未互相等待
+                self.assertGreaterEqual(len(calls), 2)
+                # 跨段批次没有可用的上文（两批互为独立段落）
+                self.assertEqual(calls[1][1], "")
+            finally:
+                release.set()
+                t.join(5)
+            self.assertFalse(t.is_alive(), "translate_blocks 应正常结束")
 
 
 class TestRecursionProtection(unittest.TestCase):
