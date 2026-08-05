@@ -31,7 +31,7 @@
     "checkpoint_enabled": true,
     "checkpoint_interval": 30,
     "word_timestamps": false,
-    "reuse_auto_lang": false,
+    "reuse_auto_lang": true,
     "model_speed_factors": {
       "tiny": 0.3, "base": 0.5, "small": 0.8,
       "medium": 1.5, "large": 3.0, "large-v3": 3.5,

@@ -39,7 +39,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 | `translator.py` | 翻译阶段编排：翻译→组装双语→落盘→MKV 内嵌→备份 |
 | `pipeline.py` | 串行/并行流水线编排、`_DaemonThreadPoolExecutor`、停止管理 |
 | `srt_utils.py` | SRT 解析/写入、断句、繁简转换、`OverallProgress`、质量检查 |
-| `muxer.py` | MKV 软内嵌、.ts 修复重封装、时长验证 |
+| `muxer.py` | MKV 软内嵌、从视频提取内嵌字幕、MKV→MP4 转换（ffprobe 探测 + ffmpeg，时长验证后删除原文件） |
 | `local_service.py` | 本地 Hy-MT2 llama-server 自动拉起/探测/退出清理 |
 | `config.py` | 读取 config.json → `SimpleNamespace` 单例 `cfg` |
 
@@ -58,6 +58,8 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   主线程 `_handle_event` 按类型分发（`_event_handlers` 只构建一次）。
 - **翻译**：`translation.py` 内 `ThreadPoolExecutor` 并发批量调 API；
   进程级共享缓存 `_shared_cache` + 全局锁防并发写盘覆盖；句子级去重。
+  段落上下文用「future 链」实现：worker 内等本段前一批完成再带 `（上文）…` 提交，
+  段内严格有序、段间并行（`para_gate`/`para_context`）。
 - **批大小**：本地模式读 `cfg.translation.batch_size`，联网模式读
   `cfg.translation.batch_size_online`；永久保存时 `_batch_size_save_field` 按 mode 写对应字段。
 - **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；

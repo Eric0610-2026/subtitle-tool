@@ -326,8 +326,8 @@ class TestTranscribeVideoBasic(unittest.TestCase):
 
 
 class TestAutoLangReuse(unittest.TestCase):
-    """语言检测复用开关：默认关闭（混合语言目录每文件独立检测），
-    仅当显式开启 reuse_auto_lang 时复用同批首个检测结果"""
+    """语言检测复用开关：默认开启（单一语言目录更快），
+    显式关闭 reuse_auto_lang 时每文件独立检测（适合混合语言目录）"""
 
     class FakeSegment:
         def __init__(self, start, end, text):
@@ -371,14 +371,17 @@ class TestAutoLangReuse(unittest.TestCase):
                 self.t.transcribe_video(video, Path(d), {**self.base_opts, **opts})
         return model.transcribe.call_args.kwargs.get("language")
 
-    def test_reuse_switch_behavior(self):
-        """默认关闭独立检测；开启后复用同批首个检测结果"""
+    def test_reuse_default_on(self):
+        """默认开启：首个检测后同批复用"""
         self.assertEqual(self._run(), None)
-        self.assertIsNone(self.t._cached_auto_lang)
-        self.assertEqual(self._run(), None)
-        self.assertEqual(self._run(reuse_auto_lang=True), None)
         self.assertEqual(self.t._cached_auto_lang, "en")
-        self.assertEqual(self._run(reuse_auto_lang=True), "en")
+        self.assertEqual(self._run(), "en")
+
+    def test_reuse_disabled_detects_each_file(self):
+        """显式关闭 revert 每文件独立检测：不缓存、不复用"""
+        self.assertEqual(self._run(reuse_auto_lang=False), None)
+        self.assertIsNone(self.t._cached_auto_lang)
+        self.assertEqual(self._run(reuse_auto_lang=False), None)
 
 
 class TestModelCache(unittest.TestCase):

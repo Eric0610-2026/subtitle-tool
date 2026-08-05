@@ -110,6 +110,29 @@ class TestJsonAtomic(unittest.TestCase):
             missing = Path(d) / "missing.json"
             self.assertEqual(load_json(missing, {"x": 9}), {"x": 9})
 
+    def test_concurrent_save_no_corruption(self):
+        """回归：多线程并发 save_json 同一文件 → 不抛异常、文件始终为合法 JSON"""
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "shared.json"
+            errors = []
+
+            def worker(i):
+                for _ in range(20):
+                    try:
+                        save_json(p, {"done": [f"file{i}"]})
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(e)
+
+            ts = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            self.assertEqual(errors, [], f"并发保存不应抛异常: {errors}")
+            data = load_json(p, {})
+            self.assertEqual(len(data.get("done", [])), 1, "最终文件应为完整单条记录")
+
 
 class TestJobDisplay(unittest.TestCase):
     def test_has_icon_and_name(self):

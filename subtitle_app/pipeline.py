@@ -307,8 +307,11 @@ class SubtitleWorker:
                         state_files.append(sf)
             has_state = len(state_files) > 0
             mkv_path = output_dir / f"{safe_stem(item.name)}.mkv"
-            done_marker = mkv_path if is_video else final_srt
-            if done_marker.exists() and not has_state:
+            # 完成标记：视频看内嵌产物 .mkv，音频看翻译产物 {stem}.srt。
+            # 字幕文件的输出与输入同名（{stem}.srt 就是输入本身），存在性无法
+            # 区分"已完成"，一律不按文件存在跳过，避免断点续翻把待翻译的字幕误跳过。
+            done_marker = mkv_path if is_video else (final_srt if is_audio else None)
+            if done_marker is not None and done_marker.exists() and not has_state:
                 file_post({"type": "log", "message": f"跳过：{item.name} 已完成", "level": "INFO"})
                 file_post({"type": "progress", "percent": 100, "stage": "跳过",
                            "detail": "已完成，跳过", "total": total, "cache": 0})
@@ -319,15 +322,19 @@ class SubtitleWorker:
             src_srt_for_retry: Optional[Path] = None
             if has_state:
                 file_post({"type": "log", "message": f"发现未完成的翻译状态，准备断点续翻：{item.name}", "level": "INFO"})
-                for f2 in sorted(output_dir.glob("*.srt")):
-                    if "bak" not in f2.stem and "translated" not in f2.stem and f2.resolve() != final_srt.resolve():
-                        src_srt_for_retry = f2
-                        break
-                if not src_srt_for_retry:
-                    for f2 in sorted(item.parent.glob("*.srt")):
+                if is_subtitle:
+                    # 字幕文件的"原文字幕"就是输入文件本身
+                    src_srt_for_retry = item
+                else:
+                    for f2 in sorted(output_dir.glob("*.srt")):
                         if "bak" not in f2.stem and "translated" not in f2.stem and f2.resolve() != final_srt.resolve():
                             src_srt_for_retry = f2
                             break
+                    if not src_srt_for_retry:
+                        for f2 in sorted(item.parent.glob("*.srt")):
+                            if "bak" not in f2.stem and "translated" not in f2.stem and f2.resolve() != final_srt.resolve():
+                                src_srt_for_retry = f2
+                                break
                 if src_srt_for_retry:
                     file_post({"type": "file_mode", "needs_transcribe": False, "idx": idx})
                     file_post({"type": "log", "message": f"恢复翻译：使用已有字幕 {src_srt_for_retry.name}", "level": "INFO"})

@@ -586,7 +586,7 @@ class SettingsDialog(QDialog):
 
         # ── 语言检测复用开关 ──
         self.reuse_lang_cb = QCheckBox("复用同批语言检测结果（单一语言目录更快）")
-        self.reuse_lang_cb.setChecked(values.get("reuse_auto_lang", False))
+        self.reuse_lang_cb.setChecked(values.get("reuse_auto_lang", True))
         self.reuse_lang_cb.setToolTip("勾选后：auto 模式下第一个文件的检测语言将复用到同批后续文件，"
                                       "跳过重复检测；混合语言目录请保持关闭")
         g1.addWidget(self.reuse_lang_cb, r, 0, 1, 3)
@@ -1445,6 +1445,141 @@ class EmbedDialog(QDialog):
             }
             QPushButton#stopBtn:hover { background:#dc2626; }
             QLineEdit { padding:4px 6px; border:1px solid #e2e8f0; border-radius:4px; }
+        """)
+
+
+class ExtractDialog(QDialog):
+    """提取字幕对话框：选择含内嵌字幕的 MKV 文件，批量提取第一个字幕流为 SRT"""
+
+    def __init__(self, parent, default_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("📤 提取字幕")
+        self.setMinimumSize(620, 420)
+        self.resize(680, 480)
+        self._default_dir = default_dir
+        self._files = []  # [Path, ...]
+        self._setup_ui()
+        self._apply_style()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        title = QLabel("📤 提取字幕 — 从视频文件提取第一个字幕流为 SRT")
+        title.setStyleSheet("font-size:14px; font-weight:600;")
+        layout.addWidget(title)
+
+        list_label = QLabel("待提取文件列表：")
+        list_label.setStyleSheet("font-weight:600;")
+        layout.addWidget(list_label)
+
+        self.table = QListWidget()
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setMinimumHeight(150)
+        layout.addWidget(self.table, 1)
+
+        # ── 添加/移除按钮 ──
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("➕ 添加文件")
+        add_btn.clicked.connect(self._browse_files)
+        add_btn.setObjectName("accentBtn")
+        btn_row.addWidget(add_btn)
+        remove_btn = QPushButton("🗑 移除选中")
+        remove_btn.clicked.connect(self._remove_selected)
+        remove_btn.setObjectName("stopBtn")
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        hint = QLabel("提示：仅提取第一个（默认）字幕流；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#64748b; font-size:11px;")
+        layout.addWidget(hint)
+
+        # ── 转换选项 ──
+        self.convert_cb = QCheckBox("提取后转为 MP4（不带字幕，转换成功后删除原文件）")
+        self.convert_cb.setChecked(False)
+        layout.addWidget(self.convert_cb)
+
+        # ── 底部按钮 ──
+        bottom_row = QHBoxLayout()
+        self.count_label = QLabel("共 0 个文件")
+        self.count_label.setStyleSheet("color:#64748b;")
+        bottom_row.addWidget(self.count_label)
+        bottom_row.addStretch()
+        self.start_btn = QPushButton("▶ 开始提取")
+        self.start_btn.setObjectName("startBtn")
+        self.start_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self.accept)
+        self.start_btn.setFixedHeight(36)
+        bottom_row.addWidget(self.start_btn)
+        close_btn = QPushButton("✕ 关闭")
+        close_btn.clicked.connect(self.reject)
+        close_btn.setFixedHeight(36)
+        bottom_row.addWidget(close_btn)
+        layout.addLayout(bottom_row)
+
+    def _browse_files(self):
+        """浏览并多选视频文件（含内嵌字幕的 MKV 等）"""
+        exts = " ".join(f"*{e}" for e in sorted(cfg.srt.video_exts))
+        start = self._default_dir
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择视频文件", start, f"视频文件 ({exts})")
+        if not paths:
+            return
+        for p in paths:
+            pp = Path(p)
+            if pp not in self._files:
+                self._files.append(pp)
+        self._refresh_table()
+
+    def _remove_selected(self):
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            if 0 <= r < len(self._files):
+                del self._files[r]
+        self._refresh_table()
+
+    def _refresh_table(self):
+        self.table.clear()
+        for i, f in enumerate(self._files, 1):
+            item = QListWidgetItem(f"{i}.  {f.name}")
+            item.setToolTip(str(f))
+            item.setData(Qt.UserRole, i - 1)
+            self.table.addItem(item)
+        count = len(self._files)
+        self.count_label.setText(f"共 {count} 个文件")
+        self.start_btn.setEnabled(count > 0)
+
+    def get_files(self):
+        """返回所有待提取的视频文件路径"""
+        return self._files.copy()
+
+    def should_convert_to_mp4(self) -> bool:
+        """是否在提取后转为 MP4"""
+        return self.convert_cb.isChecked()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QListWidget { font-size:12px; }
+            QListWidget::item { padding:4px 8px; }
+            QPushButton#startBtn {
+                background:#22c55e; color:white; border:none;
+                border-radius:6px; padding:8px 20px; font-weight:bold; font-size:13px;
+            }
+            QPushButton#startBtn:hover { background:#16a34a; }
+            QPushButton#startBtn:disabled { background:#94a3b8; }
+            QPushButton#accentBtn {
+                background:#6366f1; color:white; border:none;
+                border-radius:4px; padding:6px 14px;
+            }
+            QPushButton#accentBtn:hover { background:#4f46e5; }
+            QPushButton#stopBtn {
+                background:#ef4444; color:white; border:none;
+                border-radius:4px; padding:6px 14px;
+            }
+            QPushButton#stopBtn:hover { background:#dc2626; }
         """)
 
 

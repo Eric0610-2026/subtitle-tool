@@ -254,7 +254,28 @@ class TranslationClient:
         # Step 3: 批量翻译（多线程并发 API 调用）
         effective_batch_size = len(unique_texts) if self.send_all else self.batch_size
         total_batches = (len(unique_texts) + effective_batch_size - 1) // effective_batch_size
+        # 段落上下文：段号 → 该段已翻译完成的译文（作为后续批次的「上文」）。
+        # worker 内先等本段前一批完成（para_gate 的 future 链），再把译文入表，
+        # 保证段内严格有序；段间互不等待，保留并发。para_lock 保护并发追加。
+        para_lock = Lock()
         para_context: Dict[int, List[str]] = {}
+        para_gate: Dict[int, concurrent.futures.Future] = {}
+        # 缓存命中/断点恢复的译文也算已完成的上文：预填，续翻后上下文才连续
+        for gsid, zh in sent_trans.items():
+            if zh and gsid < len(gsid_to_para):
+                p = gsid_to_para[gsid]
+                para_context.setdefault(p, []).append(zh)
+        for p in para_context:
+            para_context[p] = para_context[p][-CONTEXT_WINDOW:]
+
+        def _ctx_text(paras) -> str:
+            """拼接批次涉及段落的译文上文（每段截取 CONTEXT_WINDOW 条）"""
+            with para_lock:
+                lines = []
+                for p in sorted(paras):
+                    for ctx in para_context.get(p, [])[-CONTEXT_WINDOW:]:
+                        lines.append(f"（上文）{ctx}")
+            return "\n".join(lines) + "\n" if lines else ""
 
         with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
             batch_futures: List[tuple] = []
@@ -271,23 +292,53 @@ class TranslationClient:
                     for gsid in text_to_gsid.get(text, []):
                         if gsid < len(gsid_to_para):
                             para_ids.add(gsid_to_para[gsid])
-                main_para = min(para_ids) if para_ids else 0
-                ctx_list = para_context.get(main_para, [])
-                context_text = ""
-                if ctx_list:
-                    context_lines = [f"（上文）{ctx}" for ctx in ctx_list[-CONTEXT_WINDOW:]]
-                    context_text = "\n".join(context_lines) + "\n"
-                future = executor.submit(self._translate_batch, batch, context_text, 0)
-                batch_futures.append((future, batch, text_to_gsid, batch_id, main_para))
+                # gate = 本批涉及段落的「前一批」future；提交时取好传进 worker，
+                # worker 不读 para_gate，避免读到主线程后续覆盖的 gate
+                gates = [para_gate[p] for p in para_ids if p in para_gate]
 
-            # 按提交顺序处理结果（保证段落上下文连续性）
+                def _job(batch=batch, gates=gates, para_ids=para_ids):
+                    # 段内有序：前一批的译文已被它的 worker 应用进 para_context
+                    for g in gates:
+                        g.result()
+                    context_text = _ctx_text(para_ids)
+                    translations = self._translate_batch(batch, context_text, 0)
+                    applied = _apply_batch_translations(
+                        batch, translations, text_to_gsid, sent_trans,
+                        self.cache, self._cache_lock, self.model, is_bilingual)
+                    with para_lock:
+                        for orig_text, zh_text in applied:
+                            if not zh_text:
+                                continue
+                            for gsid in text_to_gsid.get(orig_text, []):
+                                if gsid < len(gsid_to_para):
+                                    para = gsid_to_para[gsid]
+                                    para_context.setdefault(para, []).append(zh_text)
+                                    para_context[para] = para_context[para][-CONTEXT_WINDOW:]
+                    return batch_id
+
+                future = executor.submit(_job)
+                for p in para_ids:
+                    para_gate[p] = future
+                batch_futures.append((future, batch_id))
+
+            # 按提交顺序收结果（state 串行写盘；异常中止整轮）
             completed_count = 0
-            for future, batch, t2g, batch_id, main_para in batch_futures:
+            for future, batch_id in batch_futures:
                 # 轮询等待，每隔 15s 发送心跳防止 UI 假死
                 while True:
                     try:
-                        translations = future.result(timeout=15)
+                        future.result(timeout=15)
                         break
+                    except RuntimeError:
+                        # 翻译失败：先落盘断点，避免整轮进度丢失
+                        self._save_cache()
+                        if state_path:
+                            save_json(state_path, {
+                                "done": _nonempty_done(sent_trans),
+                                "originals": sent_originals,
+                                "updated_at": datetime.now().isoformat(),
+                            })
+                        raise
                     except (concurrent.futures.TimeoutError, TimeoutError):
                         is_local = ("127.0.0.1" in self.api_url or "localhost" in self.api_url
                                     or "::1" in self.api_url)
@@ -299,28 +350,6 @@ class TranslationClient:
                             "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（{slow_hint}，已完成 {completed_count}/{total_batches} 批）",
                             "total": len(blocks), "cache": len(self.cache),
                         })
-                try:
-                    translations = future.result()
-                except RuntimeError:
-                    self._save_cache()
-                    if state_path:
-                        save_json(state_path, {
-                            "done": _nonempty_done(sent_trans),
-                            "originals": sent_originals,
-                            "updated_at": datetime.now().isoformat(),
-                        })
-                    raise
-                applied = _apply_batch_translations(
-                    batch, translations, t2g, sent_trans, self.cache, self._cache_lock,
-                    self.model, is_bilingual)
-                for orig_text, zh_text in applied:
-                    if not zh_text:
-                        continue
-                    for gsid in t2g.get(orig_text, []):
-                        if gsid < len(gsid_to_para):
-                            para = gsid_to_para[gsid]
-                            para_context.setdefault(para, []).append(zh_text)
-                            para_context[para] = para_context[para][-CONTEXT_WINDOW:]
                 if state_path:
                     save_json(state_path, {
                         "done": _nonempty_done(sent_trans),

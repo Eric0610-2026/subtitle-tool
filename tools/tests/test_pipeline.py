@@ -209,6 +209,36 @@ class TestTranscribeStage(unittest.TestCase):
             # 应发现 translate_state 并进入恢复路径
             self.assertEqual(result["source_srt"], existing_srt)
 
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_transcribe_stage_subtitle_not_skipped(self, mock_find_tool):
+        """回归：断点续翻时字幕文件不得因"输出文件已存在"被误判为已完成跳过
+
+        done_marker 与输入文件同名（{stem}.srt 就是输入本身），存在性无法
+        区分已完成，一律不跳过。
+        """
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.srt"
+            item.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["source_srt"], item)
+
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_transcribe_stage_subtitle_resume_with_state(self, mock_find_tool):
+        """断点续翻：字幕文件 + translate_state.json → 直接以输入文件为源续翻"""
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.srt"
+            item.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            state = Path(d) / "test.translate_state.json"
+            state.write_text('{"done": {"0": "hi"}, "updated_at": "2024-01-01"}', encoding="utf-8")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["source_srt"], item)
+
 
 class TestProcessOne(unittest.TestCase):
     """_process_one 串行处理"""
