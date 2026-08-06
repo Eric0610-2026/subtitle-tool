@@ -541,6 +541,60 @@ def _next_mp4_path(video_path: Path) -> Path:
     return video_path.parent / f"{stem}_converted{n}.mp4"
 
 
+def _strip_mp4_subs(video_path: Path, ffmpeg_bin: str, post: Callable,
+                    register_proc=None, unregister_proc=None) -> Tuple[Optional[Path], bool]:
+    """源已是 MP4：若带内嵌字幕（mov_text 等），重封装为无字幕 MP4 并原子替换原文件。
+
+    返回 (video_path, True)：替换成功且时长验证通过（原文件已为无字幕版本）；
+    返回 (None, False)：失败/验证不通过/替换失败（原文件保留不动）。
+    无内嵌字幕时直接返回 (video_path, True) 跳过，不产生任何写入。
+    """
+    ffprobe = _find_sibling_probe(ffmpeg_bin)
+    if _count_existing_sub_streams(video_path, ffprobe) == 0:
+        post({"type": "log", "message": "源文件已是 MP4 且无内嵌字幕，跳过转换", "level": "INFO"})
+        return video_path, True
+
+    # MP4 源无需 libx264 全重编码：视频/音频必然兼容 MP4 容器，流复制即可
+    temp = video_path.parent / f"{video_path.stem}.nostsub.{os.getpid()}.tmp.mp4"
+    attempts = [
+        ("copy", "copy", "流复制", cfg.translation.embed_timeout),
+        ("copy", "aac", "音频重编码 (aac)", cfg.translation.embed_timeout),
+    ]
+    for vcodec, acodec, desc, timeout in attempts:
+        cmd = _build_mp4_cmd(ffmpeg_bin, video_path, temp, vcodec, acodec)
+        cmd_str = " ".join(str(a) for a in cmd)
+        post({"type": "log", "message": f"去除内嵌字幕（{desc}）...", "level": "INFO"})
+
+        result = _run_ffmpeg(cmd, post, timeout, register_proc, unregister_proc,
+                             timeout_msg=f"去字幕转换超时（ffmpeg 超过 {timeout}s）")
+        if result is None:
+            _cleanup_file(temp)
+            continue
+
+        proc, _, stderr = result
+        if proc.returncode == 0 and temp.exists() and temp.stat().st_size > _MP4_MIN_SIZE:
+            ok, detail = _verify_duration(video_path, temp, ffmpeg_bin)
+            post({"type": "log", "message": f"{desc}输出 {temp.name} | {detail}",
+                  "level": "WARNING" if not ok else "INFO"})
+            if ok:
+                try:
+                    os.replace(temp, video_path)
+                except OSError as e:
+                    post({"type": "log",
+                          "message": f"替换原文件失败: {e}（保留原文件）", "level": "WARNING"})
+                    _cleanup_file(temp)
+                    return None, False
+                post({"type": "log",
+                      "message": f"✅ 已移除内嵌字幕并替换原文件: {video_path.name}", "level": "INFO"})
+                return video_path, True
+            # 时长验证失败：继续降级尝试（重编码可能修复容器兼容问题）
+            post({"type": "log", "message": "时长验证未通过，尝试更高兼容性转换...", "level": "WARNING"})
+        else:
+            _log_ffmpeg_error(post, cmd_str, proc, stderr)
+        _cleanup_file(temp)
+    return None, False
+
+
 def convert_to_mp4(video_path: Path, ffmpeg_bin: str, post: Callable,
                    register_proc=None, unregister_proc=None) -> Tuple[Optional[Path], bool]:
     """将视频（通常是 MKV）转换为 MP4，仅保留视频/音频流（不带字幕）。
@@ -550,8 +604,10 @@ def convert_to_mp4(video_path: Path, ffmpeg_bin: str, post: Callable,
     - is_trustworthy: True 表示时长验证通过，可以安全删除原文件；
                       False 表示异常（时长不符或无法验证），严禁删除原文件
 
-    源文件本身就是 .mp4 时无需转换，直接返回 (video_path, True)；
-    调用方在删除前必须确认 mp4 与源不是同一文件（防止误删用户原文件）。
+    源文件本身就是 .mp4 时走 _strip_mp4_subs：无内嵌字幕则跳过，直接返回
+    (video_path, True)；带内嵌字幕则去字幕重封装并替换原文件，同样返回
+    (video_path, True)。调用方在删除前必须确认 mp4 与源不是同一文件
+    （防止误删用户原文件）。
 
     流程：
     1. 主命令：流复制（-c:v copy -c:a copy）+ faststart
@@ -563,8 +619,8 @@ def convert_to_mp4(video_path: Path, ffmpeg_bin: str, post: Callable,
     if not video_path.exists():
         return None, False
     if video_path.suffix.lower() == ".mp4":
-        post({"type": "log", "message": "源文件已是 MP4，跳过转换", "level": "INFO"})
-        return video_path, True
+        return _strip_mp4_subs(video_path, ffmpeg_bin, post,
+                               register_proc, unregister_proc)
 
     mp4_path = _next_mp4_path(video_path)
 
