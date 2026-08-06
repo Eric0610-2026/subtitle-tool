@@ -569,18 +569,57 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertEqual(mp4, Path(d) / "movie.mp4")
             self.assertFalse(trustworthy)
 
-    def test_already_mp4_skips(self):
-        """源已是 MP4 → 直接返回原路径 (True)，不调用 ffmpeg"""
+    def test_mp4_without_subs_skips(self):
+        """源已是 MP4 且无内嵌字幕 → 跳过，不调用 ffmpeg，原文件不变"""
         with tempfile.TemporaryDirectory() as d:
             v = Path(d) / "movie.mp4"
-            v.write_bytes(b"dummy")
+            v.write_bytes(b"original")
             from subtitle_app.muxer import convert_to_mp4
-            with patch("subtitle_app.muxer._run_ffmpeg") as mock_run:
+            with patch("subtitle_app.muxer._count_existing_sub_streams", return_value=0), \
+                 patch("subtitle_app.muxer._run_ffmpeg") as mock_run:
                 posts = []
                 mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
             self.assertEqual(mp4, v)
             self.assertTrue(trustworthy)
+            self.assertEqual(v.read_bytes(), b"original")
             mock_run.assert_not_called()
+
+    def test_mp4_with_subs_stripped(self):
+        """源已是 MP4 且带内嵌字幕 → 重封装去字幕并原子替换原文件"""
+        with tempfile.TemporaryDirectory() as d:
+            v = Path(d) / "movie.mp4"
+            v.write_bytes(b"original")
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._count_existing_sub_streams", return_value=1), \
+                 patch("subtitle_app.muxer._run_ffmpeg", side_effect=self._mock_success) as mock_run, \
+                 patch("subtitle_app.muxer._verify_duration", return_value=(True, "ok")) as mock_verify:
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertEqual(mp4, v)
+            self.assertTrue(trustworthy)
+            # 原文件已被无字幕版本原子替换（内容为模拟输出）
+            self.assertEqual(v.read_bytes(), b"x" * 2048)
+            mock_run.assert_called_once()
+            mock_verify.assert_called_once()
+            # 输出应写临时文件再替换，而非直接写目标路径
+            self.assertIn(".tmp.mp4", str(mock_run.call_args[0][0][-1]))
+            # 无临时文件残留
+            self.assertEqual(list(Path(d).glob("*.tmp.mp4")), [])
+
+    def test_mp4_strip_failure_keeps_original(self):
+        """源 MP4 去字幕失败 → (None, False)，原文件保留"""
+        with tempfile.TemporaryDirectory() as d:
+            v = Path(d) / "movie.mp4"
+            v.write_bytes(b"original")
+            from subtitle_app.muxer import convert_to_mp4
+            with patch("subtitle_app.muxer._count_existing_sub_streams", return_value=1), \
+                 patch("subtitle_app.muxer._run_ffmpeg", side_effect=self._mock_failure):
+                posts = []
+                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
+            self.assertIsNone(mp4)
+            self.assertFalse(trustworthy)
+            self.assertEqual(v.read_bytes(), b"original")
+            self.assertEqual(list(Path(d).glob("*.tmp.mp4")), [])
 
     def test_best_file_cleaned_by_later_timeout(self):
         """第一级验证失败记录 best，后续级别超时清理文件 → 返回 (None, False) 而非坏候选"""

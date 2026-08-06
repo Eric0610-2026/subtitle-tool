@@ -1497,9 +1497,9 @@ class ExtractDialog(QDialog):
         hint.setStyleSheet("color:#64748b; font-size:11px;")
         layout.addWidget(hint)
 
-        # ── 转换选项 ──
+        # ── 转换选项（默认勾选：提取后转 MP4，便于播放器兼容）──
         self.convert_cb = QCheckBox("提取后转为 MP4（不带字幕，转换成功后删除原文件）")
-        self.convert_cb.setChecked(False)
+        self.convert_cb.setChecked(True)
         layout.addWidget(self.convert_cb)
 
         # ── 底部按钮 ──
