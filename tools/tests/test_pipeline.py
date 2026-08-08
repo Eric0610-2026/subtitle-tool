@@ -239,6 +239,69 @@ class TestTranscribeStage(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertEqual(result["source_srt"], item)
 
+    @patch("subtitle_app.pipeline.find_tool")
+    @patch("subtitle_app.pipeline.Transcriber")
+    def test_transcribe_stage_state_filtered_by_stem(self, MockTranscriber, mock_find_tool):
+        """断点状态按 stem 过滤：别的视频残留的 translate_state.json 不应让本视频进入续翻"""
+        mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        mock_transcriber = MagicMock()
+        MockTranscriber.return_value = mock_transcriber
+        self.w.transcriber = mock_transcriber
+        mock_transcriber.transcribe_video.return_value = (Path("/tmp/out.srt"), "en")
+
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.mp4"
+            item.write_text("fake", encoding="utf-8")
+            other_state = Path(d) / "other.translate_state.json"
+            other_state.write_text('{"done": {"0": "hi"}}', encoding="utf-8")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            # 未进入恢复路径（has_state=False）→ 走正常转写流程
+            self.assertIsNotNone(result)
+            mock_transcriber.transcribe_video.assert_called_once()
+
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_transcribe_stage_skip_completed_ignores_other_video_state(self, mock_find_tool):
+        """其他视频的 state 不算本视频的断点：mkv 已存在时应正常跳过（不被 state 卡住）"""
+        mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.mp4"
+            item.write_text("fake", encoding="utf-8")
+            (Path(d) / "test.mkv").write_bytes(b"")  # 完成标记
+            other_state = Path(d) / "other.translate_state.json"
+            other_state.write_text('{"done": {"0": "hi"}}', encoding="utf-8")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            self.assertIsNone(result)  # 已完成，跳过
+        skips = [c[0][0] for c in self.post.call_args_list
+                 if c[0][0].get("message", "").startswith("跳过")]
+        self.assertTrue(skips)
+
+    @patch("subtitle_app.pipeline.find_tool")
+    @patch("subtitle_app.pipeline.Transcriber")
+    def test_transcribe_stage_resume_ignores_other_video_subtitle(self, MockTranscriber, mock_find_tool):
+        """断点续翻候选按 stem 过滤：不会拿别的视频的字幕续翻本视频"""
+        mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        mock_transcriber = MagicMock()
+        MockTranscriber.return_value = mock_transcriber
+        self.w.transcriber = mock_transcriber
+        mock_transcriber.transcribe_video.return_value = (Path("/tmp/out.srt"), "en")
+
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.mp4"
+            item.write_text("fake", encoding="utf-8")
+            state = Path(d) / "test.translate_state.json"
+            state.write_text('{"done": {"0": "hi"}}', encoding="utf-8")
+            # 别的视频的字幕：stem 不匹配，不得被选为续翻源
+            other_srt = Path(d) / "other.source.srt"
+            other_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+
+        self.assertIsNotNone(result)
+        # 未找到本视频的源字幕 → 重新转写，而不是拿别的视频的字幕续翻
+        mock_transcriber.transcribe_video.assert_called_once()
+
 
 class TestProcessOne(unittest.TestCase):
     """_process_one 串行处理"""
@@ -360,6 +423,114 @@ class TestRun(unittest.TestCase):
                 self.assertIn("done", types, "停止应发出 done 事件")
                 self.w.stop_requested = False
 
+    def test_run_stop_done_has_stopped_flag(self):
+        """停止时 done 事件带 stopped=True，供 UI 区分停止与完成"""
+        for concurrency in (1, 2):
+            with self.subTest(concurrency=concurrency):
+                self.w.stop_requested = True
+                self.post.reset_mock()
+                with patch.object(SubtitleWorker, "_transcribe_stage", return_value=None):
+                    self.w._run([Path("test.mp4")], self._make_opts(concurrency))
+                done = [c[0][0] for c in self.post.call_args_list
+                        if c[0][0].get("type") == "done"]
+                self.assertTrue(done)
+                self.assertTrue(done[0].get("stopped"), "停止的 done 事件应带 stopped=True")
+                self.w.stop_requested = False
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_serial_continues_after_single_failure(self, mock_find_tool, mock_translate):
+        """串行：一个文件失败不中断整批；部分失败 → done 消息带失败数，不发整体 error"""
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            good = Path(d) / "good.srt"
+            good.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            bad = Path(d) / "bad.xyz"  # 不支持格式 → 单文件失败
+            bad.write_text("...", encoding="utf-8")
+            self.w._run([good, bad], self._make_opts(1))
+
+        events = [c[0][0] for c in self.post.call_args_list]
+        types = [e.get("type") for e in events]
+        self.assertNotIn("error", types, "部分失败不应发出整体 error 事件")
+        done = [e for e in events if e.get("type") == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertIn("1 个文件失败", done[0]["message"])
+        err_logs = [e for e in events if e.get("type") == "log" and e.get("level") == "ERROR"]
+        self.assertTrue(err_logs, "失败文件应有 ERROR 级日志")
+        self.assertIn("bad.xyz", err_logs[0]["message"])
+        # 成功的文件仍被处理
+        mock_translate.assert_called()
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_serial_all_failed_reports_error(self, mock_find_tool, mock_translate):
+        """串行：全部失败 → 发 error 事件而不是"完成" """
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "bad.xyz"
+            bad.write_text("...", encoding="utf-8")
+            self.w._run([bad], self._make_opts(1))
+        events = [c[0][0] for c in self.post.call_args_list]
+        types = [e.get("type") for e in events]
+        self.assertIn("error", types)
+        self.assertNotIn("done", types)
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_parallel_partial_translate_failure_continues(self, mock_find_tool, mock_translate):
+        """并行：翻译阶段部分失败 → 不发整体 error，done 带失败数"""
+        mock_find_tool.return_value = None
+
+        def side_effect(result, opts, post):
+            if result["item"].name == "bad.srt":
+                raise RuntimeError("translation failed")
+
+        mock_translate.side_effect = side_effect
+        with tempfile.TemporaryDirectory() as d:
+            good = Path(d) / "good.srt"
+            good.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            bad = Path(d) / "bad.srt"
+            bad.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            self.w._run([good, bad], self._make_opts(2))
+
+        events = [c[0][0] for c in self.post.call_args_list]
+        types = [e.get("type") for e in events]
+        self.assertNotIn("error", types, "部分失败不应发出整体 error 事件")
+        done = [e for e in events if e.get("type") == "done"]
+        self.assertTrue(done)
+        self.assertIn("1 个文件翻译失败", done[-1]["message"])
+
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_aborts_on_same_stem_conflict(self, mock_find_tool):
+        """同目录 a.mp4 + a.mkv：输出名冲突，直接报 error 且不处理任何文件"""
+        opts = self._make_opts(1)
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "a.mp4"
+            a.write_bytes(b"")
+            b = Path(d) / "a.mkv"
+            b.write_bytes(b"")
+            with patch.object(SubtitleWorker, "_process_one") as mock_one:
+                self.w._run([a, b], opts)
+            mock_one.assert_not_called()
+        errors = [c[0][0] for c in self.post.call_args_list
+                  if c[0][0].get("type") == "error"]
+        self.assertTrue(errors)
+        self.assertIn("覆盖", errors[0]["message"])
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_same_stem_subtitle_not_conflict(self, mock_find_tool, mock_translate):
+        """a.mp4 + a.srt 是正常用法（字幕作为源文件），不应判为冲突"""
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "a.mp4"
+            a.write_bytes(b"")
+            s = Path(d) / "a.srt"
+            s.write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+            self.w._run([a, s], self._make_opts(1))
+        types = [c[0][0].get("type") for c in self.post.call_args_list]
+        self.assertNotIn("error", types, "字幕+视频同 stem 不应判冲突")
+
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.local_service.is_service_running")
     @patch("subtitle_app.local_service.shutdown_owned")
@@ -369,7 +540,8 @@ class TestRun(unittest.TestCase):
         mock_running.return_value = False
         mock_translate.return_value = None
 
-        self.w._transcribe_stage = lambda item, idx, total, opts: {"path": str(item), "idx": idx, "total": total, "srt": 1}
+        self.w._transcribe_stage = lambda item, idx, total, opts: {
+            "path": str(item), "idx": idx, "total": total, "srt": 1, "item": item}
         releases = []
         self.w.transcriber.release_model = lambda: releases.append(1)
 
@@ -400,7 +572,8 @@ class TestRun(unittest.TestCase):
         mock_running.return_value = True   # 外部服务在跑
         mock_translate.return_value = None
 
-        self.w._transcribe_stage = lambda item, idx, total, opts: {"path": str(item), "idx": idx, "total": total, "srt": 1}
+        self.w._transcribe_stage = lambda item, idx, total, opts: {
+            "path": str(item), "idx": idx, "total": total, "srt": 1, "item": item}
 
         opts = self._make_opts(concurrency=2)
         opts["api_url"] = "http://127.0.0.1:8080/v1/chat/completions"

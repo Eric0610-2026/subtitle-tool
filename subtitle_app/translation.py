@@ -158,7 +158,11 @@ class TranslationClient:
                  send_all: bool = False):
         if batch_size is None:
             batch_size = cfg.translation.batch_size
-        self.batch_size = batch_size
+        # 钳位：0/负数会导致分批 `range(0, len, 0)` 抛 ValueError、`// 0` 抛 ZeroDivisionError
+        try:
+            self.batch_size = max(1, int(batch_size))
+        except (TypeError, ValueError):
+            self.batch_size = max(1, int(cfg.translation.batch_size or 20))
         self.send_all = send_all
         self.api_url = api_url
         self.api_key = api_key

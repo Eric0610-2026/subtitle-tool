@@ -58,6 +58,18 @@ class TestSrtRoundtrip(unittest.TestCase):
         b = SubtitleBlock(index=1, start=1.0, end=3.0, text="x")
         self.assertEqual(b.timing, "00:00:01,000 --> 00:00:03,000")
 
+    def test_parse_srt_gbk_fallback(self):
+        """GBK/ANSI 编码的中文字幕也能解析（Windows 常见）"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "gbk.srt"
+            p.write_bytes(
+                "1\n00:00:01,000 --> 00:00:02,000\n你好世界\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\n第二句\n".encode("gbk"))
+            blocks = parse_srt(p)
+            self.assertEqual(len(blocks), 2)
+            self.assertEqual(blocks[0].text, "你好世界")
+            self.assertEqual(blocks[1].text, "第二句")
+
 
 class TestSplitSentences(unittest.TestCase):
     def test_cjk_english_and_empty(self):
@@ -161,6 +173,20 @@ class TestFindSubtitle(unittest.TestCase):
             mv.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
             (mv_dir / "movie.mp4").write_text("x")
             self.assertEqual(match_video_for_subtitle(mv, mv_dir), mv_dir / "movie.mp4")
+
+    def test_find_existing_ignores_partial(self):
+        """崩溃遗留的 .partial.srt 断点不得被当作成品字幕"""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            vid = d / "movie.mp4"
+            vid.write_text("x")
+            (d / "movie.partial.srt").write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            self.assertIsNone(find_existing_subtitle(vid))
+            # 正常字幕仍能找到
+            (d / "movie.zh.srt").write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            self.assertIsNotNone(find_existing_subtitle(vid))
 
 
 class TestAnalyzeSubtitleQuality(unittest.TestCase):

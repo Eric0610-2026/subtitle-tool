@@ -170,7 +170,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             if api_url.lower().startswith("http://127.0.0.1:8080"):
                 _bs = cfg.translation.batch_size or 20
             else:
-                _bs = getattr(cfg.translation, "batch_size_online", 100)
+                _bs = getattr(cfg.translation, "batch_size_online", 100) or 100
         client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
                                  batch_size=_bs,
                                  target_lang=opts.get("target_lang", "zh"),

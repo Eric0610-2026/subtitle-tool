@@ -123,6 +123,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
         ), False
 
     start_time = time.time()
+    launcher = False
     with _lock:
         if not _started_by_us:
             if not _SERVER.exists():
@@ -137,6 +138,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
                 return False, f"启动本地服务失败：{e}", False
             _owned_proc = proc
             _started_by_us = True
+            launcher = True
             logger.info("已拉起 llama-server（pid=%s）", proc.pid)
 
     # 启动路径：轮询直到就绪或超时，期间定期回调进度
@@ -162,16 +164,19 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
                     pass
         time.sleep(_POLL_INTERVAL)
 
-    # 超时/失败：若该进程是本次拉起的，尝试终止，避免残留
-    proc = _owned_proc
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
-        _owned_proc = None
-    _started_by_us = False
+    # 超时/失败：仅"实际拉起者"有权终止共享服务并重置状态。
+    # 并发等待者各自超时是常态（模型加载慢），若任意等待者超时都能杀进程，
+    # 会反复杀掉大家正在等待的 llama-server，造成"杀-起"抖动、全部翻译失败。
+    if launcher:
+        proc = _owned_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            _owned_proc = None
+        _started_by_us = False
     return False, last_err + "。可能原因：显存不足、模型损坏、或端口被占用。请先关闭已运行的 llama-server 后重试。", False
 
 

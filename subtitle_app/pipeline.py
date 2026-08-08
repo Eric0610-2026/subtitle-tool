@@ -11,7 +11,7 @@ import subprocess
 import threading
 import traceback
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures.thread import _threads_queues, _worker
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -26,6 +26,17 @@ from .transcriber import Transcriber
 from .translator import translate_stage
 
 logger = logging.getLogger(__name__)
+
+
+def _is_resume_srt_candidate(f2: Path, stem: str, final_srt: Path) -> bool:
+    """断点续翻的源字幕候选：与视频同 stem（或带语言后缀），
+    排除备份/译文/断点文件与最终输出本身，避免拿别的视频的字幕续翻"""
+    f_stem = f2.stem
+    if "bak" in f_stem or "translated" in f_stem or "partial" in f_stem:
+        return False
+    if f2.resolve() == final_srt.resolve():
+        return False
+    return f_stem == stem or f_stem.startswith(stem + ".")
 
 
 class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -137,25 +148,44 @@ class SubtitleWorker:
         total = len(jobs)
         p_depth = opts.get("concurrency", 2)
 
+        # 同名 stem 冲突：同目录 a.mp4 / a.mkv 会共用 partial.srt、{stem}.srt、
+        # {stem}.mkv 输出名，并行内嵌时甚至互相覆盖删除 → 直接报错让用户处理
+        conflicts = self._find_stem_conflicts(jobs)
+        if conflicts:
+            names = "、".join(f"{a} 与 {b}" for a, b in conflicts)
+            post({"type": "error",
+                  "message": f"检测到同名不同格式的文件（{names}），输出的字幕/MKV 会互相覆盖。"
+                             "请将其中一方移出该目录或重命名后重试。"})
+            return
+
         # ── 串行模式（concurrency=1）: 不走 pipeline，完全顺序执行 ──
         if p_depth <= 1:
-            try:
-                for idx, item in enumerate(jobs, 1):
-                    if self.stop_requested:
-                        break
-                    self._process_one(item, idx, total, opts)
-                if not self.stop_requested:
-                    post({"type": "done", "message": "所有任务处理完成！"})
-                else:
-                    post({"type": "done", "message": "用户已停止处理"})
-            except Exception as e:
+            errors: List[Tuple[str, Exception, str]] = []
+            for idx, item in enumerate(jobs, 1):
                 if self.stop_requested:
-                    # 用户主动停止时，转写线程抛出的"用户停止"异常不算错误
-                    post({"type": "done", "message": "用户已停止处理"})
-                    return
-                tb = traceback.format_exc()
-                logger.error("处理出错: %s\n%s", e, tb)
+                    break
+                try:
+                    self._process_one(item, idx, total, opts)
+                except Exception as e:
+                    if self.stop_requested:
+                        # 用户主动停止时，转写线程抛出的"用户停止"异常不算错误
+                        break
+                    tb = traceback.format_exc()
+                    logger.error("处理出错 %s: %s\n%s", item.name, e, tb)
+                    errors.append((item.name, e, tb))
+                    post({"type": "log", "message": f"❌ 处理失败（已跳过，继续下一个）: {item.name} — {e}",
+                          "level": "ERROR", "trace": tb})
+            if self.stop_requested:
+                post({"type": "done", "message": "用户已停止处理", "stopped": True})
+            elif errors and len(errors) == total:
+                # 全部失败：按错误处理（进度复位、提示重试），不报"完成"
+                _, e, tb = errors[0]
                 post({"type": "error", "message": f"处理出错: {e}", "trace": tb})
+            elif errors:
+                post({"type": "done",
+                      "message": f"任务处理完成，{len(errors)} 个文件失败（已跳过，详见日志）"})
+            else:
+                post({"type": "done", "message": "所有任务处理完成！"})
             return
 
         # ── 并行模式（concurrency>=2）: GPU 单模型两阶段批量调度 ──
@@ -163,6 +193,24 @@ class SubtitleWorker:
         # 原「转写线程 + 翻译线程池同跑」的流水线必然爆显存；这里改为
         # 先全部转写 → 释放 Whisper 显存 → 再统一翻译+自动嵌入，从根上错峰。
         self._run_staged(jobs, opts)
+
+    @staticmethod
+    def _find_stem_conflicts(jobs: List[Path]) -> List[Tuple[str, str]]:
+        """同目录、同 safe_stem 的视频/音频文件 → 输出名（partial/srt/mkv）必然冲突。
+
+        字幕文件是源文件（a.mp4 + a.srt 是正常用法），不参与冲突判定。
+        """
+        seen: dict = {}
+        conflicts: List[Tuple[str, str]] = []
+        for j in jobs:
+            if j.suffix.lower() in SUB_EXTS:
+                continue
+            key = (j.parent, safe_stem(j.name))
+            if key in seen and seen[key] != j.name:
+                conflicts.append((seen[key], j.name))
+            else:
+                seen[key] = j.name
+        return conflicts
 
     def _run_staged(self, jobs: List[Path], opts: dict) -> None:
         """并行批量的 GPU 单模型两阶段调度。
@@ -173,12 +221,13 @@ class SubtitleWorker:
         post = opts["post"]
         total = len(jobs)
         trans_concurrency = max(1, getattr(cfg.translation, "concurrency_translate", 3))
-        translate_errors: List[Tuple[Exception, str]] = []
+        translate_errors: List[Tuple[str, Exception, str]] = []
 
         # ── 阶段 1：全部转写 ──
         self._prepare_transcribe_phase(opts, post)
         post({"type": "log", "message": f"阶段 1/2：开始转写 {total} 个文件（GPU 用于语音识别）…", "level": "INFO"})
         results: List[dict] = []
+        transcribe_failures: List[str] = []
         for idx, item in enumerate(jobs, 1):
             if self.stop_requested:
                 break
@@ -189,8 +238,10 @@ class SubtitleWorker:
                     break
                 tb = traceback.format_exc()
                 logger.error("转写出错 %s: %s\n%s", item.name, e, tb)
-                post({"type": "error", "message": f"转写出错: {e}", "trace": tb})
-                return
+                transcribe_failures.append(item.name)
+                post({"type": "log", "message": f"❌ 转写失败（已跳过，继续下一个）: {item.name} — {e}",
+                      "level": "ERROR", "trace": tb})
+                continue
             if result is not None:
                 results.append(result)
         if self.stop_requested:
@@ -198,14 +249,18 @@ class SubtitleWorker:
                 self.transcriber.release_model()
             except Exception:
                 pass
-            post({"type": "done", "message": "用户已停止处理"})
+            post({"type": "done", "message": "用户已停止处理", "stopped": True})
             return
         if not results:
             try:
                 self.transcriber.release_model()
             except Exception:
                 pass
-            post({"type": "done", "message": "所有任务处理完成！（没有需要翻译的字幕）"})
+            if transcribe_failures:
+                post({"type": "error",
+                      "message": f"转写出错: 全部 {len(transcribe_failures)} 个文件转写失败（详见日志）"})
+            else:
+                post({"type": "done", "message": "所有任务处理完成！（没有需要翻译的字幕）"})
             return
 
         # ── 阶段切换：释放 Whisper 显存，为翻译模型腾位 ──
@@ -222,29 +277,41 @@ class SubtitleWorker:
             stage_opts["pause_before_embed"] = False
             post({"type": "log", "message": "阶段批量模式：自动嵌入字幕，跳过逐文件预览暂停", "level": "INFO"})
         tpool = _DaemonThreadPoolExecutor(max_workers=trans_concurrency)
-        futures = []
+        futures: List[Tuple[str, Future]] = []
         try:
             for r in results:
                 if self.stop_requested:
                     break
-                futures.append(tpool.submit(self._translate_stage, r, stage_opts, post))
-            for future in futures:
+                futures.append((r["item"].name, tpool.submit(self._translate_stage, r, stage_opts, post)))
+            for name, future in futures:
                 try:
                     future.result()
                 except Exception as e:
                     tb = traceback.format_exc()
-                    logger.error("翻译任务异常: %s\n%s", e, tb)
-                    translate_errors.append((e, tb))
+                    logger.error("翻译任务异常 %s: %s\n%s", name, e, tb)
+                    translate_errors.append((name, e, tb))
+                    post({"type": "log", "message": f"❌ 翻译失败（已跳过）: {name} — {e}",
+                          "level": "ERROR", "trace": tb})
         finally:
             tpool.shutdown(wait=True)
 
-        if translate_errors:
-            e, tb = translate_errors[0]
-            post({"type": "error", "message": f"翻译出错: {e}", "trace": tb})
+        if self.stop_requested:
+            post({"type": "done", "message": "用户已停止处理", "stopped": True})
             return
 
-        if self.stop_requested:
-            post({"type": "done", "message": "用户已停止处理"})
+        if translate_errors and len(translate_errors) == len(results):
+            # 全部翻译失败：按错误处理，不报"完成"
+            _, e, tb = translate_errors[0]
+            post({"type": "error", "message": f"翻译出错: {e}", "trace": tb})
+            return
+        fail_parts: List[str] = []
+        if transcribe_failures:
+            fail_parts.append(f"{len(transcribe_failures)} 个文件转写失败")
+        if translate_errors:
+            fail_parts.append(f"{len(translate_errors)} 个文件翻译失败")
+        if fail_parts:
+            post({"type": "done",
+                  "message": f"任务处理完成，{'、'.join(fail_parts)}（已跳过，详见日志）"})
         else:
             post({"type": "done", "message": "所有任务处理完成！"})
 
@@ -297,13 +364,15 @@ class SubtitleWorker:
         final_srt = output_dir / f"{safe_stem(item.name)}.srt"
 
         if skip_completed:
+            stem = safe_stem(item.name)
             state_files = []
             if output_dir and output_dir.exists():
                 for sf in output_dir.glob("*.translate_state.json"):
-                    state_files.append(sf)
+                    if sf.stem.startswith(stem + "."):
+                        state_files.append(sf)
             if item.parent.exists() and item.parent != output_dir:
                 for sf in item.parent.glob("*.translate_state.json"):
-                    if sf not in state_files:
+                    if sf.stem.startswith(stem + ".") and sf not in state_files:
                         state_files.append(sf)
             has_state = len(state_files) > 0
             mkv_path = output_dir / f"{safe_stem(item.name)}.mkv"
@@ -327,12 +396,12 @@ class SubtitleWorker:
                     src_srt_for_retry = item
                 else:
                     for f2 in sorted(output_dir.glob("*.srt")):
-                        if "bak" not in f2.stem and "translated" not in f2.stem and f2.resolve() != final_srt.resolve():
+                        if _is_resume_srt_candidate(f2, stem, final_srt):
                             src_srt_for_retry = f2
                             break
                     if not src_srt_for_retry:
                         for f2 in sorted(item.parent.glob("*.srt")):
-                            if "bak" not in f2.stem and "translated" not in f2.stem and f2.resolve() != final_srt.resolve():
+                            if _is_resume_srt_candidate(f2, stem, final_srt):
                                 src_srt_for_retry = f2
                                 break
                 if src_srt_for_retry:
