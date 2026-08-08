@@ -407,5 +407,17 @@ class TestModelCache(unittest.TestCase):
             self.assertEqual(MockWhisperCls.call_count, 2)
 
 
+class TestCheckpointIntervalClamp(unittest.TestCase):
+    """checkpoint_interval 钳位：0/负数/非法配置会导致 `% 0` 崩溃"""
+
+    def test_zero_negative_and_invalid_clamped(self):
+        from subtitle_app.transcriber import _safe_checkpoint_interval
+        self.assertEqual(_safe_checkpoint_interval(0), 1)
+        self.assertEqual(_safe_checkpoint_interval(-5), 1)
+        self.assertEqual(_safe_checkpoint_interval(30), 30)
+        self.assertEqual(_safe_checkpoint_interval(None), 30)
+        self.assertEqual(_safe_checkpoint_interval("abc"), 30)
+
+
 if __name__ == "__main__":
     unittest.main()

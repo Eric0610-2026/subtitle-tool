@@ -201,8 +201,22 @@ SRT_BLOCK_RE = re.compile(
 )
 
 
+def _read_text_auto(path: Path) -> str:
+    """按编码顺序尝试读取文本文件：utf-8-sig → gbk → latin-1 → 替换字符兜底。
+
+    Windows 常见的中文 SRT 是 GBK/ANSI 编码，只按 UTF-8 读会抛
+    UnicodeDecodeError 导致整批翻译中止；latin-1 永不失败，保证总有内容可解析。
+    """
+    for enc in ("utf-8-sig", "gbk", "latin-1"):
+        try:
+            return path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def parse_srt(path: Path) -> List[SubtitleBlock]:
-    return parse_srt_text(path.read_text(encoding="utf-8-sig"))
+    return parse_srt_text(_read_text_auto(path))
 
 
 def parse_srt_text(text: str) -> List[SubtitleBlock]:
@@ -524,7 +538,8 @@ def find_existing_subtitle(video: Path) -> Optional[Path]:
         if f.suffix not in SUB_EXTS:
             continue
         f_stem = f.stem
-        if "backup" in f_stem.lower() or "translated" in f_stem.lower() or "bak" in f_stem.lower():
+        if "backup" in f_stem.lower() or "translated" in f_stem.lower() or "bak" in f_stem.lower() \
+                or "partial" in f_stem.lower():
             continue
         if f_stem == stem or f_stem.startswith(stem + "."):
             return f

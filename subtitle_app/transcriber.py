@@ -22,6 +22,14 @@ from .srt_utils import (
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_checkpoint_interval(value) -> int:
+    """钳位断点写入间隔：0/负数/非法值会导致 `% 0` 崩溃，统一回退到 30"""
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 30
+
 # 延迟导入 faster_whisper（C 扩展加载 ~3s），避免拖慢应用启动
 _WHISPER_AVAILABLE = None
 
@@ -292,8 +300,8 @@ class Transcriber:
         # ── 断点续转配置 ──
         checkpoint_enabled = opts.get("checkpoint_enabled",
                                        getattr(cfg.whisper, "checkpoint_enabled", True))
-        checkpoint_interval = opts.get("checkpoint_interval",
-                                        getattr(cfg.whisper, "checkpoint_interval", 30))
+        checkpoint_interval = _safe_checkpoint_interval(opts.get("checkpoint_interval",
+                                                                 getattr(cfg.whisper, "checkpoint_interval", 30)))
         use_word_timestamps = opts.get("word_timestamps",
                                         getattr(cfg.whisper, "word_timestamps", False))
         partial_srt: Optional[Path] = None

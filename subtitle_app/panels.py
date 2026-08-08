@@ -153,6 +153,7 @@ class ProgressPanel(QFrame):
         bot = QHBoxLayout()
         self.detail_label = QLabel("已用 --:-- | 剩余 --:-- | 预计 --")
         bot.addWidget(self.detail_label, 1)
+        layout.addLayout(bot)
 
     def reset(self):
         self.overall_progress.setValue(0)

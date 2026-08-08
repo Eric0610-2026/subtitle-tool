@@ -66,6 +66,11 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   `cache/.subtitle_ignore.json` 记录已完成文件。
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验。
 - **嵌入前暂停**：`translator.py` 中 `PauseResponse`（event + action + modified_text）。
+- **事件契约**：`done` 事件可带 `stopped: True`（用户停止，UI 不再谎报"全部完成"）；
+  失败按文件粒度处理（`log` ERROR + 跳过继续），全部失败才发 `error`，部分失败发 `done` 带失败数。
+- **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突）→ 报错中止；
+  `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
+- **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
 
 ## 配置与安全
 

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """测试 local_service：服务探测、自动拉起（含就绪/失败/超时回滚）"""
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -212,6 +213,80 @@ class LocalServiceTest(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertTrue(got_terminated)   # 超时后终止了进程
                 self.assertIsNone(local_service._owned_proc)
+
+    def test_ensure_waiter_timeout_does_not_kill_shared_proc(self):
+        """并发：非启动者超时不得杀掉共享 llama-server（防止并行翻译"杀-起"抖动）"""
+        with tempfile.TemporaryDirectory() as d:
+            server = Path(d) / "llama-server.exe"
+            server.write_bytes(b"")
+            mdir = Path(d)
+            (mdir / "m.gguf").write_bytes(b"x")
+            got_terminated = []
+
+            class _T(_FakeProc):
+                def terminate(self):
+                    got_terminated.append(1)
+                    super().terminate()
+
+            fake_proc = _T()
+            # 模拟"启动者已拉起但服务未就绪"：直接置共享状态
+            local_service._owned_proc = fake_proc
+            local_service._started_by_us = True
+            results = []
+
+            def waiter():
+                ok, _, _ = local_service.ensure_running(timeout=0.15)
+                results.append(ok)
+
+            with patch.object(local_service, "_SERVER", server), \
+                    patch.object(local_service, "_MODELS_DIR", mdir), \
+                    patch.object(local_service, "_probe", lambda *a, **k: False), \
+                    patch.object(local_service, "_port_listening", lambda *a, **k: False), \
+                    patch.object(local_service, "_launch_owned", lambda m: fake_proc):
+                t = threading.Thread(target=waiter)
+                t.start()
+                t.join(timeout=5)
+
+            self.assertEqual(results, [False])                  # 等待者超时失败
+            self.assertFalse(got_terminated)                    # 但没有杀共享进程
+            self.assertIsNotNone(local_service._owned_proc)     # 进程仍在等待就绪
+            self.assertTrue(local_service._started_by_us)       # 共享状态未被等待者重置
+
+    def test_ensure_concurrent_waiters_all_succeed(self):
+        """并发：多个调用者同时等待，有且仅有一个启动者，最终全部就绪"""
+        with tempfile.TemporaryDirectory() as d:
+            server = Path(d) / "llama-server.exe"
+            server.write_bytes(b"")
+            mdir = Path(d)
+            (mdir / "m.gguf").write_bytes(b"x")
+            probe_calls = []
+            launches = []
+            fake_proc = _FakeProc()
+
+            def fake_probe(*a, **k):
+                probe_calls.append(1)
+                return len(probe_calls) >= 4  # 前 3 次失败，模拟模型加载时间
+
+            with patch.object(local_service, "_SERVER", server), \
+                    patch.object(local_service, "_MODELS_DIR", mdir), \
+                    patch.object(local_service, "_probe", fake_probe), \
+                    patch.object(local_service, "_port_listening", lambda *a, **k: False), \
+                    patch.object(local_service, "_launch_owned",
+                                 lambda m: launches.append(m) or fake_proc):
+                results = []
+
+                def call():
+                    ok, _, _ = local_service.ensure_running(timeout=3)
+                    results.append(ok)
+
+                ts = [threading.Thread(target=call) for _ in range(3)]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join(timeout=10)
+
+            self.assertEqual(len(launches), 1, "并发下应只有一个调用者拉起进程")
+            self.assertEqual(results, [True, True, True])
 
     def test_shutdown_owned_terminates(self):
         got = []

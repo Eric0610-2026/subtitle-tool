@@ -27,7 +27,7 @@ from .srt_utils import (
     load_json, save_json, estimate_eta,
     seconds_to_srt_time, srt_time_to_seconds,
     OverallProgress, find_tool, IGNORE_FILE,
-    analyze_subtitle_file, format_quality_report,
+    analyze_subtitle_file, format_quality_report, _read_text_auto,
 )
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
@@ -654,7 +654,7 @@ class SubtitleApp(QMainWindow):
                     candidates.append(f)
         for c in candidates:
             if c.exists():
-                self.preview_panel.set_text(c.read_text(encoding="utf-8"))
+                self.preview_panel.set_text(_read_text_auto(c))
                 self.preview_panel.last_output_dir = c.parent
                 return
         self.preview_panel.clear()
@@ -812,8 +812,6 @@ class SubtitleApp(QMainWindow):
         if not jobs:
             QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
             return
-        if not self._confirm_peak_hours():
-            return
         msg = f"开始处理，队列 {len(jobs)} 个文件"
         if skipped:
             msg += f"（已跳过 {skipped} 个忽略文件）"
@@ -875,8 +873,6 @@ class SubtitleApp(QMainWindow):
         skipped = total - len(jobs)
         if not jobs:
             QMessageBox.warning(self, "提示", "队列为空" + ("（所有文件已被忽略）" if skipped else ""))
-            return
-        if not self._confirm_peak_hours():
             return
         msg = f"断点续翻，检查 {len(jobs)} 个文件..."
         if skipped:
@@ -1300,21 +1296,31 @@ class SubtitleApp(QMainWindow):
     def _handle_done(self, e):
         p = self.progress_panel
         msg = e.get("message", "完成")
+        stopped = e.get("stopped", False)
         self._add_log_entry(msg, "INFO")
-        p.transcribe_bar.setValue(100)
-        p.transcribe_bar.setFormat("100%")
-        p.translate_bar.setValue(100)
-        p.translate_bar.setFormat("100%")
-        p.detail_label.setText("")
-        if self._overall is not None:
-            self._overall.set_complete()
-            p.overall_progress.setValue(100)
-            p.overall_label.setText("总进度：全部完成 100%")
+        if not stopped:
+            p.transcribe_bar.setValue(100)
+            p.transcribe_bar.setFormat("100%")
+            p.translate_bar.setValue(100)
+            p.translate_bar.setFormat("100%")
+            p.detail_label.setText("")
+            if self._overall is not None:
+                self._overall.set_complete()
+                p.overall_progress.setValue(100)
+                p.overall_label.setText("总进度：全部完成 100%")
+        else:
+            # 用户主动停止：保留当前进度，不谎报"全部完成"
+            p.detail_label.setText("")
+            if self._overall is not None:
+                p.overall_label.setText("总进度：已停止（部分完成）")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.preview_panel.setReadOnly(False)
         elapsed = time.time() - self._start_time if self._start_time else 0
-        stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
+        if stopped:
+            stats_msg = f"处理已停止 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
+        else:
+            stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
         quality_summary = self._summarize_quality_reports()
         notify_body = f"{msg}\n{stats_msg}"
@@ -1334,6 +1340,8 @@ class SubtitleApp(QMainWindow):
         self._update_model_status()
 
     def _handle_event(self, event: dict):
+        if self._closing:
+            return  # 窗口已开始关闭：忽略迟到事件，避免操作已销毁的控件
         handler = self._event_handlers.get(event.get("type", ""))
         if handler:
             handler(event)
@@ -1485,46 +1493,46 @@ class SubtitleApp(QMainWindow):
         self._add_log_entry(f"已切换至{'深色' if self.dark_mode else '浅色'}模式")
 
     def closeEvent(self, event):
-        """应用关闭时释放 Whisper 模型显存、关闭本地翻译服务（含残留清理）并保存窗口状态"""
-        self._closing = True  # 通知后台嵌入线程停止发信号（daemon 随进程退出）
+        """应用关闭时停止处理线程、释放 Whisper 模型显存、关闭本会话拉起的本地翻译服务并保存窗口状态"""
+        self._closing = True  # 通知后台线程停止发信号（daemon 随进程退出）
+        # 先停 worker：终止 ffmpeg 等子进程并置停止标志，避免与下方 release_model 竞争
+        self.worker.stop()
         if self.worker.transcriber.is_loaded():
             self.worker.transcriber.release_model()
         try:
-            from .local_service import shutdown_owned, shutdown_running
-            shutdown_owned()    # 先关应用自己拉起的 llama-server
-            shutdown_running()  # 兜底：清理 127.0.0.1:8080 上仍运行的 llama-server，避免残留占显存
+            # 只关本会话拉起的 llama-server；用户手动启动的外部服务不强制杀
+            from .local_service import shutdown_owned
+            shutdown_owned()
         except Exception:
             pass
         self._save_window_state()
         super().closeEvent(event)
 
-    def _confirm_peak_hours(self) -> bool:
-        """DeepSeek API 高峰时段确认（仅在点击「开始处理」时调用）。
+    def _notify_peak_hours(self):
+        """启动时 DeepSeek 高峰时段提醒（打开应用时调用）。
 
-        仅当当前活跃翻译方案使用 DeepSeek 且处于高峰时段时弹窗；
-        用户选「否」则返回 False 真正阻止本次处理（不再直接退出应用）。
-        非 DeepSeek / 非高峰时段直接返回 True。
+        仅当当前翻译方案为「联网 API」且模型为 DeepSeek、并处于高峰时段时
+        弹一次提示；本地 Hy-MT2 / 非 DeepSeek 模型 / 非高峰时段直接跳过。
+        提示为信息性质，不阻止后续操作。
         """
-        api_url = str((self.settings_data or {}).get("api_url", "") or "")
-        if "deepseek" not in api_url.lower():
-            return True
+        s = self.settings_data or {}
+        mode = str(s.get("translation_mode", "local")).lower()
+        if mode != "online":
+            return
+        api_url = str(s.get("api_url", "") or "")
+        tmodel = str(s.get("translation_model", "") or "")
+        if "deepseek" not in api_url.lower() and "deepseek" not in tmodel.lower():
+            return
         from datetime import timezone, timedelta, datetime
         bj_tz = timezone(timedelta(hours=8))
         hour = datetime.now(bj_tz).hour
-        in_peak = (9 <= hour < 12) or (14 <= hour < 18)
-        if not in_peak:
-            return True
-        reply = QMessageBox.question(
+        if not ((9 <= hour < 12) or (14 <= hour < 18)):
+            return
+        QMessageBox.information(
             self, "高峰时段提醒",
-            "当前为 DeepSeek API 高峰时段（9:00-12:00、14:00-18:00），价格较高。\n"
-            "是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            "当前为 DeepSeek API 高峰时段（9:00-12:00、14:00-18:00），翻译价格较高。\n"
+            "如对成本敏感，可避开此时段再处理。",
         )
-        if reply == QMessageBox.No:
-            self._add_log_entry("已取消处理（DeepSeek 高峰时段提醒）", "INFO")
-            return False
-        return True
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1570,6 +1578,7 @@ def main():
 
     window = SubtitleApp()
     window.show()
+    window._notify_peak_hours()  # 启动时 DeepSeek 高峰时段提醒（仅联网+DeepSeek 方案）
 
     sys.exit(app.exec())
 

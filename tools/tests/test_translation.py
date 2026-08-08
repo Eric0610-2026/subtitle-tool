@@ -93,6 +93,15 @@ class TestTranslationClient(unittest.TestCase):
             c.translate_blocks(blocks, "en", is_bilingual=True)
             self.assertEqual(mock.call_count, 1)
 
+    def test_batch_size_zero_or_negative_clamped(self):
+        """batch_size=0/负数会导致分批 range(0, len, 0) / `// 0` 崩溃，应钳位到至少 1"""
+        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+                              lambda *a: None, batch_size=0)
+        self.assertGreaterEqual(c.batch_size, 1)
+        c2 = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+                               lambda *a: None, batch_size=-3)
+        self.assertGreaterEqual(c2.batch_size, 1)
+
     def test_curl_fallback_tmp_file_unique_per_thread(self):
         """并发 403 fallback 时各线程的临时文件必须唯一，不能共写一个文件"""
         from subtitle_app import translation as tr
