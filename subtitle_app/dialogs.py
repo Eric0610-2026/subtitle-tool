@@ -17,6 +17,7 @@ from PySide6.QtGui import QFont, QPalette, QIcon, QPainter, QPen, QPixmap, QColo
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
+from .local_service import service_url_prefix
 
 _SCROLLBAR_STYLE = """
     QScrollBar:vertical { width:8px; background:transparent; border:none; }
@@ -624,7 +625,7 @@ class SettingsDialog(QDialog):
         self.translation_mode.setToolTip("本地：使用电脑上运行的 Hy-MT2（需先启动 start-local-model.bat）\n联网：调用在线 API，需配置模型")
         self.translation_mode.currentIndexChanged.connect(self._on_translation_mode_changed)
         mode_row.addWidget(self.translation_mode, 1)
-        self.mode_hint = QLabel("使用本地 Hy-MT2 服务 http://127.0.0.1:8080")
+        self.mode_hint = QLabel(f"使用本地 Hy-MT2 服务 {service_url_prefix()}")
         self.mode_hint.setStyleSheet("color:#94a3b8; font-size:11px;")
         self.mode_hint.setWordWrap(True)
         mode_row.addWidget(self.mode_hint, 1)
@@ -943,7 +944,7 @@ class SettingsDialog(QDialog):
             self.batch_size.blockSignals(False)
         if str(mode).lower() == "local":
             self.online_cfg_widget.setVisible(False)
-            self.mode_hint.setText("使用本地 Hy-MT2 服务 http://127.0.0.1:8080（无需配置）")
+            self.mode_hint.setText(f"使用本地 Hy-MT2 服务 {service_url_prefix()}（无需配置）")
             self.mode_hint.setStyleSheet("color:#22c55e; font-size:11px;")
         else:
             self.online_cfg_widget.setVisible(True)

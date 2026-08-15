@@ -26,6 +26,22 @@ class _FakeProc:
         self.returncode = 0
 
 
+class _CrashedProc:
+    """模拟启动后立即异常退出的 llama-server（如端口 bind 失败，退出码 1）"""
+    def __init__(self, returncode=1):
+        self.pid = 999
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        pass
+
+
 def _reset_state():
     local_service._owned_proc = None
     local_service._started_by_us = False
@@ -33,7 +49,7 @@ def _reset_state():
 
 
 class ShutdownRunningTest(unittest.TestCase):
-    """shutdown_running：退出时按端口清理 127.0.0.1:8080 上的 llama-server（含残留）"""
+    """shutdown_running：退出时按本地服务端口清理 llama-server（含残留）"""
 
     def setUp(self):
         _reset_state()
@@ -75,9 +91,10 @@ class ShutdownRunningTest(unittest.TestCase):
         tasklist 带 /FI "IMAGENAME eq llama-server.exe" 过滤，只会返回
         llama-server 行（fake 数据需模拟这一过滤效果）。
         """
+        port = local_service._PORT
         netstat_out = (
-            "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       34368\n"
-            "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       99999\n"
+            f"  TCP    127.0.0.1:{port}    0.0.0.0:0              LISTENING       34368\n"
+            f"  TCP    127.0.0.1:{port}    0.0.0.0:0              LISTENING       99999\n"
         )
         tasklist_out = '"llama-server.exe","34368","Console","1","12,345 K"\n'
         ok, calls = self._shutdown_with(netstat_out, tasklist_out)
@@ -89,7 +106,8 @@ class ShutdownRunningTest(unittest.TestCase):
 
     def test_non_llama_listener_not_killed(self):
         """8080 被其他程序占用（非 llama-server.exe）→ 不杀、返回 False"""
-        netstat_out = "  TCP    127.0.0.1:8080    0.0.0.0:0              LISTENING       77777\n"
+        netstat_out = (f"  TCP    127.0.0.1:{local_service._PORT}    0.0.0.0:0"
+                       "              LISTENING       77777\n")
         tasklist_out = ""  # /FI 过滤后无 llama-server 行
         ok, calls = self._shutdown_with(netstat_out, tasklist_out)
         self.assertFalse(ok)
@@ -299,6 +317,59 @@ class LocalServiceTest(unittest.TestCase):
         with patch("subtitle_app.local_service.subprocess.run"):
             local_service.shutdown_owned()
         self.assertTrue(got)
+        self.assertIsNone(local_service._owned_proc)
+
+    def test_startup_diagnosis_tail_and_missing_log(self):
+        """诊断：无日志返回空串；普通错误只附日志尾部，不带端口修复提示"""
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "srv.log"
+            with patch.object(local_service, "_SERVER_LOG", log):
+                self.assertEqual(local_service._startup_diagnosis(), "")
+                log.write_text("\n  \nline one\nline two\n", encoding="utf-8")
+                diag = local_service._startup_diagnosis()
+                self.assertIn("line two", diag)
+                self.assertIn("line one", diag)
+                self.assertNotIn("netsh", diag)  # 非 bind 失败 → 不给端口提示
+
+    def test_startup_diagnosis_bind_failure_hints_netsh(self):
+        """诊断：bind 失败（如被 Windows 端口预留占走）→ 附管理员 netsh 修复命令"""
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "srv.log"
+            log.write_text(
+                "0.30 E srv  start: couldn't bind HTTP server socket, "
+                "hostname: 127.0.0.1, port: 8080\n", encoding="utf-8")
+            with patch.object(local_service, "_SERVER_LOG", log):
+                diag = local_service._startup_diagnosis()
+            self.assertIn("couldn't bind", diag)
+            self.assertIn("netsh", diag)
+            self.assertIn("excludedportrange", diag)
+
+    def test_ensure_crash_reports_diagnosis_and_resets(self):
+        """进程启动即崩：报错带日志级真实原因（不再堆笼统猜测），且状态复位可重试"""
+        with tempfile.TemporaryDirectory() as d:
+            server = Path(d) / "llama-server.exe"
+            server.write_bytes(b"")
+            mdir = Path(d)
+            (mdir / "m.gguf").write_bytes(b"x")
+            log = Path(d) / "llama-server.log"
+            log.write_text(
+                "0.00 I srv  llama_server: starting\n"
+                "0.30 E srv  start: couldn't bind HTTP server socket, "
+                "hostname: 127.0.0.1, port: 8080\n"
+                "0.31 E srv  llama_server: exiting due to HTTP server error\n",
+                encoding="utf-8")
+            with patch.object(local_service, "_SERVER", server), \
+                    patch.object(local_service, "_MODELS_DIR", mdir), \
+                    patch.object(local_service, "_SERVER_LOG", log), \
+                    patch.object(local_service, "_probe", lambda *a, **k: False), \
+                    patch.object(local_service, "_port_listening", lambda *a, **k: False), \
+                    patch.object(local_service, "_launch_owned", lambda m: _CrashedProc()):
+                ok, detail, _ = local_service.ensure_running(timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("couldn't bind", detail)           # 日志里的真实原因
+        self.assertIn("netsh", detail)                   # 针对性修复命令
+        self.assertNotIn("可能原因", detail)              # 有诊断后不再叠加笼统猜测
+        self.assertFalse(local_service._started_by_us)   # 状态已复位，允许重试
         self.assertIsNone(local_service._owned_proc)
 
 

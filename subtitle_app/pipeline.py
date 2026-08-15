@@ -317,7 +317,8 @@ class SubtitleWorker:
 
     def _prepare_transcribe_phase(self, opts: dict, post: Callable) -> None:
         """进入转写阶段前的 GPU 清理：停掉本会话拉起的翻译服务；外部服务只提示不强制杀。"""
-        if not str(opts.get("api_url", "")).lower().startswith("http://127.0.0.1:8080"):
+        from .local_service import service_url_prefix
+        if not str(opts.get("api_url", "")).lower().startswith(service_url_prefix()):
             return
         try:
             from .local_service import is_service_running, shutdown_owned

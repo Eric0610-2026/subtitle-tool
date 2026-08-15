@@ -19,7 +19,7 @@ from .srt_utils import (
 )
 from .translation import TranslationClient
 from .muxer import embed_subtitles_to_video
-from .local_service import ensure_running
+from .local_service import ensure_running, service_url_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     translated_srt: Optional[Path] = None
     if translate_enabled and api_url and api_key:
         # 本地模式：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
-        if api_url.lower().startswith("http://127.0.0.1:8080"):
+        if api_url.lower().startswith(service_url_prefix()):
             post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
             ok, detail, first = ensure_running(on_progress=lambda sec: post({
                 "type": "log",
@@ -137,7 +137,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             }))
             if not ok:
                 post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
-                                                "请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 127.0.0.1:8080 未被其它程序占用。",
+                                                f"请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 {service_url_prefix()} 未被其它程序占用。",
                       "level": "ERROR"})
                 raise RuntimeError(f"本地模型服务不可用：{detail}")
             if first:
@@ -167,7 +167,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         _bs = opts.get("translation_batch_size")
         if _bs is None:
             # 模式相关默认批量：本地 Hy-MT2 用 config 的 batch_size（20），联网大模型用 100
-            if api_url.lower().startswith("http://127.0.0.1:8080"):
+            if api_url.lower().startswith(service_url_prefix()):
                 _bs = cfg.translation.batch_size or 20
             else:
                 _bs = getattr(cfg.translation, "batch_size_online", 100) or 100

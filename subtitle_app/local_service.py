@@ -3,7 +3,7 @@
 """
 本地 Hy-MT2 翻译服务管理：探测连通性 / 自动拉起 llama-server / 等待就绪 / 退出清理。
 
-背景：本地翻译走本机 llama-server（OpenAI 兼容，http://127.0.0.1:8080）。
+背景：本地翻译走本机 llama-server（OpenAI 兼容，http://127.0.0.1:8188）。
 本模块让「在应用里选本地模式翻译」时能自动启动服务，而无需手动双击
 start-local-model.bat。启动参数与 start-local-model.bat 保持一致。
 
@@ -11,6 +11,8 @@ start-local-model.bat。启动参数与 start-local-model.bat 保持一致。
 - 幂等：同一进程内只有第一个调用者负责拉起服务，其余并发调用等待就绪即返回。
 - 生命周期：只在翻译阶段才拉起（ensure_running）；应用退出时 shutdown_owned 关本会话
   拉起的服务 + shutdown_running 按端口清理残留（用户承诺仅在应用内使用，退出即全部关闭）。
+- 失败可诊断：llama-server 的 stdout/stderr 落盘 cache/.llama-server.log，
+  进程异常退出时读取日志尾部附在错误信息里（如端口被 Windows 预留导致 bind 失败）。
 """
 import logging
 import subprocess
@@ -23,7 +25,9 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_PORT = 8080
+# 不用 8080：该端口常被 Windows（Hyper-V/WSL）的动态端口预留占走，
+# 导致 llama-server 无法绑定、启动即退出（见 _startup_diagnosis 的 netsh 提示）。
+_PORT = 8188
 _HOST = "127.0.0.1"          # 与应用 api_url 一致，强制 IPv4 回环
 _READY_TIMEOUT = 120.0        # 模型加载最长等待（秒）
 _POLL_INTERVAL = 0.4
@@ -33,6 +37,7 @@ _lock = threading.Lock()
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SERVER = _PROJECT_ROOT / "tools" / "llama-cpp" / "llama-server.exe"
 _MODELS_DIR = _PROJECT_ROOT / "models" / "hy-mt2"
+_SERVER_LOG = _PROJECT_ROOT / "cache" / ".llama-server.log"
 
 _owned_proc: Optional[subprocess.Popen] = None   # 本进程拉起的 llama-server
 _started_by_us = False                           # 本进程曾发起启动
@@ -48,6 +53,11 @@ def project_root() -> Path:
 
 def server_bin() -> Path:
     return _SERVER
+
+
+def service_url_prefix() -> str:
+    """本地翻译服务 OpenAI 兼容 URL 前缀（供调用方识别"这是本地服务"）"""
+    return f"http://{_HOST}:{_PORT}"
 
 
 def _find_model() -> Optional[Path]:
@@ -86,7 +96,9 @@ def _port_listening(timeout: float = 0.6) -> bool:
 
 def _launch_owned(model: Path) -> subprocess.Popen:
     """以无窗口方式拉起 llama-server，参数与 start-local-model.bat 保持一致。
-    显式 --host 127.0.0.1：确保监听 IPv4 回环（避免绑定到 ::1 导致应用连不上）。"""
+    显式 --host 127.0.0.1：确保监听 IPv4 回环（避免绑定到 ::1 导致应用连不上）。
+    stdout/stderr 落盘 _SERVER_LOG：启动失败时可读取日志尾部给出真实原因
+    （DEVNULL 会吞掉一切线索，只能看到笼统的退出码）。"""
     cmd = [
         str(_SERVER), "-m", str(model),
         "-c", "8192", "--port", str(_PORT), "--host", _HOST, "-ngl", "99",
@@ -94,12 +106,44 @@ def _launch_owned(model: Path) -> subprocess.Popen:
         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
         "--parallel", "1", "--jinja", "--n-predict", "-1",
     ]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_CREATE_NO_WINDOW,
-    )
+    try:
+        _SERVER_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(_SERVER_LOG, "w", encoding="utf-8", errors="replace")
+    except OSError:
+        fh = subprocess.DEVNULL  # 日志不可写时退回丢弃，不阻塞启动
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    finally:
+        if fh is not subprocess.DEVNULL:
+            fh.close()  # 子进程已继承句柄，父进程关闭不影响其继续写入
+
+
+def _startup_diagnosis() -> str:
+    """读取 llama-server 日志尾部，给出退出的真实原因与针对性修复提示。
+    无日志/读不到时返回空串（调用方退回笼统提示）。"""
+    try:
+        lines = [ln.strip() for ln in
+                 _SERVER_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if ln.strip()]
+    except OSError:
+        return ""
+    tail = lines[-5:]
+    if not tail:
+        return ""
+    diag = "\n服务日志（最后 %d 行）：\n%s" % (len(tail), "\n".join(tail))
+    if any("couldn't bind" in ln for ln in tail):
+        diag += (
+            "\n\n端口 %d 无法绑定：netstat 查不到占用进程时，多半是被 Windows"
+            "（Hyper-V/WSL）的动态端口预留占走了。请以管理员身份运行：\n"
+            "  netsh int ipv4 add excludedportrange protocol=tcp startport=%d numberofports=1\n"
+            "然后重试。"
+        ) % (_PORT, _PORT)
+    return diag
 
 
 def ensure_running(timeout: float = _READY_TIMEOUT,
@@ -115,7 +159,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
     if _probe():
         return True, "本地服务已运行", False
 
-    # 端口已监听但 /health 不通：非翻译服务占用了 8080，立即报错而不是干等
+    # 端口已监听但 /health 不通：非翻译服务占用了本服务端口，立即报错而不是干等
     if _port_listening():
         return False, (
             f"端口 {_PORT} 已被其他进程占用，且其中没有可用的翻译服务。"
@@ -124,6 +168,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
 
     start_time = time.time()
     launcher = False
+    crashed = False
     with _lock:
         if not _started_by_us:
             if not _SERVER.exists():
@@ -153,6 +198,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
         proc = _owned_proc
         if proc is not None and proc.poll() is not None:
             last_err = f"本地服务进程异常退出（退出码 {proc.returncode}）"
+            crashed = True
             break
         if on_progress:
             now = time.time()
@@ -175,8 +221,14 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
                 proc.wait(timeout=5)
             except Exception:
                 pass
-            _owned_proc = None
+        # 无论进程是被终止还是已自行退出（崩溃），都清空共享状态，保证可重试
+        _owned_proc = None
         _started_by_us = False
+    if crashed:
+        diag = _startup_diagnosis()
+        if diag:
+            # 已有日志级真实原因时不再追加笼统猜测，避免误导
+            return False, last_err + diag, False
     return False, last_err + "。可能原因：显存不足、模型损坏、或端口被占用。请先关闭已运行的 llama-server 后重试。", False
 
 
@@ -186,7 +238,7 @@ def is_service_running() -> bool:
 
 
 def _listening_pids(timeout: float = 3.0) -> set:
-    """netstat 定位 127.0.0.1:8080 上处于 LISTENING 的 pid（TCP 层判断，不依赖 /health 响应）"""
+    """netstat 定位 127.0.0.1 服务端口上处于 LISTENING 的 pid（TCP 层判断，不依赖 /health 响应）"""
     out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
                          capture_output=True, text=True, timeout=timeout)
     pids = set()
@@ -235,9 +287,9 @@ def shutdown_owned() -> None:
 
 
 def shutdown_running() -> bool:
-    """按端口关闭 127.0.0.1:8080 上仍运行的 llama-server（无论由谁启动）。
+    """按端口关闭 127.0.0.1 服务端口上仍运行的 llama-server（无论由谁启动）。
 
-    只清理进程名为 llama-server.exe 的监听者：其他程序占用 8080 不碰，
+    只清理进程名为 llama-server.exe 的监听者：其他程序占用本端口不碰，
     避免误杀用户的其他服务。仍以 netstat 的 TCP 监听状态定位 pid，
     不依赖 /health 探测（服务半死/忙时 health 可能挂起导致漏杀与 UI 卡顿）。
     """
@@ -246,7 +298,7 @@ def shutdown_running() -> bool:
             return False
         pids = _listening_pids() & _llama_server_pids()
         if not pids:
-            return False  # 8080 上没有 llama-server 监听，无需清理
+            return False  # 本端口上没有 llama-server 监听，无需清理
         killed = False
         for pid in pids:
             try:
