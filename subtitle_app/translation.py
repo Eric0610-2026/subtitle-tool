@@ -365,7 +365,7 @@ class TranslationClient:
                     "type": "progress",
                     "percent": (completed_count / max(total_batches, 1)) * 100,
                     "stage": "翻译",
-                    "detail": f"批次 {batch_id}/{total_batches} 完成，进度 {completed_count}/{total_batches}",
+                    "detail": f"批次 {completed_count}/{total_batches} 完成",
                     "total": len(blocks), "cache": len(self.cache),
                 })
 

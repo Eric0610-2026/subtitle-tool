@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app.pipeline import SubtitleWorker
+from subtitle_app.local_service import service_url_prefix
 
 
 class TestSubtitleWorkerInit(unittest.TestCase):
@@ -546,7 +547,7 @@ class TestRun(unittest.TestCase):
         self.w.transcriber.release_model = lambda: releases.append(1)
 
         opts = self._make_opts(concurrency=2)
-        opts["api_url"] = "http://127.0.0.1:8080/v1/chat/completions"
+        opts["api_url"] = service_url_prefix() + "/v1/chat/completions"
         opts["pause_before_embed"] = True
 
         with tempfile.TemporaryDirectory() as d:
@@ -576,7 +577,7 @@ class TestRun(unittest.TestCase):
             "path": str(item), "idx": idx, "total": total, "srt": 1, "item": item}
 
         opts = self._make_opts(concurrency=2)
-        opts["api_url"] = "http://127.0.0.1:8080/v1/chat/completions"
+        opts["api_url"] = service_url_prefix() + "/v1/chat/completions"
 
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "a.mp4"

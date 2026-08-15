@@ -81,6 +81,7 @@ class SubtitleApp(QMainWindow):
         self._start_time: Optional[float] = None
         self._closing = False  # 窗口关闭中：后台线程停止发 UI 信号
         self._manual_embedding = False  # 后台手动嵌入进行中
+        self._loading_local_model = False  # 后台手动加载本地模型进行中
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
         self._stats: Dict[str, any] = {}  # 处理统计
@@ -326,6 +327,11 @@ class SubtitleApp(QMainWindow):
         self.model_status = QLabel("🧠 当前模型：…")
         self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
         ar.addWidget(self.model_status)
+        self.load_model_btn = self._make_btn(
+            "🚀 加载本地模型", self._load_local_model, object_name="bottomBtn",
+            tooltip="手动启动本地 Hy-MT2 翻译服务（127.0.0.1:8188）。"
+                    "可在开始处理前预热，避免首个任务等待模型加载；也可用于排查本地服务启动问题")
+        ar.addWidget(self.load_model_btn)
         ar.addWidget(self._make_btn("🔄 重试", self._retry, object_name="bottomBtn",
                            stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
                                       "QPushButton:hover { background:#4f46e5; }"))
@@ -740,11 +746,12 @@ class SubtitleApp(QMainWindow):
 
     def _build_opts(self, skip_completed=False):
         s = self.settings_data
-        # 翻译方式：local=本地 Hy-MT2（强制走本机 8080 服务，无需配置）；online=使用用户预设的联网 API
+        # 翻译方式：local=本地 Hy-MT2（强制走本机本地服务端口，无需配置）；online=使用用户预设的联网 API
         mode = str(s.get("translation_mode", "local")).lower()
         if mode == "local":
+            from .local_service import service_url_prefix
             api_url, api_key, tmodel = (
-                "http://127.0.0.1:8080/v1/chat/completions", "local", "hy-mt2")
+                service_url_prefix() + "/v1/chat/completions", "local", "hy-mt2")
         else:
             api_url, api_key, tmodel = (
                 s.get("api_url", ""), s.get("api_key", ""), s.get("translation_model", ""))
@@ -890,6 +897,83 @@ class SubtitleApp(QMainWindow):
             show_cache_dialog(self, self.work_dir, self._add_log_entry)
         except Exception as e:
             self._add_log_entry(f"打开缓存对话框失败: {e}", level="ERROR", trace=traceback.format_exc())
+
+    # ─── 手动加载本地模型 ───
+
+    def _load_local_model(self):
+        """手动拉起本地 Hy-MT2 翻译服务（llama-server），后台线程执行。
+
+        用于在开始处理前预热模型，或排查本地服务启动问题；
+        与翻译阶段的自动拉起共用 ensure_running（幂等，已运行时直接返回）。
+        """
+        if getattr(self, "_loading_local_model", False):
+            QMessageBox.warning(self, "提示", "本地模型正在加载中，请等待完成")
+            return
+        if self.worker.thread and self.worker.thread.is_alive():
+            QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再加载本地模型")
+            return
+        from .local_service import is_service_running
+        if is_service_running():
+            self._update_model_status()
+            QMessageBox.information(self, "本地模型", "本地翻译服务已在运行，无需重复加载")
+            return
+
+        self._loading_local_model = True
+        self.load_model_btn.setEnabled(False)
+        self._add_log_entry("🚀 开始加载本地 Hy-MT2 模型（首次加载通常需 10~60 秒）...")
+        import threading
+        threading.Thread(target=self._load_local_model_worker, daemon=True).start()
+
+    def _load_local_model_worker(self) -> None:
+        """后台加载线程：调用 ensure_running 拉起/等待本地服务，结果经信号桥回传。
+
+        异常路径也要保证发送 local_model_loaded 复位按钮状态，避免
+        _loading_local_model 永久锁死加载功能；窗口关闭（_closing）后
+        事件由 _handle_event 统一忽略，daemon 线程随进程退出。
+        """
+        ok = False
+        detail = ""
+        try:
+            from .local_service import ensure_running
+            ok, detail, _first = ensure_running(on_progress=lambda sec: self.signal_bridge.post({
+                "type": "log",
+                "message": f"正在加载本地模型… 已等待 {sec}s（首次加载通常 10~60 秒）",
+            }))
+            level = "INFO" if ok else "ERROR"
+            self.signal_bridge.post({
+                "type": "log",
+                "message": (f"✅ {detail}" if ok else f"❌ 本地模型加载失败：{detail}"),
+                "level": level,
+            })
+        except Exception as e:
+            logger.error("加载本地模型线程异常: %s\n%s", e, traceback.format_exc())
+            detail = str(e)
+            try:
+                self.signal_bridge.post({
+                    "type": "log", "message": f"❌ 加载本地模型失败: {e}", "level": "ERROR",
+                })
+            except Exception:
+                pass
+        finally:
+            try:
+                self.signal_bridge.post({
+                    "type": "local_model_loaded", "ok": ok, "detail": detail,
+                })
+            except Exception:
+                pass
+
+    def _on_local_model_loaded(self, e):
+        """本地模型加载结束：复位按钮、刷新模型状态，并弹窗提示结果"""
+        self._loading_local_model = False
+        self.load_model_btn.setEnabled(True)
+        self._update_model_status()
+        if getattr(self, "_closing", False):
+            return
+        if e.get("ok"):
+            QMessageBox.information(self, "本地模型", "✅ 本地 Hy-MT2 翻译服务已就绪，可以开始处理了")
+        else:
+            QMessageBox.warning(self, "本地模型加载失败",
+                                f"{e.get('detail') or '未知错误'}\n\n详情请查看日志。")
 
     # ─── 手动嵌入 ───
 
@@ -1374,6 +1458,7 @@ class SubtitleApp(QMainWindow):
             "model_loaded": lambda e: self._update_model_status(),
             "manual_embed_done": self._on_manual_embed_done,
             "manual_extract_done": self._on_manual_extract_done,
+            "local_model_loaded": self._on_local_model_loaded,
         }
 
     def _handle_output_path(self, e):

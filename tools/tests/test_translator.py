@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app.srt_utils import SubtitleBlock
+from subtitle_app.local_service import service_url_prefix
 
 
 def _make_block(index=1, start=1.0, end=3.0, text="Hello world"):
@@ -284,7 +285,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             if bs_marker != "absent":
                 opts["translation_batch_size"] = bs_marker
             mocks = {"TranslationClient": MagicMock(side_effect=capture)}
-            if api_url.lower().startswith("http://127.0.0.1:8080"):
+            if api_url.lower().startswith(service_url_prefix()):
                 # 本地模式会触发服务探测，测试中直接视为已就绪
                 mocks["ensure_running"] = MagicMock(return_value=(True, "ok", False))
             from subtitle_app.translator import translate_only
@@ -297,7 +298,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertEqual(captured["kwargs"]["batch_size"], 100)
         # 本地 Hy-MT2 默认 20
         captured.clear()
-        run("http://127.0.0.1:8080/v1/chat/completions")
+        run(service_url_prefix() + "/v1/chat/completions")
         self.assertEqual(captured["kwargs"]["batch_size"], 20)
         # 显式传入覆盖默认
         captured.clear()
