@@ -12,6 +12,7 @@ from subtitle_app.srt_utils import (
     load_json, save_json, fmt_job_display, find_existing_subtitle,
     match_video_for_subtitle,
     analyze_subtitle_quality, analyze_subtitle_file, format_quality_report,
+    wrap_subtitle_text,
 )
 
 
@@ -260,6 +261,63 @@ class TestAnalyzeSubtitleQuality(unittest.TestCase):
         self.assertEqual([b.text for b in blocks], ["Hello", "World"])
         self.assertEqual([b.start for b in blocks], [1.0, 3.0])
         self.assertEqual([b.end for b in blocks], [2.0, 4.0])
+
+
+class TestWrapSubtitleText(unittest.TestCase):
+    """wrap_subtitle_text：长行折行，防止播放器中一行过长被挤压换行"""
+
+    M = 25
+
+    def test_short_line_unchanged(self):
+        self.assertEqual(wrap_subtitle_text("短句不折", self.M), "短句不折")
+        self.assertEqual(wrap_subtitle_text("", self.M), "")
+
+    def test_disabled_when_zero(self):
+        long_line = "无折行" * 30
+        self.assertEqual(wrap_subtitle_text(long_line, 0), long_line)
+
+    def test_cjk_splits_at_punctuation_within_width(self):
+        # 用户实际示例：34 字中文行应在标点附近折成两行，每行 <= 25
+        t = "我该怎么办？今天在课堂上，连过去的黑历史都被翻出来，我根本无法上课。"
+        lines = wrap_subtitle_text(t, self.M).split("\n")
+        self.assertGreater(len(lines), 1)
+        for l in lines:
+            self.assertLessEqual(len(l), self.M)
+        self.assertEqual("".join(lines), t)
+
+    def test_cjk_no_punctuation_hard_split_keeps_width(self):
+        t = "あ" * 80
+        lines = wrap_subtitle_text(t, self.M).split("\n")
+        self.assertTrue(all(len(l) <= self.M for l in lines))
+        self.assertEqual("".join(lines), t)
+
+    def test_bilingual_block_wraps_each_line_independently(self):
+        src = "どうしたらいいんだ。今日クラスで黒歴史まで垂らされて授業何もできなかった。"
+        zh = "我该怎么办？今天在课堂上，连过去的黑历史都被翻出来，我根本无法上课。"
+        out = wrap_subtitle_text(src + "\n" + zh, self.M)
+        for l in out.split("\n"):
+            self.assertLessEqual(len(l), self.M)
+        self.assertIn("\n", out)
+
+    def test_latin_wraps_at_word_boundary(self):
+        t = "This is a fairly long English subtitle line that should be wrapped nicely"
+        lines = wrap_subtitle_text(t, self.M).split("\n")
+        self.assertTrue(all(len(l) <= self.M for l in lines))
+        self.assertEqual(" ".join(lines), t)
+        # 不在单词中间切断
+        for l in lines:
+            self.assertNotIn("  ", l)
+
+    def test_write_srt_applies_wrapping(self):
+        long_text = "今天在课堂上连过去的黑历史都被翻出来了，我根本没办法专心上课，太难受了。"
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "w.srt"
+            blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text=long_text)]
+            write_srt(out, blocks, [long_text])
+            content = out.read_text(encoding="utf-8")
+            self.assertNotIn(long_text, content)  # 原文长行已被折行
+            re = parse_srt(out)
+            self.assertEqual(re[0].text.replace("\n", ""), long_text)
 
 
 if __name__ == "__main__":

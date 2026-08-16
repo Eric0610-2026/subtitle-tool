@@ -88,6 +88,7 @@
     "audio_exts": [".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg", ".wma"],
     "sub_exts": [".srt"],
     "max_filename_stem": 80,
+    "line_max_chars": 25,
     "abbreviations": [
       "mr", "mrs", "ms", "miss", "dr", "prof", "sr", "jr",
       "eg", "ie", "etc", "vs", "cf", "ibid", "et", "al",
