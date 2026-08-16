@@ -31,6 +31,12 @@ MAX_FILENAME_STEM = cfg.srt.max_filename_stem
 _ABBREVIATIONS = set(cfg.srt.abbreviations)
 IGNORE_FILE = "cache/.subtitle_ignore.json"
 
+# 单行最大字符数：写 SRT 时超过此宽度的行会被折成多行，
+# 避免播放器中一行字幕过长被强制挤压换行，影响观看。<=0 表示不折行。
+# 中文场景每行 20~30 字较舒适，默认 25。显式配 0 表示关闭折行。
+_raw_line_max = getattr(cfg.srt, "line_max_chars", 25)
+SUBTITLE_LINE_MAX_CHARS = max(0, int(_raw_line_max if _raw_line_max is not None else 25))
+
 # 扩充的繁简转换表（常用繁体字）
 _SIMPLE_T2S = {
     "爲": "为", "偽": "伪", "偉": "伟", "傳": "传", "傷": "伤",
@@ -260,6 +266,95 @@ def sanitize_blocks(blocks: List[SubtitleBlock],
     return blocks
 
 
+# ── 字幕换行（防止播放器中长行被挤压强制折行）──
+
+_CJK_PUNCTUATION = "。，、；：！？…"
+
+
+def wrap_subtitle_text(text: str,
+                   max_chars: int = SUBTITLE_LINE_MAX_CHARS) -> str:
+    """把字幕块文本中的过长行折成多行，每行不超过 max_chars 字符。
+
+    CJK（中日韩）语言无词边界：优先在标点（含逗号）后换行，且每行长度
+    <= max_chars；找不到合适断点时退化为按 max_chars 硬切，保证不超宽。
+    Latin 文字按单词边界折行。max_chars<=0 表示不折行，原样返回。
+    """
+    if max_chars <= 0:
+        return text
+    out_lines: List[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if len(line) <= max_chars:
+            out_lines.append(line)
+            continue
+        cjk_count = sum(1 for c in line if is_cjk(c))
+        if cjk_count >= max(1, len(line) // 2):
+            out_lines.extend(_wrap_cjk_line(line, max_chars))
+        else:
+            out_lines.extend(_wrap_latin_line(line, max_chars))
+    return "\n".join(out_lines)
+
+
+def _wrap_cjk_line(line: str, max_chars: int) -> List[str]:
+    """折一行 CJK 文本：优先在标点后断行。
+
+    断点选择规则：
+    - 优先取 [ceil(n/2), max_chars] 内最靠后的标点（折得均衡，避免尾部短行）；
+    - 该区间无标点时：若整行 <= 2*max_chars，按中点均分两段（避免标点切出
+      超长首行 + 极短尾行）；否则退回 [1, max_chars] 内最靠后的标点；
+    - 完全无标点可断：按中点均分递归折行，保证每行 <= max_chars。
+    """
+    line = line.strip()
+    n = len(line)
+    if n <= max_chars:
+        return [line] if line else []
+
+    half = (n + 1) // 2
+    min_tail = max(2, n // 3)  # 尾行最短长度，避免切出孤零零的一两个字
+
+    def _punct_cut(lo: int, hi: int) -> int:
+        """在 [lo, hi]（闭区间，字符位置）内找最靠后的标点断点（切在标点后）"""
+        for i in range(min(hi, max_chars), lo - 1, -1):
+            if 1 <= i <= n - 1 and line[i - 1] in _CJK_PUNCTUATION:
+                return i
+        return -1
+
+    cut = _punct_cut(half, max_chars) if half <= max_chars else -1
+    if cut <= 0 and n <= 2 * max_chars:
+        return [line[:half].strip(), line[half:].strip()]
+    if cut <= 0:
+        cut = _punct_cut(min_tail, max_chars)
+    if cut <= 0:
+        cut = min(half, max_chars)  # 无标点：均分，且切点不能超宽
+
+    head = line[:cut].strip()
+    tail_rest = line[cut:].strip()
+    result = [head] if head else []
+    result.extend(_wrap_cjk_line(tail_rest, max_chars))
+    return result
+
+
+def _wrap_latin_line(line: str, max_chars: int) -> List[str]:
+    """按单词边界折一行 Latin 文本；单个超长词硬切。"""
+    words = line.split()
+    result: List[str] = []
+    current = ""
+    for w in words:
+        candidate = w if not current else f"{current} {w}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            result.append(current)
+        while len(w) > max_chars:
+            result.append(w[:max_chars])
+            w = w[max_chars:]
+        current = w
+    if current:
+        result.append(current)
+    return result
+
+
 # ── 字幕质量检查（计数 + 样例，供完成摘要）──
 
 _QUALITY_KIND_LABELS = {
@@ -389,7 +484,9 @@ def write_srt(path: Path, blocks: List[SubtitleBlock], texts: List[str]) -> None
     lines = []
     idx = 0
     for block, text in zip(blocks, texts):
-        text = text.strip()
+        # 统一在落盘处折行：所有输出路径（翻译落盘/繁简转换/外挂输出/内嵌前清洗）
+        # 都经过本函数，保证 SRT 中不出现超宽长行
+        text = wrap_subtitle_text(text.strip())
         if not text:
             continue  # 跳过空文本条目
         idx += 1
