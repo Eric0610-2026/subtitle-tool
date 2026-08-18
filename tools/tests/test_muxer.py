@@ -20,21 +20,23 @@ class TestSanitizeSrtForMux(unittest.TestCase):
         write_srt(path, blocks, [b.text for b in blocks])
         return path
 
-    def test_already_clean_returns_same_path(self):
+    def test_clean_empty_nonexistent(self):
+        """正常文件原样返回；空文件/不存在文件同样返回原路径"""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "test.srt"
             self._make_srt(p)
             from subtitle_app.muxer import _sanitize_srt_for_mux
             result = _sanitize_srt_for_mux(p)
             self.assertEqual(result, p)  # 未修改，返回原路径
-
-    def test_empty_file_returns_same_path(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "empty.srt"
             p.write_text("", encoding="utf-8")
             from subtitle_app.muxer import _sanitize_srt_for_mux
             result = _sanitize_srt_for_mux(p)
             self.assertEqual(result, p)
+        from subtitle_app.muxer import _sanitize_srt_for_mux
+        result = _sanitize_srt_for_mux(Path("nonexistent.srt"))
+        self.assertEqual(result, Path("nonexistent.srt"))
 
     def test_trailing_blank_block_is_sanitized(self):
         """末尾空白文本块必须被净化过滤，不能误判为未变化而返回原文件"""
@@ -56,12 +58,6 @@ class TestSanitizeSrtForMux(unittest.TestCase):
             self.assertEqual(cleaned[0].text, "Hello")
             self.assertEqual(cleaned[0].start, 1.0)
             self.assertEqual(cleaned[0].end, 2.0)
-
-    def test_nonexistent_file_returns_same_path(self):
-        """不存在的文件应返回原路径（在 parse_srt 中抛出异常）"""
-        from subtitle_app.muxer import _sanitize_srt_for_mux
-        result = _sanitize_srt_for_mux(Path("nonexistent.srt"))
-        self.assertEqual(result, Path("nonexistent.srt"))
 
 
 class TestFindSiblingProbe(unittest.TestCase):
@@ -148,39 +144,34 @@ class TestVerifyDuration(unittest.TestCase):
         self._probe_patcher.stop()
         self._sibling_patcher.stop()
 
-    def test_passed_ratio_ok(self):
-        self.mock_probe.side_effect = [100.0, 98.0]  # src=100, out=98
+    def test_verify_duration_cases(self):
+        """时长验证各分支：通过/偏低/短视频跳过/无 ffprobe/缺时长"""
         from subtitle_app.muxer import _verify_duration
+        # 通过（98% >= 95%）
+        self.mock_probe.side_effect = [100.0, 98.0]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertTrue(passed)
         self.assertIn("98%", msg)
-
-    def test_failed_ratio_low(self):
-        self.mock_probe.side_effect = [100.0, 50.0]  # 50% < 95%
-        from subtitle_app.muxer import _verify_duration
+        # 偏低（50% < 95%）
+        self.mock_probe.side_effect = [100.0, 50.0]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertFalse(passed)
         self.assertIn("50%", msg)
-
-    def test_short_video_skips(self):
-        self.mock_probe.side_effect = [5.0, 5.0]  # < 10s
-        from subtitle_app.muxer import _verify_duration
+        # 短视频（< 10s）跳过校验
+        self.mock_probe.side_effect = [5.0, 5.0]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertTrue(passed)
-
-    def test_no_ffprobe_fails(self):
+        # 无 ffprobe → 失败
         self.mock_sibling.return_value = None
-        from subtitle_app.muxer import _verify_duration
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertFalse(passed)
-
-    def test_missing_duration_fails(self):
+        self.mock_sibling.return_value = "ffprobe.exe"
+        # 缺时长（None）→ 失败
         self.mock_probe.side_effect = [None, 50.0]
-        from subtitle_app.muxer import _verify_duration
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertFalse(passed)
@@ -335,20 +326,18 @@ class TestExtractEmbeddedSubtitle(unittest.TestCase):
         proc.returncode = 1
         return proc, "", "some error"
 
-    def test_missing_file(self):
+    def test_missing_and_image_refused(self):
+        """缺文件返回 (None, 不存在)；图像字幕拒绝提取"""
         from subtitle_app.muxer import extract_embedded_subtitle
         posts = []
         srt, status = extract_embedded_subtitle(Path("missing.mkv"), "ffmpeg.exe", posts.append)
         self.assertIsNone(srt)
         self.assertIn("不存在", status)
         self.mock_run.assert_not_called()
-
-    def test_image_subtitle_refused(self):
-        """图像字幕（如 hdmv_pgs_subtitle）必须拒绝，不能尝试转 SRT"""
+        # 图像字幕（如 hdmv_pgs_subtitle）必须拒绝，不能尝试转 SRT
         self.mock_probe.return_value = {"index": 1, "codec_name": "hdmv_pgs_subtitle", "language": "eng"}
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
-            from subtitle_app.muxer import extract_embedded_subtitle
             posts = []
             srt, status = extract_embedded_subtitle(v, "ffmpeg.exe", posts.append)
         self.assertIsNone(srt)
@@ -377,7 +366,7 @@ class TestExtractEmbeddedSubtitle(unittest.TestCase):
             self.assertIn(str(out), cmd)
 
     def test_conflict_name_appends_suffix(self):
-        """同名 SRT 已存在 → 使用 _extracted1.srt 避免覆盖"""
+        """同名 SRT 已存在 → 使用 _extracted1.srt 避免覆盖；再冲突 → _extracted2"""
         self.mock_probe.return_value = {"index": 0, "codec_name": "srt", "language": ""}
         self.mock_run.side_effect = self._mock_success
         with tempfile.TemporaryDirectory() as d:
@@ -390,11 +379,6 @@ class TestExtractEmbeddedSubtitle(unittest.TestCase):
             self.assertTrue((Path(d) / "movie_extracted1.srt").exists())
             # 已有文件未被覆盖
             self.assertEqual((Path(d) / "movie.srt").read_text(encoding="utf-8"), "old")
-
-    def test_conflict_name_second_extract_uses_next_index(self):
-        """movie_extracted1.srt 也已存在 → 使用 _extracted2.srt，绝不静默覆盖"""
-        self.mock_probe.return_value = {"index": 0, "codec_name": "srt", "language": ""}
-        self.mock_run.side_effect = self._mock_success
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             (Path(d) / "movie.srt").write_text("old", encoding="utf-8")
@@ -483,7 +467,7 @@ class TestConvertToMp4(unittest.TestCase):
         self.assertIn("aac", cmd2)
 
     def test_success_stream_copy(self):
-        """流复制成功 + 时长验证通过 → (mp4, True)"""
+        """流复制成功 + 时长验证通过 → (mp4, True)；失败时降级音频重编码"""
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             from subtitle_app.muxer import convert_to_mp4
@@ -496,9 +480,7 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertTrue(trustworthy)
             self.assertEqual(mock_run.call_count, 1)  # 首次即成功，不降级
             mock_verify.assert_called_once()
-
-    def test_fallback_audio_reencode(self):
-        """流复制失败 → 降级音频重编码 → 成功"""
+        # 流复制失败 → 降级音频重编码 → 成功
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             from subtitle_app.muxer import convert_to_mp4
@@ -523,7 +505,7 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertIn("aac", cmd2)
 
     def test_all_attempts_fail(self):
-        """三轮全失败 → (None, False) 且无残留文件"""
+        """三轮全失败 → (None, False) 且无残留文件；缺文件同样 (None, False)"""
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             from subtitle_app.muxer import convert_to_mp4
@@ -534,9 +516,13 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertFalse(trustworthy)
             self.assertFalse((Path(d) / "movie.mp4").exists())
             self.assertFalse((Path(d) / "movie_converted1.mp4").exists())
+        from subtitle_app.muxer import convert_to_mp4
+        mp4, trustworthy = convert_to_mp4(Path("missing.mkv"), "ffmpeg.exe", [].append)
+        self.assertIsNone(mp4)
+        self.assertFalse(trustworthy)
 
-    def test_duration_verify_fail_keeps_file(self):
-        """转换成功但时长验证失败 → 继续降级尝试，最终保留 mp4 但 is_trustworthy=False"""
+    def test_duration_verify_fail_cases(self):
+        """时长验证失败：全部失败 → trustworthy=False；下一级修复 → trustworthy=True"""
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             from subtitle_app.muxer import convert_to_mp4
@@ -556,9 +542,7 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertEqual(mp4, Path(d) / "movie.mp4")
             self.assertTrue(trustworthy)  # 第二级重编码修复了时长问题
             self.assertEqual(mock_run.call_count, 2)
-
-    def test_duration_verify_fail_all_levels(self):
-        """所有级别时长验证都失败 → 保留 mp4 候选但 is_trustworthy=False"""
+        # 所有级别时长验证都失败 → 保留 mp4 候选但 is_trustworthy=False
         with tempfile.TemporaryDirectory() as d:
             v = self._video(d)
             from subtitle_app.muxer import convert_to_mp4
@@ -569,8 +553,9 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertEqual(mp4, Path(d) / "movie.mp4")
             self.assertFalse(trustworthy)
 
-    def test_mp4_without_subs_skips(self):
-        """源已是 MP4 且无内嵌字幕 → 跳过，不调用 ffmpeg，原文件不变"""
+    def test_mp4_source_strip_and_skip(self):
+        """MP4 源：无内嵌字幕跳过；有内嵌字幕去字幕替换；去字幕失败保留原文件"""
+        # 无内嵌字幕 → 跳过，不调用 ffmpeg，原文件不变
         with tempfile.TemporaryDirectory() as d:
             v = Path(d) / "movie.mp4"
             v.write_bytes(b"original")
@@ -583,9 +568,7 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertTrue(trustworthy)
             self.assertEqual(v.read_bytes(), b"original")
             mock_run.assert_not_called()
-
-    def test_mp4_with_subs_stripped(self):
-        """源已是 MP4 且带内嵌字幕 → 重封装去字幕并原子替换原文件"""
+        # 带内嵌字幕 → 重封装去字幕并原子替换原文件
         with tempfile.TemporaryDirectory() as d:
             v = Path(d) / "movie.mp4"
             v.write_bytes(b"original")
@@ -605,9 +588,7 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertIn(".tmp.mp4", str(mock_run.call_args[0][0][-1]))
             # 无临时文件残留
             self.assertEqual(list(Path(d).glob("*.tmp.mp4")), [])
-
-    def test_mp4_strip_failure_keeps_original(self):
-        """源 MP4 去字幕失败 → (None, False)，原文件保留"""
+        # 去字幕失败 → (None, False)，原文件保留
         with tempfile.TemporaryDirectory() as d:
             v = Path(d) / "movie.mp4"
             v.write_bytes(b"original")

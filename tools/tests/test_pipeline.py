@@ -260,10 +260,7 @@ class TestTranscribeStage(unittest.TestCase):
             # 未进入恢复路径（has_state=False）→ 走正常转写流程
             self.assertIsNotNone(result)
             mock_transcriber.transcribe_video.assert_called_once()
-
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_transcribe_stage_skip_completed_ignores_other_video_state(self, mock_find_tool):
-        """其他视频的 state 不算本视频的断点：mkv 已存在时应正常跳过（不被 state 卡住）"""
+        # 其他视频的 state 不算本视频的断点：mkv 已存在时应正常跳过（不被 state 卡住）
         mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
         with tempfile.TemporaryDirectory() as d:
             item = Path(d) / "test.mp4"
@@ -423,9 +420,7 @@ class TestRun(unittest.TestCase):
                 self.assertNotIn("error", types, "停止不应发出 error 事件")
                 self.assertIn("done", types, "停止应发出 done 事件")
                 self.w.stop_requested = False
-
-    def test_run_stop_done_has_stopped_flag(self):
-        """停止时 done 事件带 stopped=True，供 UI 区分停止与完成"""
+        # 停止时 done 事件带 stopped=True，供 UI 区分停止与完成
         for concurrency in (1, 2):
             with self.subTest(concurrency=concurrency):
                 self.w.stop_requested = True
@@ -440,8 +435,9 @@ class TestRun(unittest.TestCase):
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")
-    def test_run_serial_continues_after_single_failure(self, mock_find_tool, mock_translate):
-        """串行：一个文件失败不中断整批；部分失败 → done 消息带失败数，不发整体 error"""
+    def test_run_serial_failure_handling(self, mock_find_tool, mock_translate):
+        """串行失败处理：部分失败 → done 带失败数；全部失败 → error 事件"""
+        # 部分失败：一个文件失败不中断整批
         mock_find_tool.return_value = None
         with tempfile.TemporaryDirectory() as d:
             good = Path(d) / "good.srt"
@@ -461,12 +457,8 @@ class TestRun(unittest.TestCase):
         self.assertIn("bad.xyz", err_logs[0]["message"])
         # 成功的文件仍被处理
         mock_translate.assert_called()
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_run_serial_all_failed_reports_error(self, mock_find_tool, mock_translate):
-        """串行：全部失败 → 发 error 事件而不是"完成" """
-        mock_find_tool.return_value = None
+        # 全部失败 → 发 error 事件而不是"完成"
+        self.post.reset_mock()
         with tempfile.TemporaryDirectory() as d:
             bad = Path(d) / "bad.xyz"
             bad.write_text("...", encoding="utf-8")
@@ -501,9 +493,10 @@ class TestRun(unittest.TestCase):
         self.assertTrue(done)
         self.assertIn("1 个文件翻译失败", done[-1]["message"])
 
+    @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")
-    def test_run_aborts_on_same_stem_conflict(self, mock_find_tool):
-        """同目录 a.mp4 + a.mkv：输出名冲突，直接报 error 且不处理任何文件"""
+    def test_run_same_stem_conflict_and_subtitle_ok(self, mock_find_tool, mock_translate):
+        """同目录 a.mp4 + a.mkv 冲突报错；a.mp4 + a.srt 是正常用法不冲突"""
         opts = self._make_opts(1)
         with tempfile.TemporaryDirectory() as d:
             a = Path(d) / "a.mp4"
@@ -517,12 +510,9 @@ class TestRun(unittest.TestCase):
                   if c[0][0].get("type") == "error"]
         self.assertTrue(errors)
         self.assertIn("覆盖", errors[0]["message"])
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_run_same_stem_subtitle_not_conflict(self, mock_find_tool, mock_translate):
-        """a.mp4 + a.srt 是正常用法（字幕作为源文件），不应判为冲突"""
+        # a.mp4 + a.srt 是正常用法（字幕作为源文件），不应判为冲突
         mock_find_tool.return_value = None
+        self.post.reset_mock()
         with tempfile.TemporaryDirectory() as d:
             a = Path(d) / "a.mp4"
             a.write_bytes(b"")
@@ -537,7 +527,8 @@ class TestRun(unittest.TestCase):
     @patch("subtitle_app.local_service.shutdown_owned")
     def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_running, mock_translate):
         """阶段批量：转写后释放 Whisper 显存；本地模式同时清理本会话 llama；
-        pause_before_embed 被强制为 False（按用户要求阶段批量自动嵌入）"""
+        pause_before_embed 被强制为 False（按用户要求阶段批量自动嵌入）；
+        检测到外部服务在跑时发 WARNING 提示"""
         mock_running.return_value = False
         mock_translate.return_value = None
 
@@ -564,26 +555,15 @@ class TestRun(unittest.TestCase):
         self.assertTrue(mock_translate.call_count >= 2)
         for call in mock_translate.call_args_list:
             self.assertFalse(call[0][1]["pause_before_embed"])
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.local_service.is_service_running")
-    @patch("subtitle_app.local_service.shutdown_owned")
-    def test_run_staged_warns_on_external_service(self, mock_shutdown, mock_running, mock_translate):
-        """阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）"""
+        # 阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）
+        self.post.reset_mock()
+        mock_shutdown.reset_mock()
         mock_running.return_value = True   # 外部服务在跑
         mock_translate.return_value = None
-
-        self.w._transcribe_stage = lambda item, idx, total, opts: {
-            "path": str(item), "idx": idx, "total": total, "srt": 1, "item": item}
-
-        opts = self._make_opts(concurrency=2)
-        opts["api_url"] = service_url_prefix() + "/v1/chat/completions"
-
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "a.mp4"
             srt.write_bytes(b"")
             self.w._run([srt], opts)
-
         warns = [c[0][0] for c in self.post.call_args_list
                  if c[0][0].get("level") == "WARNING"]
         self.assertTrue(warns, "外部翻译服务在跑时应发出 WARNING 提示")

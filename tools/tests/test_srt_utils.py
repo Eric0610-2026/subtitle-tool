@@ -42,7 +42,8 @@ class TestSrtRoundtrip(unittest.TestCase):
             encoding="utf-8")
         return p
 
-    def test_parse_and_write_roundtrip(self):
+    def test_parse_write_timing_and_gbk(self):
+        """parse/write 往返 + timing 格式化 + GBK 编码回退"""
         with tempfile.TemporaryDirectory() as d:
             blocks = parse_srt(self._sample(Path(d)))
             self.assertEqual(len(blocks), 2)
@@ -54,13 +55,9 @@ class TestSrtRoundtrip(unittest.TestCase):
             re = parse_srt(out)
             self.assertEqual(len(re), 2)
             self.assertEqual(re[1].text, "第二句")
-
-    def test_subtitle_block_timing(self):
         b = SubtitleBlock(index=1, start=1.0, end=3.0, text="x")
         self.assertEqual(b.timing, "00:00:01,000 --> 00:00:03,000")
-
-    def test_parse_srt_gbk_fallback(self):
-        """GBK/ANSI 编码的中文字幕也能解析（Windows 常见）"""
+        # GBK/ANSI 编码的中文字幕也能解析（Windows 常见）
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "gbk.srt"
             p.write_bytes(
@@ -159,6 +156,7 @@ class TestJobDisplay(unittest.TestCase):
 
 class TestFindSubtitle(unittest.TestCase):
     def test_find_existing_and_match_video(self):
+        """find_existing / match_video 基本行为 + 忽略 .partial.srt 断点"""
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             # 子目录隔离：find_existing 只认同名/带语言后缀字幕
@@ -174,9 +172,7 @@ class TestFindSubtitle(unittest.TestCase):
             mv.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
             (mv_dir / "movie.mp4").write_text("x")
             self.assertEqual(match_video_for_subtitle(mv, mv_dir), mv_dir / "movie.mp4")
-
-    def test_find_existing_ignores_partial(self):
-        """崩溃遗留的 .partial.srt 断点不得被当作成品字幕"""
+        # 崩溃遗留的 .partial.srt 断点不得被当作成品字幕
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             vid = d / "movie.mp4"
@@ -223,7 +219,8 @@ class TestAnalyzeSubtitleQuality(unittest.TestCase):
         lines = format_quality_report(report)
         self.assertTrue(any("质量提醒" in ln for ln in lines))
 
-    def test_analyze_subtitle_file(self):
+    def test_analyze_subtitle_file_and_edge_parses(self):
+        """文件级质量分析 + 空块在中间保留 + 缺空行不吞块"""
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "q.srt"
             # 人工写入含空文本的块：parse 后 text 为空字符串
@@ -239,9 +236,7 @@ class TestAnalyzeSubtitleQuality(unittest.TestCase):
             # 第 2 条 content 为空 → empty
             self.assertGreaterEqual(report["counts"]["empty"], 1)
             self.assertGreaterEqual(report["counts"]["gap"], 1)
-
-    def test_blank_block_in_middle_kept(self):
-        """空文本块不在文件末尾时也必须被解析保留（修复前会被正则丢弃）"""
+        # 空文本块不在文件末尾时也必须被解析保留（修复前会被正则丢弃）
         blocks = parse_srt_text(
             "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
             "2\n00:00:03,000 --> 00:00:04,000\n\n"
@@ -250,9 +245,7 @@ class TestAnalyzeSubtitleQuality(unittest.TestCase):
         self.assertEqual([b.text for b in blocks], ["Hello", "", "World"])
         report = analyze_subtitle_quality(blocks)
         self.assertGreaterEqual(report["counts"]["empty"], 1)
-
-    def test_missing_blank_line_no_merge(self):
-        """块间缺空行（畸形输入）时，不能把下一块序号+时间戳吞进上一块文本"""
+        # 块间缺空行（畸形输入）时，不能把下一块序号+时间戳吞进上一块文本
         blocks = parse_srt_text(
             "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
             "2\n00:00:03,000 --> 00:00:04,000\nWorld\n",
@@ -268,11 +261,10 @@ class TestWrapSubtitleText(unittest.TestCase):
 
     M = 25
 
-    def test_short_line_unchanged(self):
+    def test_short_and_disabled(self):
+        """短行/空行不变；宽度 0 禁用折行"""
         self.assertEqual(wrap_subtitle_text("短句不折", self.M), "短句不折")
         self.assertEqual(wrap_subtitle_text("", self.M), "")
-
-    def test_disabled_when_zero(self):
         long_line = "无折行" * 30
         self.assertEqual(wrap_subtitle_text(long_line, 0), long_line)
 
@@ -284,22 +276,21 @@ class TestWrapSubtitleText(unittest.TestCase):
         for l in lines:
             self.assertLessEqual(len(l), self.M)
         self.assertEqual("".join(lines), t)
+        # 无标点长串硬切，仍保持每行宽度
+        t2 = "あ" * 80
+        lines2 = wrap_subtitle_text(t2, self.M).split("\n")
+        self.assertTrue(all(len(l) <= self.M for l in lines2))
+        self.assertEqual("".join(lines2), t2)
 
-    def test_cjk_no_punctuation_hard_split_keeps_width(self):
-        t = "あ" * 80
-        lines = wrap_subtitle_text(t, self.M).split("\n")
-        self.assertTrue(all(len(l) <= self.M for l in lines))
-        self.assertEqual("".join(lines), t)
-
-    def test_bilingual_block_wraps_each_line_independently(self):
+    def test_bilingual_and_latin_wrap(self):
+        """双语块各行独立折行；拉丁文本按词边界折不断词"""
         src = "どうしたらいいんだ。今日クラスで黒歴史まで垂らされて授業何もできなかった。"
         zh = "我该怎么办？今天在课堂上，连过去的黑历史都被翻出来，我根本无法上课。"
         out = wrap_subtitle_text(src + "\n" + zh, self.M)
         for l in out.split("\n"):
             self.assertLessEqual(len(l), self.M)
         self.assertIn("\n", out)
-
-    def test_latin_wraps_at_word_boundary(self):
+        # 拉丁文本
         t = "This is a fairly long English subtitle line that should be wrapped nicely"
         lines = wrap_subtitle_text(t, self.M).split("\n")
         self.assertTrue(all(len(l) <= self.M for l in lines))
