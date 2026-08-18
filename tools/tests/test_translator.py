@@ -195,8 +195,9 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
         return posts, mocks
 
-    def test_translate_bilingual(self):
-        """双语模式：文本 + 中文翻译"""
+    def test_translate_output_modes(self):
+        """输出模式：双语（原文+译文）/仅翻译（只译文）/中文源繁简转换"""
+        # 双语模式：文本 + 中文翻译
         posts, mocks = self._run(srt_texts=["Hello", "World"])
         previews = [p for p in posts if p["type"] == "preview"]
         self.assertGreater(len(previews), 0)
@@ -207,15 +208,11 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertEqual(lines[2], "Hello")
         # 译文列只含纯译文，不得重复显示原文（双语模式下 final_texts 已是"原文\n译文"）
         self.assertEqual(lines[3], "Hello（中文）")
-
-    def test_translate_only_mode(self):
-        """仅翻译模式：只输出中文"""
+        # 仅翻译模式：只输出中文
         posts, mocks = self._run(srt_texts=["Hello", "World"], translation_only=True)
         previews = [p for p in posts if p["type"] == "preview"]
         self.assertGreater(len(previews), 0)
-
-    def test_chinese_source_simplified(self):
-        """中文源 → 繁简转换"""
+        # 中文源 → 繁简转换
         blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text="Hello")]
         srt_path = self.d / "test.srt"
         from subtitle_app.srt_utils import write_srt
@@ -305,16 +302,14 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         run("https://api.example.com", bs_marker=50)
         self.assertEqual(captured["kwargs"]["batch_size"], 50)
 
-    def test_mkv_embed_success(self):
-        """MKV 内嵌成功路径"""
+    def test_mkv_embed_success_and_fallback(self):
+        """MKV 内嵌成功路径；失败 → 回退外挂 SRT"""
         posts, mocks = self._run(srt_texts=["Hello", "World"], mkv_ok=True)
         mocks["embed_subtitles_to_video"].assert_called_once()
         # 应有 output_path 消息
         outputs = [p for p in posts if p["type"] == "output_path"]
         self.assertGreater(len(outputs), 0)
-
-    def test_mkv_embed_failure_fallback(self):
-        """MKV 内嵌失败 → 回退外挂 SRT"""
+        # MKV 内嵌失败 → 回退外挂 SRT
         posts, mocks = self._run(srt_texts=["Hello", "World"], mkv_ok=False)
         outputs = [p for p in posts if p["type"] == "output_path"]
         self.assertGreater(len(outputs), 0)
@@ -367,7 +362,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
 
 class TestTranslateOnlyNonVideo(unittest.TestCase):
-    """非视频文件 → 外挂字幕"""
+    """非视频文件 → 外挂字幕 + 进度文件记录"""
 
     def test_non_video_output(self):
         with tempfile.TemporaryDirectory() as d:
@@ -391,10 +386,6 @@ class TestTranslateOnlyNonVideo(unittest.TestCase):
             self.assertGreater(len(outputs), 0)
             # 非视频应输出到 source_srt 同目录
             self.assertIn(str(d), outputs[-1]["path"])
-
-
-class TestTranslateOnlyProgressFile(unittest.TestCase):
-    """进度文件记录"""
 
     def test_progress_file_written(self):
         with tempfile.TemporaryDirectory() as d:

@@ -198,7 +198,8 @@ class TestParagraphContext(unittest.TestCase):
 class TestRecursionProtection(unittest.TestCase):
     """递归深度保护测试"""
 
-    def test_depth_limit_and_single_text_fallback(self):
+    def test_recursion_and_fallback_paths(self):
+        """递归深度保护 + 各类缓存/断点/回填路径共用一套覆盖"""
         from subtitle_app.translation import MAX_RECURSION_DEPTH
         client = TranslationClient("url", "key", "m",
                                    Path(tempfile.mktemp()), lambda *a: None, batch_size=5)
@@ -214,10 +215,7 @@ class TestRecursionProtection(unittest.TestCase):
         client._call_api = raise_err
         result = client._translate_batch(["hello"])
         self.assertEqual(result[0]["zh"], "hello")
-
-    def test_skip_and_cache_paths(self):
-        """中文源/缓存全命中时返回译文；缓存第二次命中不调 API"""
-        # 中文源：translate_blocks 直接返回（跳过判定在 _translate_only 层）
+        # 中文源/缓存全命中时返回译文；缓存第二次命中不调 API
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -226,7 +224,6 @@ class TestRecursionProtection(unittest.TestCase):
             c._translate_batch = mock
             self.assertEqual(c.translate_blocks(blocks, "zh", is_bilingual=True),
                              ["你好世界"])
-        # 缓存全命中：第二次不再调 API，且返回译文而非原文
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -240,9 +237,7 @@ class TestRecursionProtection(unittest.TestCase):
             res2 = c.translate_blocks(blocks, "en", is_bilingual=True)
             mock.assert_not_called()
             self.assertEqual(res2, ["你好世界"])
-
-    def test_empty_cache_and_state_retried(self):
-        """缓存/断点 state 里的空串不应阻止重新翻译"""
+        # 缓存/断点 state 里的空串不应阻止重新翻译
         from subtitle_app.srt_utils import sentence_cache_key
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
@@ -254,7 +249,6 @@ class TestRecursionProtection(unittest.TestCase):
                 {"id": 1, "zh": "你好"}]
             self.assertEqual(c.translate_blocks(blocks, "en", is_bilingual=True),
                              ["你好"])
-        # 断点 state 中空 done → 忽略并重新翻译
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -268,9 +262,7 @@ class TestRecursionProtection(unittest.TestCase):
                 {"id": 1, "zh": "你好"}]
             res = c.translate_blocks(blocks, "en", is_bilingual=True, state_path=state)
             self.assertEqual(res, ["你好"])
-
-    def test_partial_batch_missing_id_order_fallback(self):
-        """API 漏 id 时按顺序回填，不整块丢弃"""
+        # API 漏 id 时按顺序回填，不整块丢弃
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient("url", "key", "m",
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)

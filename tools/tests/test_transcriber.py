@@ -50,8 +50,8 @@ class TestTranscriberClearCache(unittest.TestCase):
         else:
             sys.modules.pop("torch", None)
 
-    def test_clear_cache_keeps_models(self):
-        """clear_cache() 不再卸载模型，仅释放 CUDA 缓存；空缓存/无 torch 不崩溃"""
+    def test_clear_cache_keeps_models_and_release(self):
+        """clear_cache() 不再卸载模型，仅释放 CUDA 缓存；release_model 清空缓存"""
         t = Transcriber()
         t.clear_cache()  # 空缓存 + torch 不可用（setUp mock）都不崩溃
         mock_model = MagicMock()
@@ -60,12 +60,7 @@ class TestTranscriberClearCache(unittest.TestCase):
         # 模型缓存应保留
         self.assertIn("key1", t._model_cache)
         self.assertIs(t._model_cache["key1"][2], mock_model)
-
-    def test_release_model_empties_and_is_loaded(self):
-        t = Transcriber()
-        self.assertFalse(t.is_loaded())
-        mock_model = MagicMock()
-        t._model_cache["key1"] = ("cpu", "int8", mock_model)
+        # release_model 清空缓存并置 is_loaded=False
         self.assertTrue(t.is_loaded())
         t.release_model()
         self.assertEqual(t._model_cache, {})
@@ -173,7 +168,8 @@ class TestWritePartialSrt(unittest.TestCase):
 class TestSplitLongBlocks(unittest.TestCase):
     """split_long_blocks 不应产出空文本时间轴"""
 
-    def test_short_texts_never_produce_empty_cues(self):
+    def test_split_never_empty_and_merge_duplicates(self):
+        """split_long_blocks 不应产出空文本时间轴；相邻重复块合并"""
         # 旧逻辑：1 字符 + ~45s → 连续两条 ~15s 空 cue + 一条有字
         blocks = [SubtitleBlock(1, 6000.293, 6045.154, "x")]
         out = split_long_blocks(blocks)
@@ -192,8 +188,6 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertTrue(out)
         self.assertTrue(all(len(b.text.strip()) >= 2 for b in out))
         self.assertEqual("".join(b.text for b in out), "abcd")
-
-    def test_dedupe_adjacent_duplicates_merged(self):
         # 合并相邻文本完全相同的块（Whisper 对循环语音的重复输出）
         blocks = [
             SubtitleBlock(1, 0.0, 5.0, "やらして"),
@@ -371,14 +365,14 @@ class TestAutoLangReuse(unittest.TestCase):
                 self.t.transcribe_video(video, Path(d), {**self.base_opts, **opts})
         return model.transcribe.call_args.kwargs.get("language")
 
-    def test_reuse_default_on(self):
-        """默认开启：首个检测后同批复用"""
+    def test_reuse_default_on_and_disabled(self):
+        """默认开启：首个检测后同批复用；显式关闭时每文件独立检测"""
+        # 默认开启：首个检测后同批复用
         self.assertEqual(self._run(), None)
         self.assertEqual(self.t._cached_auto_lang, "en")
         self.assertEqual(self._run(), "en")
-
-    def test_reuse_disabled_detects_each_file(self):
-        """显式关闭 revert 每文件独立检测：不缓存、不复用"""
+        # 显式关闭 revert 每文件独立检测：不缓存、不复用
+        self.t = Transcriber()  # 重置缓存
         self.assertEqual(self._run(reuse_auto_lang=False), None)
         self.assertIsNone(self.t._cached_auto_lang)
         self.assertEqual(self._run(reuse_auto_lang=False), None)

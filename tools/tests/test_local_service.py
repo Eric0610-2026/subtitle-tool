@@ -77,13 +77,21 @@ class ShutdownRunningTest(unittest.TestCase):
             ok = local_service.shutdown_running()
         return ok, calls
 
-    def test_no_listener_no_action(self):
+    def test_no_listener_and_non_llama_no_action(self):
+        """无监听不动；被其他程序占用（非 llama-server）不杀、返回 False"""
         # 无 8080 监听 → 不动，不触发 netstat
         with self._netstat_mock("  TCP    127.0.0.1:9999    0.0.0.0:0    LISTENING   1\n") as mrun, \
              patch("subtitle_app.local_service._port_listening", return_value=False):
             ok = local_service.shutdown_running()
         self.assertFalse(ok)
         mrun.assert_not_called()  # 无监听时不应触发 netstat
+        # 8080 被其他程序占用（非 llama-server.exe）→ 不杀、返回 False
+        netstat_out = (f"  TCP    127.0.0.1:{local_service._PORT}    0.0.0.0:0"
+                       "              LISTENING       77777\n")
+        tasklist_out = ""  # /FI 过滤后无 llama-server 行
+        ok, calls = self._shutdown_with(netstat_out, tasklist_out)
+        self.assertFalse(ok)
+        self.assertFalse(any(c[0] == "taskkill" for c in calls), "非 llama-server 不得被杀")
 
     def test_kills_only_llama_server_listener(self):
         """8080 监听者中只杀 llama-server.exe，其他进程不动
@@ -104,18 +112,21 @@ class ShutdownRunningTest(unittest.TestCase):
         self.assertIn("34368", taskkill_calls[0])  # llama-server 被杀
         self.assertFalse(any("99999" in c for c in taskkill_calls))  # python.exe 不杀
 
-    def test_non_llama_listener_not_killed(self):
-        """8080 被其他程序占用（非 llama-server.exe）→ 不杀、返回 False"""
-        netstat_out = (f"  TCP    127.0.0.1:{local_service._PORT}    0.0.0.0:0"
-                       "              LISTENING       77777\n")
-        tasklist_out = ""  # /FI 过滤后无 llama-server 行
-        ok, calls = self._shutdown_with(netstat_out, tasklist_out)
-        self.assertFalse(ok)
-        self.assertFalse(any(c[0] == "taskkill" for c in calls), "非 llama-server 不得被杀")
-
-    def test_shutdown_owned_force_kills_when_terminate_ineffective(self):
-        """terminate 后进程仍存活 → taskkill 兜底强杀，避免退出卡顿/残留"""
-
+    def test_shutdown_owned_terminates_and_force_kill(self):
+        """shutdown_owned：terminate 生效则退出；无效则 taskkill 兜底强杀"""
+        # terminate 生效路径
+        got = []
+        p = _FakeProc()
+        p.terminate = lambda: got.append(1) or setattr(p, "returncode", 0)
+        local_service._owned_proc = p
+        local_service._started_by_us = True
+        # poll() 恒返回 None 会触发 taskkill 兜底分支；patch 掉避免真实执行
+        # （中文系统 taskkill 输出 GBK，text=True 按 UTF-8 解码会抛 UnicodeDecodeError）
+        with patch("subtitle_app.local_service.subprocess.run"):
+            local_service.shutdown_owned()
+        self.assertTrue(got)
+        self.assertIsNone(local_service._owned_proc)
+        # terminate 无效 → taskkill 兜底强杀
         class _StubbornProc(_FakeProc):
             def terminate(self):
                 pass  # 假装 terminate 无效，poll 永远返回 None
@@ -306,21 +317,8 @@ class LocalServiceTest(unittest.TestCase):
             self.assertEqual(len(launches), 1, "并发下应只有一个调用者拉起进程")
             self.assertEqual(results, [True, True, True])
 
-    def test_shutdown_owned_terminates(self):
-        got = []
-        p = _FakeProc()
-        p.terminate = lambda: got.append(1) or setattr(p, "returncode", 0)
-        local_service._owned_proc = p
-        local_service._started_by_us = True
-        # poll() 恒返回 None 会触发 taskkill 兜底分支；patch 掉避免真实执行
-        # （中文系统 taskkill 输出 GBK，text=True 按 UTF-8 解码会抛 UnicodeDecodeError）
-        with patch("subtitle_app.local_service.subprocess.run"):
-            local_service.shutdown_owned()
-        self.assertTrue(got)
-        self.assertIsNone(local_service._owned_proc)
-
-    def test_startup_diagnosis_tail_and_missing_log(self):
-        """诊断：无日志返回空串；普通错误只附日志尾部，不带端口修复提示"""
+    def test_startup_diagnosis_tail_and_netsh(self):
+        """诊断：无日志返回空串；普通错误附日志尾部不带 netsh；bind 失败附 netsh 提示"""
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "srv.log"
             with patch.object(local_service, "_SERVER_LOG", log):
@@ -330,9 +328,7 @@ class LocalServiceTest(unittest.TestCase):
                 self.assertIn("line two", diag)
                 self.assertIn("line one", diag)
                 self.assertNotIn("netsh", diag)  # 非 bind 失败 → 不给端口提示
-
-    def test_startup_diagnosis_bind_failure_hints_netsh(self):
-        """诊断：bind 失败（如被 Windows 端口预留占走）→ 附管理员 netsh 修复命令"""
+        # bind 失败（如被 Windows 端口预留占走）→ 附管理员 netsh 修复命令
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "srv.log"
             log.write_text(
