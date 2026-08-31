@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
-    load_json, save_json, IGNORE_FILE, analyze_subtitle_file, format_quality_report,
+    load_json, save_json, IGNORE_FILE,
     match_video_for_subtitle,
 )
 from .translation import TranslationClient
@@ -144,12 +144,14 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
+        # 始终传入 state_path：state 文件由 translate_blocks 在首批落盘时创建，
+        # 若只在"已存在"时才传，文件永远不会被创建，断点续翻就成了死功能。
+        # 翻译成功后由下方清理逻辑删除；中断时保留供下次续翻。
         state_path = source_srt.with_name(source_srt.stem + ".translate_state.json")
         if state_path.exists():
             done = load_json(state_path, {}).get("done", {})
-            post({"type": "log", "message": f"断点续翻：已翻译 {len(done)} 句，继续翻译剩余 {len(blocks) - len(done)} 句", "level": "INFO"})
-        else:
-            state_path = None
+            if done:
+                post({"type": "log", "message": f"断点续翻：已翻译 {len(done)} 句，继续翻译剩余 {len(blocks) - len(done)} 句", "level": "INFO"})
 
         already_translated_idx = set()
         need_translate_idx = []
@@ -291,7 +293,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     # ── 将翻译后的字幕也统一备份到 srt_backup 文件夹 ──
     # 策略：始终保留 srt_backup 中的副本；工作区临时 SRT 仍可按原规则清理
-    translated_backup_path: Optional[Path] = None
     if translated_srt and translated_srt.exists():
         backup_dir = _BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -302,27 +303,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             bak_dest = backup_dir / f"{item_stem}.translated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
         try:
             shutil.copy2(str(translated_srt), str(bak_dest))
-            translated_backup_path = bak_dest
             post({"type": "log", "message": f"翻译字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)
         _prune_backups(backup_dir, getattr(cfg.translation, "backup_max_files", 50))
-
-    # ── 嵌入前质量检查（计数+样例；不阻断自动嵌入）──
-    srt_for_quality = None
-    if translated_srt and translated_srt.exists():
-        srt_for_quality = translated_srt
-    elif source_srt and source_srt.exists():
-        srt_for_quality = source_srt
-    if srt_for_quality is not None:
-        report = analyze_subtitle_file(srt_for_quality)
-        if report is not None:
-            if translated_backup_path is not None:
-                report["backup_path"] = str(translated_backup_path.resolve())
-            post({"type": "quality_report", **report})
-            for line in format_quality_report(report):
-                level = "WARNING" if report.get("total_issues") else "INFO"
-                post({"type": "log", "message": line, "level": level})
 
     # ── 嵌入前暂停，供用户预览/编辑 ──
     pause_resp: Optional[PauseResponse] = None

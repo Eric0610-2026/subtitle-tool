@@ -20,7 +20,7 @@ from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
 )
 
-from .srt_utils import fmt_duration, estimate_eta
+from .srt_utils import fmt_duration, estimate_eta, _read_text_auto
 from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
@@ -227,6 +227,9 @@ class PreviewPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._last_output_dir: Optional[Path] = None
+        # 当前预览内容来源的字幕文件：保存时回写该文件，避免按当前选中项
+        # 推导目标导致"预览 A 却覆盖 B"。实时预览等无文件来源时为 None。
+        self._source_path: Optional[Path] = None
         self._save_cb = None
         self._offset_cb = None
         self._raw_text = ""
@@ -276,7 +279,7 @@ class PreviewPanel(QFrame):
         """
         blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
         rows = []
-        for block in blocks:
+        for block_idx, block in enumerate(blocks):
             lines = block.splitlines()
             if len(lines) < 3:
                 continue
@@ -286,7 +289,10 @@ class PreviewPanel(QFrame):
                 continue
             original = text_lines[0]
             translated = "\n".join(text_lines[1:]) or "—"
-            rows.append((timeline, original, translated))
+            # block_idx 随单元格存入 UserRole：编辑回写按它定位源块。
+            # 渲染会跳过无效块（行数不足/无文本），表格行号 ≠ 块序号，
+            # 若按行号回写会写错块或静默丢失编辑。
+            rows.append((block_idx, timeline, original, translated))
         if not rows:
             self._highlighted_rows.clear()
             self._stack.setCurrentWidget(self._empty_label)
@@ -297,11 +303,12 @@ class PreviewPanel(QFrame):
             self._highlighted_rows.clear()
             self.preview.setRowCount(0)
             self.preview.setRowCount(len(rows))
-            for r, (timeline, original, translated) in enumerate(rows):
+            for r, (block_idx, timeline, original, translated) in enumerate(rows):
                 for col, (kind, text) in enumerate(
                     (("index", str(r + 1)), ("time", timeline), ("text", original), ("translation", translated))
                 ):
                     item = QTableWidgetItem(text)
+                    item.setData(Qt.UserRole, block_idx)
                     self._style_item(item, kind)
                     if kind == "index":
                         # 序号列始终不可编辑；其余列由 setReadOnly 统一控制
@@ -375,9 +382,11 @@ class PreviewPanel(QFrame):
             path = url.toLocalFile()
             if path.lower().endswith(".srt"):
                 try:
-                    text = Path(path).read_text(encoding="utf-8-sig")
+                    # 与 parse_srt / 列表加载同策略的自动编码识别（GBK/ANSI 中文字幕常见）
+                    text = _read_text_auto(Path(path))
                     self.set_text(text)
                     self._last_output_dir = Path(path).parent
+                    self._source_path = Path(path)
                     self.fileDropped.emit(path)
                 except Exception as e:
                     logger.error(f"读取字幕文件失败: {e}")
@@ -395,6 +404,7 @@ class PreviewPanel(QFrame):
 
     def clear(self):
         self._raw_text = ""
+        self._source_path = None
         self._highlighted_rows.clear()
         self._updating = True
         try:
@@ -463,11 +473,12 @@ class PreviewPanel(QFrame):
         col = item.column()
         if col not in (1, 2, 3):
             return
-        row = item.row()
         blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
-        if row >= len(blocks):
+        # 按渲染时记录的源块索引回写（渲染跳过了无效块，行号 ≠ 块序号）
+        block_idx = item.data(Qt.UserRole)
+        if not isinstance(block_idx, int) or block_idx >= len(blocks):
             return
-        lines = blocks[row].splitlines()
+        lines = blocks[block_idx].splitlines()
         if col == 1:
             # 时间轴
             if len(lines) < 2:
@@ -488,7 +499,7 @@ class PreviewPanel(QFrame):
                     lines = lines[:2] + [text_lines[0]]
                 else:
                     lines = lines[:2] + [text_lines[0]] + new_trans.split("\n")
-        blocks[row] = "\n".join(lines)
+        blocks[block_idx] = "\n".join(lines)
         body = "\n\n".join(blocks)
         # 保留原始文本首尾空白，避免重建丢失 SRT 结尾换行等格式
         leading = self._raw_text[: len(self._raw_text) - len(self._raw_text.lstrip())]
@@ -514,6 +525,15 @@ class PreviewPanel(QFrame):
     @last_output_dir.setter
     def last_output_dir(self, path: Path):
         self._last_output_dir = path
+
+    @property
+    def source_path(self) -> Optional[Path]:
+        """当前预览内容来源的字幕文件（保存时回写它）；实时预览等无来源时为 None"""
+        return self._source_path
+
+    @source_path.setter
+    def source_path(self, path):
+        self._source_path = path
 
 
 class EditDialog(QDialog):

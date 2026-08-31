@@ -3,6 +3,7 @@
 """
 对话框模块：设置、历史管理、缓存管理
 """
+import glob
 from pathlib import Path
 from typing import List
 
@@ -1212,7 +1213,13 @@ def _find_matching_subtitle(video_path: Path) -> Path:
     if exact.exists():
         return exact
     # 2. 匹配带语言标签的 {stem}.xx.srt / {stem}.xx-xx.srt
-    for f in sorted(parent.glob(f"{stem}.*.srt")):
+    # glob.escape：stem 含 []?*（如 "movie [2024]"）时不被当作通配符导致匹配失真
+    # 排除断点/中间产物：误选未完成的 .partial.srt 会把半截字幕嵌入并替换原视频
+    for f in sorted(parent.glob(glob.escape(stem) + ".*.srt")):
+        f_stem = f.stem
+        if "partial" in f_stem.lower() or "translated" in f_stem.lower() \
+                or "backup" in f_stem.lower() or "bak" in f_stem.lower():
+            continue
         return f
     return None
 

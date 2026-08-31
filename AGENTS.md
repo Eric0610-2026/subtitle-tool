@@ -38,7 +38,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 | `translation.py` | 翻译客户端：句子级缓存、批处理、递归降级、403 curl fallback |
 | `translator.py` | 翻译阶段编排：翻译→组装双语→落盘→MKV 内嵌→备份 |
 | `pipeline.py` | 串行/并行流水线编排、`_DaemonThreadPoolExecutor`、停止管理 |
-| `srt_utils.py` | SRT 解析/写入、断句、繁简转换、`OverallProgress`、质量检查 |
+| `srt_utils.py` | SRT 解析/写入、断句、繁简转换、`OverallProgress` |
 | `muxer.py` | MKV 软内嵌、从视频提取内嵌字幕、转 MP4（ffprobe 探测 + ffmpeg，时长验证后删除原文件；MP4 源带内嵌字幕时去字幕重封装替换原文件） |
 | `local_service.py` | 本地 Hy-MT2 llama-server 自动拉起/探测/退出清理（端口 `_PORT=8188`，不用 8080 是因为它常被 Hyper-V/WSL 动态预留；`service_url_prefix()` 供各模块识别"本地服务 URL"；启动日志落盘 `cache/.llama-server.log`，启动失败时读日志尾部给出真实原因，如端口被 Windows 预留时提示 netsh 修复命令） |
 | `config.py` | 读取 config.json → `SimpleNamespace` 单例 `cfg` |

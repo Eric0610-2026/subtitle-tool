@@ -355,131 +355,6 @@ def _wrap_latin_line(line: str, max_chars: int) -> List[str]:
     return result
 
 
-# ── 字幕质量检查（计数 + 样例，供完成摘要）──
-
-_QUALITY_KIND_LABELS = {
-    "empty": "空字幕",
-    "too_short": "过短",
-    "too_long": "过长",
-    "overlap": "重叠",
-    "gap": "间隙过长",
-}
-
-
-def analyze_subtitle_quality(
-    blocks: List[SubtitleBlock],
-    *,
-    path: Optional[Path] = None,
-    min_duration: float = 0.3,
-    max_duration: float = 15.0,
-    max_gap: float = 10.0,
-    sample_limit: int = 5,
-) -> dict:
-    """分析字幕时间轴硬伤，返回结构化报告（不修改 blocks）。
-
-    返回字段：
-      path, name, total_cues, total_issues,
-      counts: {empty, too_short, too_long, overlap, gap},
-      samples: 最多 sample_limit 条可读描述
-    """
-    counts = {k: 0 for k in _QUALITY_KIND_LABELS}
-    samples: List[str] = []
-
-    def _add(kind: str, message: str) -> None:
-        counts[kind] = counts.get(kind, 0) + 1
-        if len(samples) < sample_limit:
-            samples.append(message)
-
-    for i, b in enumerate(blocks):
-        text = (b.text or "").strip()
-        dur = b.end - b.start
-        if not text:
-            _add("empty", f"#{b.index} 空字幕 ({dur:.1f}s)")
-            # 空条仍继续检查时间关系，便于统计
-        else:
-            if dur < min_duration:
-                snippet = text[:40]
-                _add("too_short", f"#{b.index} 时长过短 ({dur:.1f}s): {snippet}")
-            if dur > max_duration:
-                snippet = text[:40]
-                _add("too_long", f"#{b.index} 时长过长 ({dur:.1f}s): {snippet}")
-        if i > 0:
-            prev = blocks[i - 1]
-            if b.start < prev.end:
-                _add(
-                    "overlap",
-                    f"#{prev.index}->#{b.index} 时间重叠 "
-                    f"({prev.end:.1f}s->{b.start:.1f}s)",
-                )
-            else:
-                gap = b.start - prev.end
-                if gap > max_gap:
-                    _add(
-                        "gap",
-                        f"#{prev.index}->#{b.index} 间隙过长 ({gap:.1f}s)",
-                    )
-
-    total_issues = sum(counts.values())
-    p = Path(path) if path else None
-    return {
-        "path": str(p.resolve()) if p and p.exists() else (str(p) if p else ""),
-        "name": p.name if p else "",
-        "total_cues": len(blocks),
-        "total_issues": total_issues,
-        "counts": counts,
-        "samples": samples,
-    }
-
-
-def analyze_subtitle_file(
-    path: Path,
-    *,
-    min_duration: float = 0.3,
-    max_duration: float = 15.0,
-    max_gap: float = 10.0,
-    sample_limit: int = 5,
-) -> Optional[dict]:
-    """解析 SRT 并做质量分析；失败返回 None。"""
-    try:
-        blocks = parse_srt(path)
-    except Exception as e:
-        logger.debug("字幕质量检查解析失败 %s: %s", path, e)
-        return None
-    return analyze_subtitle_quality(
-        blocks,
-        path=path,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        max_gap=max_gap,
-        sample_limit=sample_limit,
-    )
-
-
-def format_quality_report(report: dict, *, sample_limit: int = 5) -> List[str]:
-    """把质量报告格式化成日志/摘要行。"""
-    if not report:
-        return []
-    name = report.get("name") or report.get("path") or "字幕"
-    total = int(report.get("total_issues") or 0)
-    counts = report.get("counts") or {}
-    lines: List[str] = []
-    if total <= 0:
-        lines.append(f"✓ 字幕质量检查通过: {name}（{report.get('total_cues', 0)} 条）")
-        return lines
-    parts = []
-    for kind, label in _QUALITY_KIND_LABELS.items():
-        n = int(counts.get(kind) or 0)
-        if n:
-            parts.append(f"{label} {n}")
-    lines.append(f"⚠ 字幕质量提醒 ({name}): 共 {total} 处 — " + "，".join(parts))
-    for sample in (report.get("samples") or [])[:sample_limit]:
-        lines.append(f"  {sample}")
-    remaining = total - min(len(report.get("samples") or []), sample_limit)
-    if remaining > 0:
-        lines.append(f"  ... 另有 {remaining} 处未列出")
-    return lines
-
-
 def write_srt(path: Path, blocks: List[SubtitleBlock], texts: List[str]) -> None:
     lines = []
     idx = 0
@@ -646,16 +521,26 @@ def find_existing_subtitle(video: Path) -> Optional[Path]:
 def match_video_for_subtitle(subtitle: Path, work_dir: Path) -> Optional[Path]:
     """查找与字幕同名的视频文件（用于字幕内嵌）。
 
-    优先返回非 .mkv 的视频：内嵌输出本身就是 .mkv，避免匹配到同名 mkv
-    导致输出文件自覆盖；无其他格式时仍可回退到 .mkv。
+    按视频基础名做前缀匹配（与 find_existing_subtitle 同策略），支持含点号的
+    文件名（如 Mr.Robot.S01E01.720p.zh.srt 匹配 Mr.Robot.S01E01.720p.mp4）；
+    精确同名优先于前缀匹配。优先返回非 .mkv 的视频：内嵌输出本身就是 .mkv，
+    避免匹配到同名 mkv 导致输出文件自覆盖；无其他格式时仍可回退到 .mkv。
     """
-    stem = safe_stem(subtitle.name).split(".")[0]
-    # 固定优先级：非 mkv 的常见容器优先（set 顺序不可靠）
+    sub_stem = safe_stem(subtitle.name)
     for base_dir in (subtitle.parent, work_dir):
+        if not base_dir.exists():
+            continue
+        fallback = None
+        # 固定优先级：非 mkv 的常见容器优先（set 顺序不可靠）
         for ext in sorted(VIDEO_EXTS, key=lambda e: e == ".mkv"):
-            candidate = base_dir / f"{stem}{ext}"
-            if candidate.exists():
-                return candidate
+            for candidate in base_dir.glob(f"*{ext}"):
+                v_stem = safe_stem(candidate.name)
+                if v_stem == sub_stem:
+                    return candidate
+                if fallback is None and sub_stem.startswith(v_stem + "."):
+                    fallback = candidate
+        if fallback is not None:
+            return fallback
     return None
 
 

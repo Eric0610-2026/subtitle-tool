@@ -144,6 +144,20 @@ class SubtitleWorker:
                 logger.info("worker 线程正在退出中（daemon 将在进程退出时清理）")
 
     def _run(self, jobs: List[Path], opts: dict) -> None:
+        try:
+            self._run_impl(jobs, opts)
+        except Exception as e:
+            # 顶层兜底：逐文件 try 之外的意外异常（如配置字段类型异常）
+            # 不能让 worker 线程静默死亡，否则 UI 永远收不到 done/error，
+            # 按钮永久卡在"运行中"状态，只能重启应用
+            tb = traceback.format_exc()
+            logger.error("worker 线程意外异常: %s\n%s", e, tb)
+            try:
+                opts["post"]({"type": "error", "message": f"处理出错: {e}", "trace": tb})
+            except Exception:
+                pass
+
+    def _run_impl(self, jobs: List[Path], opts: dict) -> None:
         post = opts["post"]
         total = len(jobs)
         p_depth = opts.get("concurrency", 2)
@@ -376,11 +390,18 @@ class SubtitleWorker:
                     if sf.stem.startswith(stem + ".") and sf not in state_files:
                         state_files.append(sf)
             has_state = len(state_files) > 0
-            mkv_path = output_dir / f"{safe_stem(item.name)}.mkv"
             # 完成标记：视频看内嵌产物 .mkv，音频看翻译产物 {stem}.srt。
             # 字幕文件的输出与输入同名（{stem}.srt 就是输入本身），存在性无法
             # 区分"已完成"，一律不按文件存在跳过，避免断点续翻把待翻译的字幕误跳过。
-            done_marker = mkv_path if is_video else (final_srt if is_audio else None)
+            # .mkv 输入时内嵌产物是 {stem}_subbed.mkv（muxer 避免自覆盖的命名），
+            # 若用 {stem}.mkv 作标记会指向输入文件本身——必然存在 → 误判"已完成"。
+            if is_video:
+                if item.suffix.lower() == ".mkv":
+                    done_marker = output_dir / f"{safe_stem(item.name)}_subbed.mkv"
+                else:
+                    done_marker = output_dir / f"{safe_stem(item.name)}.mkv"
+            else:
+                done_marker = final_srt if is_audio else None
             if done_marker is not None and done_marker.exists() and not has_state:
                 file_post({"type": "log", "message": f"跳过：{item.name} 已完成", "level": "INFO"})
                 file_post({"type": "progress", "percent": 100, "stage": "跳过",
@@ -468,6 +489,13 @@ class SubtitleWorker:
 
     def _process_one(self, item: Path, idx: int, total: int, opts: dict) -> None:
         """保留兼容性——供外部调用者或测试使用"""
+        # 串行模式：转写前停掉上一文件翻译阶段拉起的本地服务（与并行模式
+        # _prepare_transcribe_phase 对称），避免 Whisper 与 llama-server 同时驻留显存。
+        # 仅在确实要加载 Whisper 转写时清理（已有字幕的文件跳过转写），
+        # 避免对纯字幕任务反复重启翻译服务。
+        is_media = item.suffix.lower() in VIDEO_EXTS or item.suffix.lower() in AUDIO_EXTS
+        if is_media and find_existing_subtitle(item) is None:
+            self._prepare_transcribe_phase(opts, opts["post"])
         result = self._transcribe_stage(item, idx, total, opts)
         if result is not None:
             # 串行模式：转写后先释放 Whisper 再进入翻译，避免双模型同时驻留显存

@@ -159,8 +159,19 @@ class TestVerifyDuration(unittest.TestCase):
                                        "ffmpeg.exe")
         self.assertFalse(passed)
         self.assertIn("50%", msg)
-        # 短视频（< 10s）跳过校验
+        # 短视频（< 10s）完整输出仍通过
         self.mock_probe.side_effect = [5.0, 5.0]
+        passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
+                                       "ffmpeg.exe")
+        self.assertTrue(passed)
+        # 回归：短源严重截断（8s 源只剩 1s）不得通过——旧逻辑直接跳过验证，
+        # 残缺 MKV 被判"可信"导致原视频被删
+        self.mock_probe.side_effect = [8.0, 1.0]
+        passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
+                                       "ffmpeg.exe")
+        self.assertFalse(passed)
+        # 短源轻度偏差（8s → 7.5s，>80%）放宽通过
+        self.mock_probe.side_effect = [8.0, 7.5]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertTrue(passed)

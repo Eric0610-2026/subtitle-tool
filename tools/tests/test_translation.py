@@ -390,6 +390,29 @@ class TestTranslateSplit(unittest.TestCase):
         self.assertEqual(ids, [1, 2, 3, 4])
         self.assertEqual([item["zh"] for item in out], ["译a", "译b", "译c", "译d"])
 
+    def test_offset_uses_mid_when_left_short(self):
+        """回归：左半批 API 少返回条目时，偏移仍按 mid 计算
+
+        旧逻辑 offset = len(left)：左半批截断丢项时右半批 id 整体前移，
+        译文错位并经持久缓存污染后续所有运行。
+        """
+        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+                              lambda *a: None, batch_size=10)
+
+        def fake_batch(texts, context="", depth=0):
+            if texts == ["a", "b"]:
+                # 模拟 API 截断：只返回 1 条（丢 "b"）
+                return [{"id": 1, "zh": "译a"}]
+            return [{"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
+
+        c._translate_batch = fake_batch
+        out = c._translate_split(["a", "b", "c", "d"], "", 0)
+        by_id = {it["id"]: it["zh"] for it in out}
+        # 右半批 id 必须从 mid+1=3 开始，不受左半批丢项影响
+        self.assertEqual(by_id.get(3), "译c")
+        self.assertEqual(by_id.get(4), "译d")
+        self.assertNotIn(2, by_id)  # b 丢失就是丢失，不得把 c 的译文顶到 b 的位置
+
 
 if __name__ == "__main__":
     unittest.main()

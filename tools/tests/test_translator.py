@@ -360,6 +360,55 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         # state 文件应被清理
         self.assertFalse(state_path.exists())
 
+    def test_state_file_created_on_first_run(self):
+        """回归：全新翻译（无 state 文件）也必须创建并落盘断点
+
+        旧逻辑只在 state 文件"已存在"时传给 translate_blocks，而它只会在
+        translate_blocks 内部创建——自举矛盾，断点续翻成了死功能：
+        进程中断/崩溃时整轮翻译进度全部丢失。
+        """
+        srt_path = self.d / "test.srt"
+        blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text="Hello"),
+                  SubtitleBlock(index=2, start=4.0, end=6.0, text="World")]
+        from subtitle_app.srt_utils import write_srt
+        write_srt(srt_path, blocks, [b.text for b in blocks])
+
+        item = self.d / "test.mp4"
+        item.write_text("dummy")
+        state_path = srt_path.with_name(srt_path.stem + ".translate_state.json")
+        self.assertFalse(state_path.exists())
+
+        opts = {
+            "work_dir": str(self.d),
+            "language": "en",
+            "translate_enabled": True,
+            "api_url": "https://api.example.com",
+            "api_key": "sk-test",
+            "translation_model": "gpt-4",
+            "translation_only": False,
+            "_detected_lang": "en",
+            "_ffmpeg": None,
+            "_is_stopped": lambda: False,
+        }
+        posts = []
+
+        with patch("subtitle_app.translator.TranslationClient") as MockClient:
+            client = MagicMock()
+            client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
+            client.get_cache_size.return_value = 0
+            MockClient.return_value = client
+
+            from subtitle_app.translator import translate_only
+            translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
+
+        # 翻译成功后 state 应被清理（不残留）
+        self.assertFalse(state_path.exists())
+        # 关键验证点：state_path 必须作为参数传入 translate_blocks（而非 None）
+        self.assertTrue(client.translate_blocks.called, "应调用 translate_blocks")
+        args, kwargs = client.translate_blocks.call_args
+        self.assertIsNotNone(args[3] if len(args) > 3 else kwargs.get("state_path"),
+                             "首次翻译也必须传 state_path，断点续翻才能生效")
+
 
 class TestTranslateOnlyNonVideo(unittest.TestCase):
     """非视频文件 → 外挂字幕 + 进度文件记录"""

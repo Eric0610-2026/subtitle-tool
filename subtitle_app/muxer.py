@@ -97,7 +97,7 @@ def _verify_duration(video_path: Path, mkv_path: Path,
                      ffmpeg_bin: str) -> Tuple[bool, str]:
     """验证输出 MKV 时长，返回 (passed, detail_message)。
 
-    passed=True 表示时长验证通过（ratio>=0.95 或源 <10s 跳过），可以安全删除原文件。
+    passed=True 表示时长验证通过（ratio>=0.95，短源放宽至 0.8），可以安全删除原文件。
     passed=False 表示时长异常或无法验证，严禁删除原文件。
     """
     ffprobe = _find_sibling_probe(ffmpeg_bin)
@@ -110,9 +110,16 @@ def _verify_duration(video_path: Path, mkv_path: Path,
             f"时长验证失败：无法获取时长"
             f"（源={'✓' if src_dur else '✗'} 输出={'✓' if out_dur else '✗'}）"
         )
-    if src_dur < 10:
-        return True, f"源视频过短（{src_dur:.1f}s），跳过时长验证"
     ratio = out_dur / src_dur
+    if src_dur < 10:
+        # 短源同样要验证（否则残缺输出会被判"可信"导致原文件被删），
+        # 但短视频容器时间戳相对偏差大，阈值从 0.95 放宽到 0.8
+        if ratio < 0.8:
+            return False, (
+                f"源视频较短（{src_dur:.1f}s），输出仅 {out_dur:.1f}s "
+                f"({ratio*100:.0f}%)，疑似不完整"
+            )
+        return True, f"短视频时长验证通过：{out_dur:.1f}s/{src_dur:.1f}s ({ratio*100:.0f}%)"
     if ratio < 0.95:
         return False, (
             f"输出时长 {out_dur:.1f}s 仅为源 {src_dur:.1f}s "

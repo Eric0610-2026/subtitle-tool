@@ -227,6 +227,38 @@ class TestTranscribeStage(unittest.TestCase):
             self.assertEqual(result["source_srt"], item)
 
     @patch("subtitle_app.pipeline.find_tool")
+    @patch("subtitle_app.pipeline.Transcriber")
+    def test_transcribe_stage_mkv_input_not_skipped(self, MockTranscriber, mock_find_tool):
+        """回归：.mkv 输入的完成标记是 {stem}_subbed.mkv，不得误判"已完成"
+
+        旧逻辑 done_marker = {stem}.mkv，对 mkv 输入即输入文件本身，
+        必然存在 → 断点续翻永远跳过 mkv 源、失败后无法重试。
+        """
+        mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        mock_transcriber = MagicMock()
+        MockTranscriber.return_value = mock_transcriber
+        self.w.transcriber = mock_transcriber
+        mock_transcriber.transcribe_video.return_value = (Path("/tmp/out.srt"), "en")
+
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.mkv"
+            item.write_bytes(b"")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            self.assertIsNotNone(result, "mkv 输入本身不得被当作完成标记跳过")
+            mock_transcriber.transcribe_video.assert_called_once()
+
+        # {stem}_subbed.mkv 存在（真实内嵌产物）→ 判定已完成，跳过
+        mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        with tempfile.TemporaryDirectory() as d:
+            item = Path(d) / "test.mkv"
+            item.write_bytes(b"")
+            (Path(d) / "test_subbed.mkv").write_bytes(b"")
+            opts = {**self.base_opts, "skip_completed": True}
+            result = self.w._transcribe_stage(item, 1, 1, opts)
+            self.assertIsNone(result)
+
+    @patch("subtitle_app.pipeline.find_tool")
     def test_transcribe_stage_subtitle_resume_with_state(self, mock_find_tool):
         """断点续翻：字幕文件 + translate_state.json → 直接以输入文件为源续翻"""
         mock_find_tool.return_value = None
@@ -383,6 +415,21 @@ class TestRun(unittest.TestCase):
                   if c[0][0].get("type") == "error"]
         self.assertTrue(errors, "并行翻译异常应发出 error 事件")
         self.assertIn("translation failed", errors[0]["message"])
+
+    @patch.object(SubtitleWorker, "_run_staged", side_effect=TypeError("config 类型异常"))
+    def test_run_top_level_exception_posts_error(self, mock_staged):
+        """回归：逐文件 try 之外的意外异常必须发 error 事件，不能静默杀死线程
+
+        否则 UI 永远收不到 done/error，按钮永久卡在"运行中"。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            job = Path(d) / "test.mp4"
+            job.write_text("fake", encoding="utf-8")
+            self.w._run([job], self._make_opts(2))
+        errors = [c[0][0] for c in self.post.call_args_list
+                  if c[0][0].get("type") == "error"]
+        self.assertTrue(errors, "顶层异常应兜底发出 error 事件")
+        self.assertIn("config 类型异常", errors[0]["message"])
 
     def _make_opts(self, concurrency: int) -> dict:
         """构造 _run 所需的 opts（与现有测试保持一致）"""
