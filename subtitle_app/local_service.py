@@ -170,6 +170,14 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
     launcher = False
     crashed = False
     with _lock:
+        # 自愈：服务就绪后进程又退出（崩溃/被杀）时，此前的拉起者早已返回，
+        # 若不重置状态，后续调用会永远判"已启动过"而不重新拉起。
+        if _started_by_us and _owned_proc is not None and _owned_proc.poll() is not None:
+            logger.warning("llama-server 已退出（退出码 %s），重置状态以允许重新拉起",
+                           _owned_proc.returncode)
+            _owned_proc = None
+            _started_by_us = False
+            _ready_announced = False
         if not _started_by_us:
             if not _SERVER.exists():
                 return False, f"找不到服务程序：{_SERVER}", False

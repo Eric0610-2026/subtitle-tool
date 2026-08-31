@@ -11,7 +11,6 @@ from subtitle_app.srt_utils import (
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
     load_json, save_json, fmt_job_display, find_existing_subtitle,
     match_video_for_subtitle,
-    analyze_subtitle_quality, analyze_subtitle_file, format_quality_report,
     wrap_subtitle_text,
 )
 
@@ -67,6 +66,25 @@ class TestSrtRoundtrip(unittest.TestCase):
             self.assertEqual(len(blocks), 2)
             self.assertEqual(blocks[0].text, "你好世界")
             self.assertEqual(blocks[1].text, "第二句")
+
+    def test_parse_edge_cases(self):
+        """空文本块在中间保留 + 缺空行不吞块"""
+        # 空文本块不在文件末尾时也必须被解析保留
+        blocks = parse_srt_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\nWorld\n",
+        )
+        self.assertEqual([b.text for b in blocks], ["Hello", "", "World"])
+        # 块间缺空行（畸形输入）时，不能把下一块序号+时间戳吞进上一块文本
+        blocks = parse_srt_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nWorld\n",
+        )
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual([b.text for b in blocks], ["Hello", "World"])
+        self.assertEqual([b.start for b in blocks], [1.0, 3.0])
+        self.assertEqual([b.end for b in blocks], [2.0, 4.0])
 
 
 class TestSplitSentences(unittest.TestCase):
@@ -172,6 +190,21 @@ class TestFindSubtitle(unittest.TestCase):
             mv.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
             (mv_dir / "movie.mp4").write_text("x")
             self.assertEqual(match_video_for_subtitle(mv, mv_dir), mv_dir / "movie.mp4")
+            # 含点号文件名（剧集类常见）：前缀匹配，不得在第一个点截断
+            dot_dir = d / "dot"; dot_dir.mkdir()
+            sub = dot_dir / "Mr.Robot.S01E01.720p.zh.srt"
+            sub.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            (dot_dir / "Mr.Robot.S01E01.720p.mp4").write_text("x")
+            self.assertEqual(match_video_for_subtitle(sub, dot_dir),
+                             dot_dir / "Mr.Robot.S01E01.720p.mp4")
+            # 精确同名优先于前缀匹配
+            exact_dir = d / "exact"; exact_dir.mkdir()
+            sub2 = exact_dir / "movie.zh.srt"
+            sub2.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            (exact_dir / "movie.mp4").write_text("x")
+            (exact_dir / "movie.zh.mp4").write_text("x")
+            self.assertEqual(match_video_for_subtitle(sub2, exact_dir),
+                             exact_dir / "movie.zh.mp4")
         # 崩溃遗留的 .partial.srt 断点不得被当作成品字幕
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
@@ -184,76 +217,6 @@ class TestFindSubtitle(unittest.TestCase):
             (d / "movie.zh.srt").write_text(
                 "1\n00:00:01,000 --> 00:00:02,000\nhi\n")
             self.assertIsNotNone(find_existing_subtitle(vid))
-
-
-class TestAnalyzeSubtitleQuality(unittest.TestCase):
-    """质量报告：计数 + 样例，覆盖空条/过长/间隙等硬伤"""
-
-    def test_clean_and_detects_issues(self):
-        # 干净字幕：0 问题
-        clean = [
-            SubtitleBlock(1, 0.0, 2.0, "Hello"),
-            SubtitleBlock(2, 2.5, 4.0, "World"),
-        ]
-        report = analyze_subtitle_quality(clean)
-        self.assertEqual(report["total_issues"], 0)
-        self.assertEqual(report["total_cues"], 2)
-        self.assertTrue(all(v == 0 for v in report["counts"].values()))
-        lines = format_quality_report(report)
-        self.assertTrue(any("通过" in ln for ln in lines))
-        # 含 too_long/empty/gap/overlap/too_short 的坏字幕
-        bad = [
-            SubtitleBlock(1, 0.0, 20.0, "long cue"),          # too_long
-            SubtitleBlock(2, 20.0, 21.0, "   "),              # empty
-            SubtitleBlock(3, 40.0, 41.0, "after gap"),        # gap > 10
-            SubtitleBlock(4, 40.5, 41.5, "overlap"),          # overlap with #3
-            SubtitleBlock(5, 42.0, 42.1, "tiny"),             # too_short
-        ]
-        report = analyze_subtitle_quality(bad, sample_limit=10)
-        c = report["counts"]
-        for key in ("too_long", "empty", "gap", "overlap", "too_short"):
-            with self.subTest(key=key):
-                self.assertGreaterEqual(c[key], 1)
-        self.assertGreater(report["total_issues"], 0)
-        self.assertTrue(report["samples"])
-        lines = format_quality_report(report)
-        self.assertTrue(any("质量提醒" in ln for ln in lines))
-
-    def test_analyze_subtitle_file_and_edge_parses(self):
-        """文件级质量分析 + 空块在中间保留 + 缺空行不吞块"""
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "q.srt"
-            # 人工写入含空文本的块：parse 后 text 为空字符串
-            p.write_text(
-                "1\n00:00:00,000 --> 00:00:20,000\nlong text here\n\n"
-                "2\n00:00:40,000 --> 00:00:41,000\n\n",
-                encoding="utf-8",
-            )
-            report = analyze_subtitle_file(p)
-            self.assertIsNotNone(report)
-            self.assertEqual(report["name"], "q.srt")
-            self.assertGreaterEqual(report["counts"]["too_long"], 1)
-            # 第 2 条 content 为空 → empty
-            self.assertGreaterEqual(report["counts"]["empty"], 1)
-            self.assertGreaterEqual(report["counts"]["gap"], 1)
-        # 空文本块不在文件末尾时也必须被解析保留（修复前会被正则丢弃）
-        blocks = parse_srt_text(
-            "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
-            "2\n00:00:03,000 --> 00:00:04,000\n\n"
-            "3\n00:00:05,000 --> 00:00:06,000\nWorld\n",
-        )
-        self.assertEqual([b.text for b in blocks], ["Hello", "", "World"])
-        report = analyze_subtitle_quality(blocks)
-        self.assertGreaterEqual(report["counts"]["empty"], 1)
-        # 块间缺空行（畸形输入）时，不能把下一块序号+时间戳吞进上一块文本
-        blocks = parse_srt_text(
-            "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
-            "2\n00:00:03,000 --> 00:00:04,000\nWorld\n",
-        )
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual([b.text for b in blocks], ["Hello", "World"])
-        self.assertEqual([b.start for b in blocks], [1.0, 3.0])
-        self.assertEqual([b.end for b in blocks], [2.0, 4.0])
 
 
 class TestWrapSubtitleText(unittest.TestCase):

@@ -338,7 +338,7 @@ class TranslationClient:
                         self._save_cache()
                         if state_path:
                             save_json(state_path, {
-                                "done": _nonempty_done(sent_trans),
+                                "done": _snapshot_done(sent_trans, self._cache_lock),
                                 "originals": sent_originals,
                                 "updated_at": datetime.now().isoformat(),
                             })
@@ -356,7 +356,7 @@ class TranslationClient:
                         })
                 if state_path:
                     save_json(state_path, {
-                        "done": _nonempty_done(sent_trans),
+                        "done": _snapshot_done(sent_trans, self._cache_lock),
                         "originals": sent_originals,
                         "updated_at": datetime.now().isoformat(),
                     })
@@ -420,7 +420,7 @@ class TranslationClient:
                     })
             if state_path:
                 save_json(state_path, {
-                    "done": _nonempty_done(sent_trans),
+                    "done": _snapshot_done(sent_trans, self._cache_lock),
                     "originals": sent_originals,
                     "updated_at": datetime.now().isoformat(),
                 })
@@ -500,8 +500,10 @@ class TranslationClient:
         mid = len(texts) // 2
         left = self._translate_batch(texts[:mid], context, depth + 1)
         right = self._translate_batch(texts[mid:], context, depth + 1)
-        # 两个子批的 id 都从 1 开始；不重排会导致按 id 回填时后批覆盖前批、译文串位
-        offset = len(left)
+        # 两个子批的 id 都从 1 开始；不重排会导致按 id 回填时后批覆盖前批、译文串位。
+        # 偏移必须用 mid（右半批在原批次中的真实起点）而非 len(left)：
+        # 左半批 API 少返回条目时（截断丢项），len(left) < mid 会让右半批译文整体前移错位
+        offset = mid
         renumbered = []
         for item in right:
             if isinstance(item, dict) and item.get("id") is not None:
@@ -758,6 +760,16 @@ def _nonempty_done(sent_trans: Dict[int, str]) -> Dict[str, str]:
     }
 
 
+def _snapshot_done(sent_trans: Dict[int, str], lock: Lock) -> Dict[str, str]:
+    """在锁内对非空译文做快照再落盘。
+
+    保存断点时其它批次的 worker 可能正并发写入 sent_trans，
+    主线程直接迭代会抛 "dictionary changed size during iteration"。
+    """
+    with lock:
+        return _nonempty_done(sent_trans)
+
+
 def _apply_batch_translations(
     batch: List[str],
     translations: List[Dict],
@@ -820,14 +832,16 @@ def _apply_batch_translations(
             applied.append((orig_text, ""))
             continue
         key = sentence_cache_key(orig_text, model, is_bilingual)
+        # sent_trans 与 cache 同锁保护：主线程保存断点时会迭代 sent_trans，
+        # worker 并发写入必须持同一把锁，否则迭代侧抛 "dictionary changed size"
         with cache_lock:
             cache[key] = zh
-        for gsid in t2g.get(orig_text, []):
-            # 不覆盖已有更好结果
-            if not str(sent_trans.get(gsid, "")).strip():
-                sent_trans[gsid] = zh
-            elif sent_trans.get(gsid) == orig_text and zh != orig_text:
-                sent_trans[gsid] = zh
+            for gsid in t2g.get(orig_text, []):
+                # 不覆盖已有更好结果
+                if not str(sent_trans.get(gsid, "")).strip():
+                    sent_trans[gsid] = zh
+                elif sent_trans.get(gsid) == orig_text and zh != orig_text:
+                    sent_trans[gsid] = zh
         applied.append((orig_text, zh))
     return applied
 

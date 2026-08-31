@@ -27,7 +27,7 @@ from .srt_utils import (
     load_json, save_json, estimate_eta,
     seconds_to_srt_time, srt_time_to_seconds,
     OverallProgress, find_tool, IGNORE_FILE,
-    analyze_subtitle_file, format_quality_report, _read_text_auto,
+    _read_text_auto,
 )
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
@@ -85,7 +85,6 @@ class SubtitleApp(QMainWindow):
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
         self._stats: Dict[str, any] = {}  # 处理统计
-        self._quality_reports: List[dict] = []  # 本轮字幕质量报告
         self._overall = None  # 跨文件总进度跟踪
         self._settings_path = Path.home() / ".subtitle_tool_settings.json"
 
@@ -662,6 +661,9 @@ class SubtitleApp(QMainWindow):
             if c.exists():
                 self.preview_panel.set_text(_read_text_auto(c))
                 self.preview_panel.last_output_dir = c.parent
+                # 绑定内容来源：保存时回写同一文件，避免按当前选中项推导目标
+                # 导致"预览的是 A 文件、保存却覆盖 B 文件"
+                self.preview_panel.source_path = c
                 return
         self.preview_panel.clear()
 
@@ -720,22 +722,32 @@ class SubtitleApp(QMainWindow):
         self._save_preview()
 
     def _save_preview(self):
-        """保存预览区修改到当前任务的 SRT"""
-        is_video = self.tabs.currentIndex() == 0
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
-        lb = self.video_list if is_video else self.sub_list
-        sel = lb.selectedItems()
-        if not sel or not jobs:
-            QMessageBox.information(self, "提示", "请先选中一个文件")
-            return
-        row = lb.row(sel[0])
-        if row < 0 or row >= len(jobs):
-            return
-        stem = jobs[row].stem
-        output_dir = jobs[row].parent / stem
-        srt_path = output_dir / f"{stem}.srt"
-        if not srt_path.exists():
-            srt_path = jobs[row].parent / f"{stem}.srt"
+        """保存预览区修改到来源 SRT（优先用加载时绑定的文件路径）"""
+        bound = self.preview_panel.source_path
+        if bound is not None:
+            srt_path = bound
+        else:
+            # 无绑定（如转写实时预览）：退回按当前选中项推导目标，
+            # 先弹确认避免静默覆盖无关字幕文件
+            is_video = self.tabs.currentIndex() == 0
+            jobs = self.video_jobs if is_video else self.subtitle_jobs
+            lb = self.video_list if is_video else self.sub_list
+            sel = lb.selectedItems()
+            if not sel or not jobs:
+                QMessageBox.information(self, "提示", "请先选中一个文件")
+                return
+            row = lb.row(sel[0])
+            if row < 0 or row >= len(jobs):
+                return
+            stem = jobs[row].stem
+            output_dir = jobs[row].parent / stem
+            srt_path = output_dir / f"{stem}.srt"
+            if not srt_path.exists():
+                srt_path = jobs[row].parent / f"{stem}.srt"
+            if not self._confirm("保存预览",
+                                 f"预览内容未绑定到具体字幕文件，将写入：\n{srt_path}\n\n确定覆盖吗？",
+                                 default_no=True):
+                return
         try:
             srt_path.write_text(self.preview_panel.get_text(), encoding="utf-8")
             self._add_log_entry(f"已保存预览修改：{srt_path.name}")
@@ -784,7 +796,6 @@ class SubtitleApp(QMainWindow):
     def _begin_processing(self, jobs, opts, log_msg):
         self._start_time = time.time()
         self._stats = {"files": len(jobs)}
-        self._quality_reports = []
         self._output_paths = []
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -835,6 +846,13 @@ class SubtitleApp(QMainWindow):
 
     def _stop(self):
         if not (self.worker.thread and self.worker.thread.is_alive()):
+            # 防御性复位：worker 线程若已异常退出而未发 done/error（理论上
+            # pipeline 顶层已兜底），按钮会卡在"运行中"；此时直接恢复可操作状态
+            if self.worker.thread is not None and self.stop_btn.isEnabled():
+                self.start_btn.setEnabled(True)
+                self.stop_btn.setEnabled(False)
+                self.preview_panel.setReadOnly(False)
+                self._add_log_entry("处理线程已退出，已复位界面状态", "WARNING")
             return
         if not self._confirm("停止确认", "确定要停止当前处理吗？\n已完成处理的文件不会丢失。", default_no=True):
             return
@@ -1406,11 +1424,7 @@ class SubtitleApp(QMainWindow):
         else:
             stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
-        quality_summary = self._summarize_quality_reports()
         notify_body = f"{msg}\n{stats_msg}"
-        if quality_summary:
-            self._add_log_entry(quality_summary, "WARNING" if "雷" in quality_summary else "INFO")
-            notify_body = f"{notify_body}\n{quality_summary}"
         system_notify("字幕工具", notify_body)
         self._update_model_status()
 
@@ -1448,9 +1462,8 @@ class SubtitleApp(QMainWindow):
                 f"缓存 {e.get('cache',0)}"),
             "language": lambda e: self.progress_panel.lang_label.setText(f"语言：{e.get('message','')}"),
             "output_path": self._handle_output_path,
-            "quality_report": self._handle_quality_report,
             "pause_before_embed": self._handle_pause_before_embed,
-            "preview": lambda e: self.preview_panel.set_text(e.get("message", "")),
+            "preview": self._handle_preview_live,
             "preview_clear": lambda e: self.preview_panel.clear(),
             "preview_append": self._handle_preview_append,
             "done": self._handle_done,
@@ -1465,62 +1478,18 @@ class SubtitleApp(QMainWindow):
         p = Path(e.get("path", ""))
         self._output_paths.append(str(p))
         self._last_output_dir = p.parent
-        # MKV 内嵌路径不跑 SRT 检查；SRT 输出若流水线未发 quality_report 则兜底检查
-        if p.suffix.lower() == ".srt":
-            already = any(
-                (r.get("path") and Path(r["path"]).resolve() == p.resolve())
-                or (r.get("name") == p.name)
-                for r in self._quality_reports
-            )
-            if not already:
-                self._check_subtitle_quality(p)
-
-    def _handle_quality_report(self, e):
-        """收集 worker 推送的结构化质量报告，供完成摘要使用。"""
-        report = {
-            "path": e.get("path", ""),
-            "name": e.get("name", ""),
-            "total_cues": e.get("total_cues", 0),
-            "total_issues": e.get("total_issues", 0),
-            "counts": dict(e.get("counts") or {}),
-            "samples": list(e.get("samples") or []),
-        }
-        if e.get("backup_path"):
-            report["backup_path"] = e["backup_path"]
-        self._quality_reports.append(report)
-
-    def _summarize_quality_reports(self) -> str:
-        """本轮质量汇总：计数 + 是否有雷（样例已在单文件日志里）。"""
-        reports = self._quality_reports
-        if not reports:
-            return ""
-        files_with_issues = [r for r in reports if int(r.get("total_issues") or 0) > 0]
-        total_issues = sum(int(r.get("total_issues") or 0) for r in reports)
-        if not files_with_issues:
-            return f"字幕质量：全部通过（{len(reports)} 个文件）"
-        # 汇总各类计数
-        merged = {"empty": 0, "too_short": 0, "too_long": 0, "overlap": 0, "gap": 0}
-        for r in files_with_issues:
-            for k in merged:
-                merged[k] += int((r.get("counts") or {}).get(k) or 0)
-        labels = {
-            "empty": "空字幕", "too_short": "过短", "too_long": "过长",
-            "overlap": "重叠", "gap": "间隙过长",
-        }
-        parts = [f"{labels[k]} {n}" for k, n in merged.items() if n]
-        backup_hint = ""
-        if any(r.get("backup_path") for r in files_with_issues):
-            backup_hint = "；SRT 备份见 logs/srt_backup/"
-        return (
-            f"字幕质量：{len(files_with_issues)}/{len(reports)} 个文件有雷，"
-            f"共 {total_issues} 处（" + "，".join(parts) + f"）{backup_hint}"
-        )
 
     def _handle_pause_before_embed(self, e):
         """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕（见 dialogs.py）"""
         show_embed_confirm_dialog(self, e)
 
+    def _handle_preview_live(self, e):
+        # 实时预览内容与之前绑定文件的对应关系已失效，解绑避免保存覆盖旧文件
+        self.preview_panel.source_path = None
+        self.preview_panel.set_text(e.get("message", ""))
+
     def _handle_preview_append(self, e):
+        self.preview_panel.source_path = None
         self.preview_panel.append(e.get("message", ""))
 
     def _set_detail_with_eta(self, p, detail: str, pct: float):
@@ -1529,17 +1498,6 @@ class SubtitleApp(QMainWindow):
         parts = [detail] if detail else []
         parts.extend([f"已用 {fmt_duration(elapsed)}", f"剩余 {remain}", f"预计 {finish}"])
         p.detail_label.setText(" | ".join(parts))
-
-    def _check_subtitle_quality(self, path: Path):
-        """检查字幕质量问题（兜底路径：仅当 worker 未推送 quality_report 时）"""
-        if path.suffix.lower() != ".srt" or not path.exists():
-            return
-        report = analyze_subtitle_file(path)
-        if report is None:
-            return
-        self._quality_reports.append(report)
-        for line in format_quality_report(report):
-            self._add_log_entry(line, "WARNING" if report.get("total_issues") else "INFO")
 
     def _open_output_dir(self):
         """打开输出目录——优先使用 worker 回传的精确路径"""

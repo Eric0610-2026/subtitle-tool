@@ -22,6 +22,21 @@ def _dict_to_ns(d: Any) -> Any:
     return d
 
 
+def _deep_merge(defaults: dict, override: dict) -> dict:
+    """以 defaults 为基底、override 递归覆盖，返回合并后的新 dict。
+
+    老用户的 config.json 缺少后期新增字段（如 notification_duration_ms），
+    缺字段处用 example 的默认值补齐，避免消费方抛 AttributeError。
+    """
+    merged = dict(defaults)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
 class Config:
     def __init__(self, path: Path | None = None) -> None:
         if path is None:
@@ -40,6 +55,14 @@ class Config:
             raise RuntimeError(f"配置文件无权限读取 ({self._path}): {e}")
         except OSError as e:
             raise RuntimeError(f"配置文件读取失败 ({self._path}): {e}")
+        if (self._path != _FALLBACK_PATH and _FALLBACK_PATH.exists()
+                and isinstance(raw, dict)):
+            try:
+                defaults = json.loads(_FALLBACK_PATH.read_text(encoding="utf-8"))
+                if isinstance(defaults, dict):
+                    raw = _deep_merge(defaults, raw)
+            except (OSError, json.JSONDecodeError):
+                pass  # example 自身读不了就按原配置加载，不因补默认值而阻断启动
         return _dict_to_ns(raw)
 
     def reload(self) -> None:

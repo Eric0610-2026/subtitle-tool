@@ -243,6 +243,43 @@ class LocalServiceTest(unittest.TestCase):
                 self.assertTrue(got_terminated)   # 超时后终止了进程
                 self.assertIsNone(local_service._owned_proc)
 
+    def test_ensure_self_heals_after_ready_crash(self):
+        """回归：服务就绪后进程崩溃（拉起者早已返回），下次调用应重置状态并重新拉起
+
+        旧逻辑只在"拉起者"分支重置状态；就绪后崩溃时 _started_by_us 仍为 True，
+        ensure_running 永远判"已启动过"而不重拉，同轮剩余文件全部失败且重试无效。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            server = Path(d) / "llama-server.exe"
+            server.write_bytes(b"")
+            mdir = Path(d)
+            (mdir / "m.gguf").write_bytes(b"x")
+            launches = []
+            probe_calls = []
+
+            # 场景：服务已就绪过（_ready_announced=True），随后进程崩死
+            crashed = _CrashedProc(returncode=1)
+            local_service._owned_proc = crashed
+            local_service._started_by_us = True
+            local_service._ready_announced = True
+
+            def fake_probe(*a, **k):
+                probe_calls.append(1)
+                # 第一次调用（检测崩溃后）仍失败；拉起后第二次探测成功
+                return len(probe_calls) >= 2
+
+            with patch.object(local_service, "_SERVER", server), \
+                    patch.object(local_service, "_MODELS_DIR", mdir), \
+                    patch.object(local_service, "_probe", fake_probe), \
+                    patch.object(local_service, "_port_listening", lambda *a, **k: False), \
+                    patch.object(local_service, "_launch_owned",
+                                 lambda m: launches.append(m) or _FakeProc()):
+                ok, _, _ = local_service.ensure_running(timeout=2)
+
+            self.assertTrue(ok, "就绪后崩溃应能自愈重新拉起")
+            self.assertEqual(len(launches), 1, "应重新拉起一次")
+            self.assertIsNot(local_service._owned_proc, crashed, "旧进程应已被替换")
+
     def test_ensure_waiter_timeout_does_not_kill_shared_proc(self):
         """并发：非启动者超时不得杀掉共享 llama-server（防止并行翻译"杀-起"抖动）"""
         with tempfile.TemporaryDirectory() as d:
