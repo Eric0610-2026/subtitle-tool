@@ -39,9 +39,18 @@ class DropListWidget(QListWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragDropMode(QAbstractItemView.InternalMove)
 
+    def _set_drag_over(self, on: bool):
+        """切换拖入高亮态（QSS 属性选择器 QListWidget[dragOver="true"]）"""
+        if self.property("dragOver") == on:
+            return
+        self.setProperty("dragOver", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            self._set_drag_over(True)
         elif event.source() is self:
             event.acceptProposedAction()
         else:
@@ -55,7 +64,12 @@ class DropListWidget(QListWidget):
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self._set_drag_over(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent):
+        self._set_drag_over(False)
         if event.mimeData().hasUrls():
             event.accept()
             paths = []
@@ -89,21 +103,34 @@ class LogEntry(QWidget):
         super().__init__(parent)
         level = (level or "INFO").upper()
         self.level = level
-        self.message = message
+        self.message = message  # 完整消息（含时间戳前缀），导出/复制用
         self.trace = trace
         tag_bg, tag_fg = self._LEVEL_STYLE.get(level, self._LEVEL_STYLE["INFO"])
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 1, 6, 1)
+        layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(1)
         top = QHBoxLayout()
+        top.setSpacing(8)
         tag = QLabel(level)
         tag.setFixedWidth(56)
         tag.setAlignment(Qt.AlignCenter)
         tag.setStyleSheet(
             f"color:{tag_fg}; background:{tag_bg}; border-radius:3px; "
-            f"font-size:10px; font-weight:600; padding:1px 2px;")
+            "font-size:10px; font-weight:600; padding:1px 2px;")
         top.addWidget(tag)
-        self.msg_label = QLabel(message)
+        # 展示层把时间戳拆出来弱化，正文优先扫读；message 属性保持完整前缀
+        ts = ""
+        display = message
+        if message.startswith("[") and "]" in message[:12]:
+            head, _, rest = message.partition("]")
+            ts = head[1:]
+            display = rest.lstrip()
+        if ts:
+            ts_label = QLabel(ts)
+            ts_label.setFont(QFont("Consolas", 9))
+            ts_label.setStyleSheet("color:#64748b;")
+            top.addWidget(ts_label)
+        self.msg_label = QLabel(display)
         self.msg_label.setWordWrap(True)
         self.msg_label.setFont(QFont("Consolas", 10))
         top.addWidget(self.msg_label, 1)
@@ -111,13 +138,13 @@ class LogEntry(QWidget):
             self._trace_visible = False
             self._list_item = None
             self.toggle_btn = QPushButton("▶")
-            self.toggle_btn.setFixedSize(22, 18)
+            self.toggle_btn.setFixedSize(24, 20)
             self.toggle_btn.setStyleSheet("padding:0; font-size:10px;")
             self.toggle_btn.clicked.connect(self._toggle)
             top.addWidget(self.toggle_btn)
         self.copy_btn = QPushButton("📋")
-        self.copy_btn.setFixedSize(22, 18)
-        self.copy_btn.setStyleSheet("padding:0; font-size:10px;")
+        self.copy_btn.setFixedSize(24, 20)
+        self.copy_btn.setStyleSheet("padding:0; font-size:11px;")
         self.copy_btn.setToolTip("复制")
         self.copy_btn.clicked.connect(self._copy)
         top.addWidget(self.copy_btn)
@@ -130,6 +157,14 @@ class LogEntry(QWidget):
             self.trace_label.setWordWrap(True)
             self.trace_label.setVisible(False)
             layout.addWidget(self.trace_label)
+
+    def sizeHint(self):
+        """在布局建议高度上再加余量：QSS 的 item 内边距不参与 sizeHint 计算，
+        且 emoji/中文字形的实际渲染高度普遍超出字体 metrics，
+        按 Raw sizeHint 设行高会把文字和图标底部裁掉。"""
+        hint = super().sizeHint()
+        hint.setHeight(hint.height() + 10)
+        return hint
 
     def _toggle(self):
         self._trace_visible = not self._trace_visible

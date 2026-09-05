@@ -41,5 +41,28 @@ class TestVisibleBlockSlice(unittest.TestCase):
         self.assertEqual(offset, 3)
 
 
+class TestLogPanelNoSelection(unittest.TestCase):
+    """日志列表不可选中：点击条目不残留高亮（回归）"""
+
+    def test_log_list_selection_disabled(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QAbstractItemView
+        app = QApplication.instance() or QApplication([])
+        from subtitle_app.panels import LogPanel
+        panel = LogPanel()
+        panel.add_entry("hello")
+        panel.add_entry("world")
+        self.assertEqual(panel.log_list.selectionMode(), QAbstractItemView.NoSelection)
+        self.assertEqual(panel.log_list.focusPolicy(), Qt.NoFocus)
+        # 即便程序化设置当前行，也不会产生选中高亮
+        panel.log_list.setCurrentRow(1)
+        idx = panel.log_list.indexFromItem(panel.log_list.item(1))
+        self.assertFalse(panel.log_list.selectionModel().isSelected(idx))
+        # 导出功能不依赖选中态，仍能取到全部条目
+        self.assertEqual(len(panel.get_all_lines()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

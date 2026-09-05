@@ -7,7 +7,6 @@
 import json
 import logging
 import re
-import shutil
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +14,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, get_ident
+from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import cfg
@@ -103,11 +102,6 @@ def make_prompt(target_lang: str) -> str:
     )
 
 # ── 自定义异常 ──
-
-
-class ApiForbiddenError(RuntimeError):
-    """API 返回 403 时的专用异常，用来触发 curl fallback"""
-    pass
 
 
 class ApiUnavailableError(RuntimeError):
@@ -224,7 +218,7 @@ class TranslationClient:
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
                          is_bilingual: bool, state_path: Optional[Path] = None,
-                         translation_concurrency: int = 3,
+                         translation_concurrency: int = 1,
                          stop_check: Optional[Callable[[], bool]] = None) -> List[str]:
         # Step 0: 按时间间隔划分段落
         para_of_block: List[int] = []
@@ -278,6 +272,10 @@ class TranslationClient:
             cached = self.cache.get(key)
             if isinstance(cached, str) and cached.strip():
                 sent_trans[gsid] = cached.strip()
+                with self._cache_lock:
+                    if key in self.cache:
+                        # 触碰一次（重新插入移到末尾=最近使用端），淘汰时才按 LRU 而非插入序
+                        self.cache[key] = self.cache.pop(key)
             else:
                 # 空缓存 / 无效缓存：重新翻译
                 if key in self.cache and not (isinstance(cached, str) and cached.strip()):
@@ -566,11 +564,6 @@ class TranslationClient:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         try:
             resp_data = self._call_api(payload, headers)
-        except ApiForbiddenError:
-            try:
-                resp_data = self._curl_fallback(payload, headers)
-            except Exception as e2:
-                raise RuntimeError(f"翻译 API 调用失败（curl fallback 也失败）: {e2}")
         except ApiUnavailableError:
             # 网络不可达/超时：拆小批不解决问题（_call_api 内部已重试 3 次），
             # 直接失败交给上层熔断/停止，避免 2^depth 个子请求各重试一轮
@@ -634,8 +627,7 @@ class TranslationClient:
                 if e.code in (401, 402, 403, 407):
                     body = e.read().decode("utf-8", errors="replace")
                     err_detail = body[:200]
-                    if e.code == 403:
-                        raise ApiForbiddenError(f"API 返回 403: {err_detail}")
+                    # 认证/代理错误重试无意义，直接失败（不进入拆批重试）
                     raise RuntimeError(f"API 认证错误 (HTTP {e.code}): {err_detail}")
                 body = e.read().decode("utf-8", errors="replace")
                 last_err = RuntimeError(f"HTTP {e.code}: {body[:200]}")
@@ -656,30 +648,6 @@ class TranslationClient:
         if last_err is None:
             last_err = RuntimeError("API 请求失败（无具体错误）")
         raise last_err
-
-    def _curl_fallback(self, payload: dict, headers: dict) -> dict:
-        curl = shutil.which("curl.exe") or shutil.which("curl")
-        if not curl:
-            raise RuntimeError("curl not found")
-        # 并发翻译时多个线程可能同时触发 403 fallback：文件名必须含线程唯一标识，
-        # 否则同一秒内多线程会写同一个临时文件，载荷互相覆盖甚至被提前删除。
-        tmp_file = self.cache_path.parent / f".curl_payload_{int(time.time())}_{get_ident()}_{id(self)}.json"
-        save_json(tmp_file, payload)
-        try:
-            header_args = []
-            for k, v in headers.items():
-                header_args.extend(["-H", f"{k}: {v}"])
-            cmd = [curl, "-s", "-X", "POST", self.api_url, *header_args,
-                   "--data-binary", f"@{tmp_file}", "--max-time", str(getattr(cfg.translation, "timeout_curl", 120))]
-            result = subprocess_run_safe(cmd, timeout=API_TIMEOUT + 10)
-            if result.returncode != 0:
-                raise RuntimeError(f"curl failed: {result.stderr[:200]}")
-            return _normalize_response(json.loads(result.stdout))
-        finally:
-            try:
-                tmp_file.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def _call_api_single_plain(self, text: str) -> List[Dict]:
         payload = {
@@ -752,7 +720,8 @@ class TranslationClient:
     def _save_cache(self) -> None:
         with _shared_cache_lock:
             if len(self.cache) > MAX_CACHE_ENTRIES:
-                # FIFO 裁剪：移除最旧条目，保留最新的 MAX_CACHE_ENTRIES//2 条
+                # LRU 裁剪：命中即触碰（重新插入移到末尾），dict 头部即最久未用；
+                # 超额时裁掉一半最久未用的，保留高频句（旧 FIFO 会误裁高频但早插入的句子）
                 excess = len(self.cache) - MAX_CACHE_ENTRIES // 2
                 keys_to_remove = list(self.cache.keys())[:excess]
                 for k in keys_to_remove:
@@ -761,25 +730,6 @@ class TranslationClient:
 
     def get_cache_size(self) -> int:
         return len(self.cache)
-
-
-# ── 安全的 subprocess.run 包装 ──
-
-def subprocess_run_safe(cmd: List[str], timeout: int) -> Any:
-    """安全的 subprocess.run，避免 shell=True"""
-    import subprocess
-    creationflags = 0
-    if hasattr(subprocess, "CREATE_NO_WINDOW"):
-        creationflags = subprocess.CREATE_NO_WINDOW
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=creationflags,
-    )
 
 
 # ── JSON 提取辅助 ──

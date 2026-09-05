@@ -585,10 +585,9 @@ class TestRun(unittest.TestCase):
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.local_service.is_service_running")
     @patch("subtitle_app.local_service.shutdown_owned")
-    def test_run_staged_releases_whisper_and_pause_rules(self, mock_shutdown, mock_running, mock_translate):
-        """阶段批量：转写后释放 Whisper 显存；本地模式同时清理本会话 llama；
-        文件级并发>1（联网模式）时 pause_before_embed 强制为 False（自动嵌入）；
-        本地模式文件级并发=1，保留逐文件预览暂停；
+    def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_running, mock_translate):
+        """阶段批量：转写后释放 Whisper 显存；本地翻译清理本会话 llama；
+        阶段 2 顺序执行，pause_before_embed 逐文件生效；
         检测到外部服务在跑时发 WARNING 提示"""
         mock_running.return_value = False
         mock_translate.return_value = None
@@ -612,11 +611,11 @@ class TestRun(unittest.TestCase):
         self.assertTrue(releases, "进入翻译阶段前应释放 Whisper 显存")
         # 转写阶段前应停掉本会话拉起的翻译服务
         mock_shutdown.assert_called_once()
-        # 本地模式文件级并发=1：pause_before_embed 保留（逐文件暂停可用）
+        # 阶段 2 顺序执行：translate_stage 逐文件调用且 pause_before_embed 保留
         self.assertTrue(mock_translate.call_count >= 2)
         for call in mock_translate.call_args_list:
             self.assertTrue(call[0][1]["pause_before_embed"],
-                            "本地模式并发=1 时应保留逐文件预览暂停")
+                            "顺序执行时应保留逐文件预览暂停")
         # 阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）
         self.post.reset_mock()
         mock_shutdown.reset_mock()
@@ -629,24 +628,6 @@ class TestRun(unittest.TestCase):
         warns = [c[0][0] for c in self.post.call_args_list
                  if c[0][0].get("level") == "WARNING"]
         self.assertTrue(warns, "外部翻译服务在跑时应发出 WARNING 提示")
-
-        # 联网模式 + 并行 → 文件级并发>1，pause_before_embed 强制 False
-        self.post.reset_mock()
-        mock_translate.reset_mock()
-        online_opts = self._make_opts(concurrency=2)
-        online_opts["api_url"] = "https://api.example.com/v1/chat/completions"
-        online_opts["pause_before_embed"] = True
-        with tempfile.TemporaryDirectory() as d:
-            files = [Path(d) / f"g{i}.mp4" for i in range(2)]
-            for p in files:
-                p.write_bytes(b"")
-            self.w._run(files, online_opts)
-        for call in mock_translate.call_args_list:
-            self.assertFalse(call[0][1]["pause_before_embed"],
-                             "联网并行模式应自动嵌入（跳过逐文件暂停）")
-            self.assertEqual(call[0][1].get("translation_concurrency"),
-                             getattr(cfg.translation, "concurrency_translate", 3),
-                             "联网模式批次级并发应读 config")
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")

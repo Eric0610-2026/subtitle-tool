@@ -15,16 +15,14 @@
 | 功能 | 说明 |
 |------|------|
 | **🎤 语音转写** | 本地 faster-whisper-large-v3-turbo 模型，支持 CUDA 加速，离线运行 |
-| **🌍 AI 翻译** | 兼容 OpenAI Chat Completions API（DeepSeek / 商汤 / 任意自建接口），批量翻译 + 句子级缓存去重 |
+| **🌍 AI 翻译** | 本地 Hy-MT2 翻译模型（llama.cpp），批量翻译 + 句子级缓存去重，全离线运行 |
 | **📝 双语字幕** | 原文 + 译文上下对照排列，自动繁简转换 |
 | **📦 MKV 内嵌** | 自动将字幕软内嵌到 MKV 视频文件中，播放器直出双语字幕 |
 | **⏯ 断点续转/续翻** | 程序崩溃或手动中断后可从中断处继续，无需重新处理 |
-| **⚡ 并行流水线** | 转写与翻译并行执行，充分利用 GPU + CPU 资源，批量效率翻倍 |
 | **📊 实时进度** | 实时进度条 + ETA 估算 + 文件级状态追踪 |
 | **🎯 拖拽操作** | 支持文件/文件夹拖拽到列表，支持内部拖拽排序 |
 | **🔍 字幕预览** | 内嵌字幕预览面板，支持查找、时间偏移微调、手动编辑 |
 | **💾 翻译缓存** | 句子级缓存避免重复翻译，可手动查看/清理缓存 |
-| **🗂 多方案管理** | 支持配置多个翻译 API 方案，一键切换 |
 
 ---
 
@@ -74,29 +72,7 @@ pip install -r tools/requirements.txt
 
 项目已预置模型路径配置，放入即可使用。
 
-### 5️⃣ 配置 API 密钥
-
-```bash
-# 复制配置模板
-cp subtitle_app/config.example.json subtitle_app/config.json
-```
-
-编辑 `subtitle_app/config.json`，配置翻译接口：
-
-```json
-{
-  "translation": {
-    "api_url": "https://api.deepseek.com/v1/chat/completions",
-    "api_key": "sk-你的密钥",
-    "model": "deepseek-chat",
-    "target_lang": "zh"
-  }
-}
-```
-
-支持多个翻译方案并存，可在应用内一键切换（设置 > 翻译方案）。
-
-### 6️⃣ 启动应用
+### 5️⃣ 启动应用
 
 ```bash
 python subtitle_app/subtitle_app.py
@@ -132,7 +108,7 @@ python subtitle_app/subtitle_app.py
 - **翻译开关**：不勾选翻译时，仅执行语音转写，生成原文 SRT
 - **MKV 内嵌**：在「更多设置」中可开启「嵌入前暂停」，在弹窗中预览/编辑字幕后再决定是否嵌入
 - **提取内嵌字幕**：点击「📤 提取字幕」按钮，选择含内嵌字幕的视频文件（如 MKV），批量提取其第一个字幕流为独立 SRT；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。勾选「提取后转为 MP4」可同时将视频转换为 MP4（不带字幕，流复制优先、失败自动降级重编码），时长验证通过后删除原文件
-- **并行流水线**：在配置文件的 `translation.concurrency_pipeline` 中设置并行度（默认 2），数值越高批量处理越快
+- **两阶段调度**：先批量转写全部文件，再统一翻译+内嵌（GPU 显存错峰，模型各只加载一次）
 - **断点续翻**：如处理过程中断，重新添加相同文件会自动检测未完成状态并从中断处继续
 
 ---
@@ -141,7 +117,7 @@ python subtitle_app/subtitle_app.py
 
 所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）。
 
-**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、翻译方案/API 密钥、语言检测复用、字幕备份份数等，点击「💾 永久保存」自动写回 `config.json`（点击「💾 本次有效」则仅对当前会话生效）。多数修改无需重启；若需回退，直接删除 `config.json` 即可恢复默认。
+**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、目标语言、语言检测复用、字幕备份份数等，点击「💾 永久保存」自动写回 `config.json`（点击「💾 本次有效」则仅对当前会话生效）。多数修改无需重启；若需回退，直接删除 `config.json` 即可恢复默认。
 
 ### 核心配置项
 
@@ -153,15 +129,9 @@ python subtitle_app/subtitle_app.py
 | `whisper.compute_type` | 计算精度 | `int8_float16` |
 | `whisper.vad_filter` | VAD 语音活动检测过滤 | `true` |
 | `whisper.reuse_auto_lang` | auto 模式下复用同批首个检测语言（混合语言目录请保持关闭） | `true` |
-| `translation.api_url` | 翻译 API 地址 | — |
-| `translation.api_key` | 翻译 API 密钥 | — |
-| `translation.model` | 翻译模型名称 | — |
 | `translation.target_lang` | 目标语言 | `zh` |
-| `translation.batch_size` | 翻译批处理大小 | `50` |
-| `translation.pipeline` | 启用并行流水线 | `true` |
-| `translation.concurrency_pipeline` | 并行流水线视频并发数 | `2` |
+| `translation.batch_size` | 翻译批处理大小（每批句数） | `20` |
 | `translation.backup_max_files` | `logs/srt_backup` 字幕备份保留份数（超出自动清理最旧） | `50` |
-| `translation.presets` | 多翻译方案配置 | `[]` |
 | `app.default_video_dir` | 默认视频目录（可在「更多设置」中填写并永久保存） | — |
 | `theme.light` / `theme.dark` | 浅色/深色主题颜色 | 内置配色 |
 
@@ -179,12 +149,12 @@ python subtitle_app/subtitle_app.py
 │   ├── transcriber.py             # 音频提取 + faster-whisper 语音转写
 │   ├── translation.py             # AI 翻译客户端（缓存、批量、断点续翻）
 │   ├── translator.py              # 翻译阶段编排（翻译 → 落盘 → MKV 内嵌）
-│   ├── pipeline.py                # 并行流水线编排（转写→翻译 多线程）
+│   ├── pipeline.py                # 两阶段流水线编排（转写→翻译）
 │   ├── srt_utils.py               # SRT 解析/写入、进度跟踪、繁简转换
 │   ├── muxer.py                   # MKV 字幕软内嵌、SRT 提取
 │   ├── config.py                  # JSON 配置加载模块
 │   ├── config.example.json        # 配置模板（不含密钥）
-│   └── config.json                # 本地配置（含 API 密钥，不提交到仓库）
+│   └── config.json                # 本地配置（不提交到仓库）
 ├── tools/                         # 第三方工具与测试
 │   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（可选：可改用系统 PATH 版）
 │   ├── requirements.txt           # Python 依赖清单
@@ -227,8 +197,6 @@ python -m unittest tools.tests.test_widgets -v
 
 - **模型文件较大**（~1.6 GB），需手动从 ModelScope 下载，不支持自动拉取
 - **翻译缓存** `cache/.subtitle_translation_cache.json` 超过 10,000 条时会自动裁剪最旧条目
-- **API 密钥安全**：`config.json` 已加入 `.gitignore`，不会提交到仓库；首次使用请从 `config.example.json` 复制创建
-- **高峰时段提醒**：使用 DeepSeek API 时，北京时间 9:00-12:00、14:00-18:00 为高峰时段，应用会弹出价格提醒
 
 ---
 
@@ -239,7 +207,7 @@ python -m unittest tools.tests.test_widgets -v
 | [PySide6](https://doc.qt.io/qtforpython/) | 桌面 GUI 框架 |
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | 本地语音识别（CTranslate2 加速） |
 | [ffmpeg](https://ffmpeg.org/) | 音频提取、字幕内嵌（MP4 → MKV 重封装） |
-| OpenAI Chat Completions API | AI 翻译接口（兼容 DeepSeek / 商汤 / 任意 API） |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | 本地 Hy-MT2 翻译模型推理服务 |
 | [opencc-python](https://github.com/yichen0831/opencc-python-reimplemented) | 繁简体中文转换（可选，有内置降级表） |
 
 ---

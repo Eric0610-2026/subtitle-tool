@@ -151,9 +151,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "work_dir": str(self.d),
             "language": language,
             "translate_enabled": True,
-            "api_url": "https://api.example.com",
-            "api_key": "sk-test",
-            "translation_model": "gpt-4",
+            "api_url": "http://127.0.0.1:8188/v1/chat/completions",
             "translation_only": translation_only,
             "_detected_lang": detected_lang,
             "_ffmpeg": "ffmpeg.exe" if mkv_ok else None,
@@ -164,6 +162,8 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         mocks = {
             "TranslationClient": MagicMock(),
             "embed_subtitles_to_video": MagicMock(return_value=(None, False)),
+            # 本地翻译路径会探测/拉起 llama-server，测试中一律视为已就绪
+            "ensure_running": MagicMock(return_value=(True, "ok", False)),
         }
 
         def mock_client_side_effect(*args, **kwargs):
@@ -236,12 +236,16 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
         # 模拟 translate_blocks 返回：中文源时 has_chinese 会跳过翻译
         # 没有 need_translate_idx，直接走 zh_texts = [b.text for b in blocks]
-        with patch("subtitle_app.translator.TranslationClient") as MockClient:
-            client = MagicMock()
-            client.translate_blocks.return_value = ["Hello"]
-            client.get_cache_size.return_value = 0
-            MockClient.return_value = client
-
+        MockClient = MagicMock()
+        client = MagicMock()
+        client.translate_blocks.return_value = ["Hello"]
+        client.get_cache_size.return_value = 0
+        MockClient.return_value = client
+        with patch.multiple(
+            "subtitle_app.translator",
+            TranslationClient=MockClient,
+            ensure_running=MagicMock(return_value=(True, "ok", False)),
+        ):
             from subtitle_app.translator import translate_only
             translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
 
@@ -250,7 +254,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertGreater(len(previews), 0)
 
     def test_batch_size_mode_defaults(self):
-        """批大小模式默认：联网=100（cfg.batch_size_online）、本地 Hy-MT2=20（cfg.batch_size）；显式传入时覆盖"""
+        """批大小默认读 cfg.translation.batch_size；显式传入时覆盖"""
         captured = {}
 
         def capture(*args, **kwargs):
@@ -260,7 +264,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             client.get_cache_size.return_value = 0
             return client
 
-        def run(api_url, bs_marker="absent"):
+        def run(bs_marker="absent"):
             srt = self.d / "bs.srt"
             blocks = [SubtitleBlock(index=1, start=0.0, end=2.0, text="Hello")]
             from subtitle_app.srt_utils import write_srt
@@ -271,9 +275,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                 "work_dir": str(self.d),
                 "language": "en",
                 "translate_enabled": True,
-                "api_url": api_url,
-                "api_key": "k",
-                "translation_model": "m",
+                "api_url": service_url_prefix() + "/v1/chat/completions",
                 "translation_only": False,
                 "_detected_lang": "en",
                 "_ffmpeg": None,
@@ -281,25 +283,22 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             }
             if bs_marker != "absent":
                 opts["translation_batch_size"] = bs_marker
-            mocks = {"TranslationClient": MagicMock(side_effect=capture)}
-            if api_url.lower().startswith(service_url_prefix()):
-                # 本地模式会触发服务探测，测试中直接视为已就绪
-                mocks["ensure_running"] = MagicMock(return_value=(True, "ok", False))
             from subtitle_app.translator import translate_only
-            with patch.multiple("subtitle_app.translator", **mocks):
+            with patch.multiple(
+                "subtitle_app.translator",
+                TranslationClient=MagicMock(side_effect=capture),
+                ensure_running=MagicMock(return_value=(True, "ok", False)),
+            ):
                 translate_only(srt, self.d, item, 0, 1, opts, lambda *a: None)
 
-        # 联网默认 100
+        from subtitle_app.config import cfg
+        # 默认读 config 的 batch_size
         captured.clear()
-        run("https://api.example.com")
-        self.assertEqual(captured["kwargs"]["batch_size"], 100)
-        # 本地 Hy-MT2 默认 20
-        captured.clear()
-        run(service_url_prefix() + "/v1/chat/completions")
-        self.assertEqual(captured["kwargs"]["batch_size"], 20)
+        run()
+        self.assertEqual(captured["kwargs"]["batch_size"], cfg.translation.batch_size or 20)
         # 显式传入覆盖默认
         captured.clear()
-        run("https://api.example.com", bs_marker=50)
+        run(bs_marker=50)
         self.assertEqual(captured["kwargs"]["batch_size"], 50)
 
     def test_mkv_embed_success_and_fallback(self):
@@ -344,12 +343,16 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         }
         posts = []
 
-        with patch("subtitle_app.translator.TranslationClient") as MockClient:
-            client = MagicMock()
-            client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
-            client.get_cache_size.return_value = 0
-            MockClient.return_value = client
-
+        MockClient = MagicMock()
+        client = MagicMock()
+        client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
+        client.get_cache_size.return_value = 0
+        MockClient.return_value = client
+        with patch.multiple(
+            "subtitle_app.translator",
+            TranslationClient=MockClient,
+            ensure_running=MagicMock(return_value=(True, "ok", False)),
+        ):
             from subtitle_app.translator import translate_only
             translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
 
@@ -392,12 +395,16 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         }
         posts = []
 
-        with patch("subtitle_app.translator.TranslationClient") as MockClient:
-            client = MagicMock()
-            client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
-            client.get_cache_size.return_value = 0
-            MockClient.return_value = client
-
+        MockClient = MagicMock()
+        client = MagicMock()
+        client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
+        client.get_cache_size.return_value = 0
+        MockClient.return_value = client
+        with patch.multiple(
+            "subtitle_app.translator",
+            TranslationClient=MockClient,
+            ensure_running=MagicMock(return_value=(True, "ok", False)),
+        ):
             from subtitle_app.translator import translate_only
             translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
 
@@ -541,31 +548,16 @@ class TestPruneBackups(unittest.TestCase):
 
 
 class TestBatchSizePersistenceField(unittest.TestCase):
-    """永久保存批大小时目标字段选择（qt_app._batch_size_save_field）
-
-    修复：自定义批大小原先一律写入 translation.batch_size，导致联网模式
-    （读 batch_size_online）重启后自定义值失效，且污染本地模式默认值。
-    """
+    """永久保存批大小：qt_app._batch_size_save_field"""
 
     def test_field_selection(self):
         from subtitle_app.qt_app import _batch_size_save_field
-        # 本地自定义 → batch_size
+        # 自定义 → batch_size
         self.assertEqual(
-            _batch_size_save_field({"translation_mode": "local", "translation_batch_size": 50}),
+            _batch_size_save_field({"translation_batch_size": 50}),
             ("batch_size", 50))
-        # 联网自定义 → batch_size_online
-        self.assertEqual(
-            _batch_size_save_field({"translation_mode": "online", "translation_batch_size": 200}),
-            ("batch_size_online", 200))
-        # 等于默认值 → None 不覆盖 config
-        self.assertIsNone(
-            _batch_size_save_field({"translation_mode": "online", "translation_batch_size": None}))
-        self.assertIsNone(
-            _batch_size_save_field({"translation_mode": "local", "translation_batch_size": None}))
-        # 缺 mode → 默认 local
-        self.assertEqual(
-            _batch_size_save_field({"translation_batch_size": 30}),
-            ("batch_size", 30))
+        # 等于默认值（None=跟随 config）→ 不覆盖 config
+        self.assertIsNone(_batch_size_save_field({"translation_batch_size": None}))
 
 
 if __name__ == "__main__":

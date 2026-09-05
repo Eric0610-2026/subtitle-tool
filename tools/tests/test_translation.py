@@ -10,15 +10,8 @@ from unittest.mock import MagicMock, patch
 from subtitle_app.srt_utils import SubtitleBlock
 
 from subtitle_app.translation import (
-    TranslationClient, ApiForbiddenError, _extract_json, _compose_sentences,
+    TranslationClient, _extract_json, _compose_sentences,
 )
-
-
-class TestApiForbiddenError(unittest.TestCase):
-    def test_is_runtime_error(self):
-        self.assertTrue(issubclass(ApiForbiddenError, RuntimeError))
-        with self.assertRaises(ApiForbiddenError):
-            raise ApiForbiddenError("403")
 
 
 class TestExtractJson(unittest.TestCase):
@@ -102,29 +95,6 @@ class TestTranslationClient(unittest.TestCase):
                                lambda *a: None, batch_size=-3)
         self.assertGreaterEqual(c2.batch_size, 1)
 
-    def test_curl_fallback_tmp_file_unique_per_thread(self):
-        """并发 403 fallback 时各线程的临时文件必须唯一，不能共写一个文件"""
-        from subtitle_app import translation as tr
-        with tempfile.TemporaryDirectory() as d:
-            c = self._client(d, batch_size=10)
-            seen = {}
-
-            def fake_save_json(path, payload):
-                seen[threading.get_ident()] = str(path)
-
-            ok_resp = MagicMock(returncode=0, stdout='{"id": 1}')
-            with patch.object(tr.shutil, "which", return_value="curl.exe"), \
-                    patch.object(tr, "save_json", side_effect=fake_save_json), \
-                    patch.object(tr, "subprocess_run_safe", return_value=ok_resp):
-                threads = [threading.Thread(
-                    target=lambda: c._curl_fallback({"text": "x"}, {"A": "b"}))
-                    for _ in range(4)]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
-            self.assertEqual(len(seen), 4)  # 4 个线程各自生成了不同文件名
-
 
 class TestParagraphContext(unittest.TestCase):
     """段落上下文（Bug #3）：同段批次串行带上文，跨段批次互不阻塞"""
@@ -178,7 +148,8 @@ class TestParagraphContext(unittest.TestCase):
             c._translate_batch = fake
             out = {}
             t = threading.Thread(target=lambda: out.setdefault(
-                "r", c.translate_blocks(blocks, "en", is_bilingual=True)))
+                "r", c.translate_blocks(blocks, "en", is_bilingual=True,
+                                        translation_concurrency=2)))
             t.start()
             try:
                 self.assertTrue(entered.wait(3), "第一批应已开始")
@@ -502,6 +473,28 @@ class TestStopAndBreaker(unittest.TestCase):
             self.assertEqual(len(res), 25)
             self.assertTrue(any("放弃剩余补翻" in l.get("message", "") for l in logs),
                             "补翻连续失败应触发熔断日志")
+
+
+class TestCacheLRU(unittest.TestCase):
+    """缓存淘汰按 LRU：命中即触碰，超额时裁掉最久未用而非最早插入"""
+
+    @staticmethod
+    def _client(d, **kw):
+        return TranslationClient("url", "key", "m",
+                                 Path(d) / "cache.json", lambda *a: None, **kw)
+
+    def test_touch_moves_key_to_end_and_eviction_keeps_recent(self):
+        import subtitle_app.translation as tr
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=10)
+            for k in "abcdef":
+                c.cache[k] = k.upper()
+            c.cache["a"] = c.cache.pop("a")  # 触碰 a → 移到末尾（最近使用）
+            self.assertEqual(list(c.cache.keys())[-1], "a")
+            with patch.object(tr, "MAX_CACHE_ENTRIES", 4):
+                c._save_cache()
+            # 6 条超额 → 保留 2 条：最久未用的 b..e 被裁，f 与最近使用的 a 存活
+            self.assertEqual(set(c.cache.keys()), {"f", "a"})
 
 
 class TestSharedCacheManagement(unittest.TestCase):

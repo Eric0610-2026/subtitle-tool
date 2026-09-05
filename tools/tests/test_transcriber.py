@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
     Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
-    _MODEL_SPEED, _model_speed_lock, _parse_ffmpeg_time, _dedupe_adjacent_blocks,
+    _MODEL_SPEED, _parse_ffmpeg_time, _dedupe_adjacent_blocks,
 )
 from subtitle_app.srt_utils import SubtitleBlock
 
@@ -217,34 +217,13 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertTrue(all(b.text.strip() for b in out))
 
 
-class TestModelSpeedLock(unittest.TestCase):
-    """_MODEL_SPEED 线程安全锁"""
+class TestModelSpeedFactors(unittest.TestCase):
+    """_MODEL_SPEED 静态权重表（进度条权重估算用）"""
 
-    def test_lock_and_concurrent_access(self):
-        """锁对象存在、_MODEL_SPEED 有值、多线程并发读写不崩溃"""
-        from subtitle_app.transcriber import _model_speed_lock, _MODEL_SPEED
-        self.assertIsNotNone(_model_speed_lock)
-        with _model_speed_lock:
-            self.assertGreater(_MODEL_SPEED.get("large-v3-turbo", 1.5), 0)
-
-        def reader():
-            for _ in range(100):
-                with _model_speed_lock:
-                    _ = _MODEL_SPEED.get("large-v3-turbo", 1.5)
-
-        def writer():
-            for _ in range(100):
-                with _model_speed_lock:
-                    _MODEL_SPEED["tiny"] = 0.3
-
-        threads = [threading.Thread(target=reader) for _ in range(4)]
-        threads += [threading.Thread(target=writer) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
-        with _model_speed_lock:
-            self.assertIn("tiny", _MODEL_SPEED)
+    def test_speed_factors_present(self):
+        from subtitle_app.transcriber import _MODEL_SPEED
+        self.assertGreater(_MODEL_SPEED.get("large-v3-turbo", 1.5), 0)
+        self.assertIn("tiny", _MODEL_SPEED)
 
 
 class TestTranscribeVideoBasic(unittest.TestCase):

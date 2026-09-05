@@ -5,7 +5,6 @@
 """
 import glob
 from pathlib import Path
-from typing import List
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
@@ -13,8 +12,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
     QAbstractItemView, QTabWidget, QWidget, QFrame, QTextEdit,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
-from PySide6.QtGui import QFont, QPalette, QIcon, QPainter, QPen, QPixmap, QColor
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
@@ -35,488 +34,10 @@ _SCROLLBAR_STYLE = """
 """
 
 
-def _circle_symbol_icon(symbol: str, size: int = 18) -> QIcon:
-    """绘制圆形加号/减号图标（不依赖系统 emoji 字体）"""
-    def _draw(bg: QColor, fg: QColor) -> QPixmap:
-        pm = QPixmap(size, size)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(bg)
-        margin = 1
-        p.drawEllipse(margin, margin, size - 2 * margin, size - 2 * margin)
-        pen = QPen(fg, 2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        c = size / 2
-        arm = size / 2 - 3.5
-        p.drawLine(c - arm, c, c + arm, c)  # 横线
-        if symbol == "+":
-            p.drawLine(c, c - arm, c, c + arm)  # 竖线
-        p.end()
-        return pm
-
-    icon = QIcon()
-    icon.addPixmap(_draw(QColor("#6366f1"), QColor("white")),
-                   QIcon.Mode.Normal, QIcon.State.Off)
-    icon.addPixmap(_draw(QColor("#cbd5e1"), QColor("#94a3b8")),
-                   QIcon.Mode.Disabled, QIcon.State.Off)
-    return icon
-
-
-class ApiTestWorker(QObject):
-    """后台线程：测试 API 连接是否可用"""
-    finished = Signal(str)  # 返回结果消息
-
-    def __init__(self, api_url: str, api_key: str, model: str, target_lang: str = "zh"):
-        super().__init__()
-        self.api_url = api_url
-        self.api_key = api_key
-        self.model = model
-        self.target_lang = target_lang
-
-    def run(self):
-        """发送一条测试请求，验证 API 配置是否有效"""
-        # 构造简单的测试请求——只发一条简短翻译，确认 API 返回可用
-        import json, urllib.request, urllib.error
-        test_text = "Hello"
-        prompt = (
-            f"你是严谨的字幕翻译器。将以下数组中的字幕文本逐条翻译为{self.target_lang}。"
-            "要求：\n"
-            f"1. 译文符合{self.target_lang}表达习惯，自然流畅\n"
-            "2. 返回格式严格为 JSON 数组，每个元素为对应译文\n"
-            f'示例：["你好"]'
-        )
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps([test_text], ensure_ascii=False)},
-            ],
-            "temperature": 0.1,
-            "stream": False,
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.api_url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                resp_json = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")[:200]
-            self.finished.emit(f"❌ HTTP {e.code}: {body}")
-            return
-        except urllib.error.URLError as e:
-            self.finished.emit(f"❌ 网络错误: {e.reason}")
-            return
-        except TimeoutError:
-            self.finished.emit("❌ 请求超时（30s）")
-            return
-        except json.JSONDecodeError:
-            self.finished.emit("❌ 响应不是有效的 JSON")
-            return
-        except Exception as e:
-            self.finished.emit(f"❌ 请求失败: {e}")
-            return
-
-        # 检查响应
-        err = resp_json.get("error")
-        if err:
-            msg = err.get("message", "") if isinstance(err, dict) else str(err)
-            self.finished.emit(f"❌ API 返回错误: {msg[:120]}")
-            return
-
-        choices = resp_json.get("choices", [])
-        if not choices:
-            self.finished.emit("❌ 响应缺少 choices 字段")
-            return
-
-        content = ""
-        if isinstance(choices[0], dict):
-            msg = choices[0].get("message", {})
-            if isinstance(msg, str):
-                content = msg
-            elif isinstance(msg, dict):
-                content = msg.get("content", "")
-
-        if not content:
-            self.finished.emit("❌ 响应内容为空")
-            return
-
-        # 模型名称
-        model_name = resp_json.get("model", "") or self.model
-        self.finished.emit(f"✅ 检测成功（模型: {model_name}）")
-
-
-class ModelListWorker(QObject):
-    """后台线程：获取 API 可用模型列表"""
-    finished = Signal(list)  # 返回模型 ID 列表
-    error = Signal(str)      # 返回错误消息
-
-    def __init__(self, api_url: str, api_key: str):
-        super().__init__()
-        self.api_url = api_url
-        self.api_key = api_key
-
-    @staticmethod
-    def derive_models_url(api_url: str) -> str:
-        """从 API URL 推导 models 端点 URL"""
-        url = api_url.rstrip("/")
-        # 标准 OpenAI 兼容格式：/v1/chat/completions → /v1/models
-        if url.endswith("/chat/completions"):
-            return url.replace("/chat/completions", "/models")
-        # 如果包含 /v1/ 但路径不同，尝试同级替换
-        if "/v1/" in url:
-            return url.rsplit("/", 1)[0] + "/models"
-        # 兜底
-        return url + "/models"
-
-    def run(self):
-        """调用 /v1/models 端点获取可用模型列表"""
-        import json, urllib.request, urllib.error
-        models_url = self.derive_models_url(self.api_url)
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        req = urllib.request.Request(models_url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp_json = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")[:200]
-            self.error.emit(f"HTTP {e.code}: {body}")
-            return
-        except urllib.error.URLError as e:
-            self.error.emit(f"网络错误: {e.reason}")
-            return
-        except TimeoutError:
-            self.error.emit("请求超时（15s）")
-            return
-        except json.JSONDecodeError:
-            self.error.emit("响应不是有效的 JSON")
-            return
-        except Exception as e:
-            self.error.emit(f"请求失败: {e}")
-            return
-
-        # 提取模型列表
-        err = resp_json.get("error")
-        if err:
-            msg = err.get("message", "") if isinstance(err, dict) else str(err)
-            self.error.emit(f"API 返回错误: {msg[:120]}")
-            return
-
-        models_data = resp_json.get("data", resp_json)
-        if isinstance(models_data, list):
-            model_ids = []
-            for m in models_data:
-                if isinstance(m, dict):
-                    mid = m.get("id", "")
-                elif isinstance(m, str):
-                    mid = m
-                else:
-                    continue
-                if mid:
-                    model_ids.append(mid)
-            if model_ids:
-                model_ids.sort()
-                self.finished.emit(model_ids)
-            else:
-                self.error.emit("模型列表为空")
-        else:
-            self.error.emit("响应格式不符合预期（缺少 data 数组）")
-
-
-class ModelConfigDialog(QDialog):
-    """二级对话框：模型配置（API URL/Key + 模型选择/搜索/检测）"""
-
-    def __init__(self, parent, api_url: str = "", api_key: str = "",
-                 current_model: str = "", target_lang: str = "zh"):
-        super().__init__(parent)
-        self.setWindowTitle("模型配置")
-        self.setMinimumSize(520, 520)
-        self.resize(560, 560)
-        self._api_url = api_url
-        self._api_key = api_key
-        self._target_lang = target_lang
-        self._all_models: List[str] = []
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        # ── API URL ──
-        layout.addWidget(QLabel("API URL"))
-        self.api_url_edit = QLineEdit(api_url)
-        self.api_url_edit.setPlaceholderText("https://api.example.com/v1/chat/completions")
-        self.api_url_edit.textChanged.connect(self._on_field_changed)
-        layout.addWidget(self.api_url_edit)
-
-        # ── API Key ──
-        layout.addWidget(QLabel("API Key"))
-        key_row = QHBoxLayout()
-        self.api_key_edit = QLineEdit(api_key)
-        self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setPlaceholderText("sk-...")
-        self.api_key_edit.textChanged.connect(self._on_field_changed)
-        key_row.addWidget(self.api_key_edit, 1)
-        self.show_key_btn = QPushButton("显示")
-        # 不锁死宽度：文字在「显示/隐藏」间切换时能完整显示（固定宽度会截断）
-        self.show_key_btn.setMinimumWidth(52)
-        self.show_key_btn.setToolTip("显示/隐藏 API Key")
-        self.show_key_btn.setCheckable(True)
-        self.show_key_btn.clicked.connect(self._toggle_key_visible)
-        key_row.addWidget(self.show_key_btn)
-        layout.addLayout(key_row)
-
-        # ── 搜索框 + 获取列表 ──
-        search_row = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("🔍 搜索模型...")
-        self.search_edit.textChanged.connect(self._apply_filter)
-        search_row.addWidget(self.search_edit, 1)
-        self.fetch_btn = QPushButton("📋 获取列表")
-        self.fetch_btn.setObjectName("accentBtn")
-        self.fetch_btn.setToolTip("从 API 获取可用模型列表")
-        self.fetch_btn.clicked.connect(self._fetch_models)
-        search_row.addWidget(self.fetch_btn)
-        layout.addLayout(search_row)
-
-        # ── 模型列表 ──
-        self.model_list = QListWidget()
-        self.model_list.setObjectName("modelList")
-        self.model_list.setAlternatingRowColors(True)
-        dark_mode = self.palette().color(QPalette.Window).lightness() < 128
-        if dark_mode:
-            list_bg = "#202535"
-            alt_bg = "#252b3d"
-            text_fg = "#dbe4f0"
-            border = "#3b455b"
-            hover_bg = "#303951"
-            selected_bg = "#4f5f9f"
-        else:
-            list_bg = "#ffffff"
-            alt_bg = "#f1f5f9"
-            text_fg = "#172033"
-            border = "#cbd5e1"
-            hover_bg = "#e0e7ff"
-            selected_bg = "#4f46e5"
-        self.model_list.setStyleSheet(f"""
-            QListWidget#modelList {{
-                background: {list_bg}; color: {text_fg};
-                alternate-background-color: {alt_bg};
-                selection-background-color: {selected_bg};
-                selection-color: #ffffff; border: 1px solid {border};
-            }}
-            QListWidget#modelList::item {{
-                color: {text_fg}; background: {list_bg}; padding: 6px 8px;
-            }}
-            QListWidget#modelList::item:alternate {{
-                color: {text_fg}; background: {alt_bg};
-            }}
-            QListWidget#modelList::item:hover {{
-                color: {text_fg}; background: {hover_bg};
-            }}
-            QListWidget#modelList::item:selected {{
-                color: #ffffff; background: {selected_bg};
-            }}
-        """)
-        self.model_list.itemClicked.connect(self._on_item_clicked)
-        self.model_list.itemDoubleClicked.connect(lambda item: self.accept())
-        layout.addWidget(self.model_list, 1)
-
-        # ── 手动输入 + 检测 ──
-        manual_row = QHBoxLayout()
-        manual_row.addWidget(QLabel("或手动输入:"))
-        self.manual_edit = QLineEdit()
-        self.manual_edit.setPlaceholderText("输入模型名称...")
-        manual_row.addWidget(self.manual_edit, 1)
-        self.test_btn = QPushButton("🔍 检测")
-        self.test_btn.setObjectName("accentBtn")
-        self.test_btn.setToolTip("向 API 发送一条测试请求，验证选中模型是否可用")
-        self.test_btn.clicked.connect(self._test_selected)
-        manual_row.addWidget(self.test_btn)
-        layout.addLayout(manual_row)
-
-        # ── 状态 ──
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
-        layout.addWidget(self.status_label)
-
-        # ── 底部按钮 ──
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        ok_btn = QPushButton("确定")
-        ok_btn.setObjectName("startBtn")
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
-
-        # 预填当前模型
-        if current_model:
-            self._all_models = [current_model]
-            self._apply_filter("")
-            self.manual_edit.setText(current_model)
-
-        # 自动获取（有 URL 和 Key 时）
-        if api_url and api_key:
-            self._fetch_models()
-
-    def _on_field_changed(self):
-        """字段变化时清空状态"""
-        self.status_label.setText("")
-
-    def _toggle_key_visible(self, checked: bool):
-        """切换 API Key 明文/密文显示"""
-        self.api_key_edit.setEchoMode(
-            QLineEdit.Normal if checked else QLineEdit.Password)
-        self.show_key_btn.setText("隐藏" if checked else "显示")
-
-    # ── 搜索过滤 ──
-
-    def _apply_filter(self, text: str):
-        self.model_list.clear()
-        keyword = text.strip().lower()
-        for mid in self._all_models:
-            if not keyword or keyword in mid.lower():
-                self.model_list.addItem(mid)
-
-    def _on_item_clicked(self, item):
-        """列表点击时同步到手动输入框"""
-        self.manual_edit.setText(item.text())
-
-    # ── 获取模型列表 ──
-
-    def _fetch_models(self):
-        api_url = self.api_url_edit.text().strip()
-        api_key = self.api_key_edit.text().strip()
-        if not api_url:
-            self.status_label.setText("⚠ 请先填写 API URL")
-            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
-            return
-        if not api_key:
-            self.status_label.setText("⚠ 请先填写 API Key")
-            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
-            return
-
-        self.fetch_btn.setEnabled(False)
-        self.fetch_btn.setText("⏳ 获取中...")
-        self.status_label.setText("⏳ 正在获取模型列表...")
-        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
-
-        # 请求序号：若旧请求仍在飞行，其迟到回调会被忽略，避免竞态覆盖
-        self._fetch_seq = getattr(self, "_fetch_seq", 0) + 1
-        seq = self._fetch_seq
-
-        self._thread = QThread()
-        self._worker = ModelListWorker(api_url, api_key)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ids, s=seq: self._on_models_fetched(ids, s))
-        self._worker.error.connect(lambda msg, s=seq: self._on_models_error(msg, s))
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.error.connect(self._thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.start()
-
-    def _on_models_fetched(self, model_ids: list, seq: int = None):
-        if seq is not None and seq != getattr(self, "_fetch_seq", None):
-            return  # 已发起更新的请求，忽略过期结果
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("📋 获取列表")
-        self._all_models = list(model_ids)
-        self._apply_filter(self.search_edit.text())
-        self.status_label.setText(f"✅ 获取到 {len(model_ids)} 个模型")
-        self.status_label.setStyleSheet("color:#22c55e; font-size:11px;")
-
-    def _on_models_error(self, err_msg: str, seq: int = None):
-        if seq is not None and seq != getattr(self, "_fetch_seq", None):
-            return  # 已发起更新的请求，忽略过期结果
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("📋 获取列表")
-        self.status_label.setText(f"❌ {err_msg}")
-        self.status_label.setStyleSheet("color:#ef4444; font-size:11px;")
-
-    # ── 检测 ──
-
-    def _test_selected(self):
-        model = self.selected_model()
-        api_url = self.api_url_edit.text().strip()
-        api_key = self.api_key_edit.text().strip()
-        if not api_url or not api_key:
-            self.status_label.setText("⚠ 请先填写 API URL 和 Key")
-            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
-            return
-        if not model:
-            self.status_label.setText("⚠ 请先选择或输入模型")
-            self.status_label.setStyleSheet("color:#eab308; font-size:11px;")
-            return
-
-        self.test_btn.setEnabled(False)
-        self.test_btn.setText("⏳ 检测中...")
-        self.status_label.setText("⏳ 正在连接 API...")
-        self.status_label.setStyleSheet("color:#64748b; font-size:11px;")
-
-        # 请求序号：旧请求的迟到回调将被忽略，避免竞态覆盖
-        self._test_seq = getattr(self, "_test_seq", 0) + 1
-        tseq = self._test_seq
-
-        self._test_thread = QThread()
-        self._test_worker = ApiTestWorker(api_url, api_key, model, self._target_lang)
-        self._test_worker.moveToThread(self._test_thread)
-        self._test_thread.started.connect(self._test_worker.run)
-        self._test_worker.finished.connect(lambda r, s=tseq: self._on_test_done(r, s))
-        self._test_worker.finished.connect(self._test_thread.quit)
-        self._test_worker.finished.connect(self._test_worker.deleteLater)
-        self._test_thread.finished.connect(self._test_thread.deleteLater)
-        self._test_thread.start()
-
-    def _on_test_done(self, result: str, seq: int = None):
-        if seq is not None and seq != getattr(self, "_test_seq", None):
-            return  # 已发起更新的请求，忽略过期结果
-        self.test_btn.setEnabled(True)
-        self.test_btn.setText("🔍 检测")
-        is_success = result.startswith("✅")
-        self.status_label.setText(result)
-        if is_success:
-            self.status_label.setStyleSheet("color:#22c55e; font-size:11px;")
-        else:
-            self.status_label.setStyleSheet("color:#ef4444; font-size:11px;")
-
-    # ── 结果 ──
-
-    def selected_model(self) -> str:
-        # 手动输入框是最终编辑目标（列表点击只是把它同步进来）；
-        # 用户修改输入框后必须以此为准，否则改动会被列表选中项静默覆盖
-        manual = self.manual_edit.text().strip()
-        if manual:
-            return manual
-        item = self.model_list.currentItem()
-        if item:
-            return item.text().strip()
-        return ""
-
-    def get_values(self) -> dict:
-        return {
-            "api_url": self.api_url_edit.text().strip(),
-            "api_key": self.api_key_edit.text().strip(),
-            "model": self.selected_model(),
-        }
-
-
 class SettingsDialog(QDialog):
-    """二级设置对话框——语音识别 + AI翻译全部参数"""
+    """二级设置对话框——语音识别 + AI翻译（本地 Hy-MT2）参数"""
 
-    def __init__(self, parent, values: dict):
+    def __init__(self, parent, values: dict, history_cb=None, cache_cb=None):
         super().__init__(parent)
         self.setStyleSheet(_SCROLLBAR_STYLE + """
             QCheckBox { background: transparent; spacing: 7px; }
@@ -524,7 +45,8 @@ class SettingsDialog(QDialog):
         """)
         self.setWindowTitle("更多设置")
         self.setMinimumWidth(520)
-        self._model_name = values.get("translation_model", "")
+        self._history_cb = history_cb
+        self._cache_cb = cache_cb
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
 
@@ -568,21 +90,14 @@ class SettingsDialog(QDialog):
         self.vad_cb = QCheckBox("VAD 过滤")
         self.vad_cb.setChecked(values.get("vad_filter", True))
         opts_row.addWidget(self.vad_cb)
-        self.pipeline_cb = QCheckBox("并行流水线")
-        self.pipeline_cb.setChecked(values.get("pipeline", True))
-        self.pipeline_cb.setToolTip(
-            "两种模式都按「先全部转写 → 再统一翻译嵌入」两阶段调度（模型只加载一次）\n"
-            "勾选：多文件时并行翻译（联网模式有效；本地翻译受服务串行限制自动逐文件）\n"
-            "不勾：文件级串行处理")
-        opts_row.addWidget(self.pipeline_cb)
         opts_row.addStretch()
         g1.addLayout(opts_row, r, 0, 1, 3)
         r += 1
 
-        # ── 默认视频目录（个性化：用于「📌 默认」按钮与字幕页自动扫描）──
+        # ── 默认视频目录（用于「📌 默认」按钮）──
         g1.addWidget(QLabel("默认视频目录"), r, 0)
         self.default_dir = QLineEdit(values.get("default_video_dir", ""))
-        self.default_dir.setPlaceholderText("可留空；用于「📌 默认」按钮与字幕页自动扫描")
+        self.default_dir.setPlaceholderText("可留空；用于「📌 默认」按钮")
         g1.addWidget(self.default_dir, r, 1)
         dir_browse_btn = QPushButton("浏览...")
         dir_browse_btn.clicked.connect(lambda: self.default_dir.setText(
@@ -598,43 +113,15 @@ class SettingsDialog(QDialog):
         g1.addWidget(self.reuse_lang_cb, r, 0, 1, 3)
         layout.addWidget(sg1)
 
-        # ── AI 翻译（多方案管理）──
-        sg2 = QGroupBox("🌍 AI 翻译")
+        # ── AI 翻译（本地 Hy-MT2）──
+        sg2 = QGroupBox("🌍 AI 翻译（本地 Hy-MT2）")
         g2 = QGridLayout(sg2)
         g2.setVerticalSpacing(8)
-
-        # ── 初始化方案数据 ──
-        self._presets = values.get("presets")
-        if not self._presets:
-            self._presets = [{
-                "id": "default",
-                "name": "默认方案",
-                "api_url": values.get("api_url", ""),
-                "api_key": values.get("api_key", ""),
-                "model": values.get("translation_model", ""),
-            }]
-        self._active_id = values.get("active_preset", self._presets[0]["id"])
-        self._updating = False  # 防止信号递归
-
         r = 0
-        # ── 翻译方式：本地 Hy-MT2 / 联网 API ──
-        g2.addWidget(QLabel("翻译方式"), r, 0)
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(4)
-        self.translation_mode = QComboBox()
-        self.translation_mode.addItem("本地（Hy-MT2）", "local")
-        self.translation_mode.addItem("联网 API", "online")
-        self.translation_mode.setCurrentIndex(
-            ["local", "online"].index(values.get("translation_mode", "local"))
-            if values.get("translation_mode", "local") in ("local", "online") else 0)
-        self.translation_mode.setToolTip("本地：自动启动本机 Hy-MT2 翻译服务（无需手动启动任何脚本）\n联网：调用在线 API，需配置模型")
-        self.translation_mode.currentIndexChanged.connect(self._on_translation_mode_changed)
-        mode_row.addWidget(self.translation_mode, 1)
-        self.mode_hint = QLabel(f"使用本地 Hy-MT2 服务 {service_url_prefix()}")
-        self.mode_hint.setStyleSheet("color:#94a3b8; font-size:11px;")
-        self.mode_hint.setWordWrap(True)
-        mode_row.addWidget(self.mode_hint, 1)
-        g2.addLayout(mode_row, r, 1, 1, 2)
+        mode_hint = QLabel(f"使用本地 Hy-MT2 翻译服务 {service_url_prefix()}（自动启动，无需配置 API）")
+        mode_hint.setStyleSheet("color:#22c55e; font-size:11px;")
+        mode_hint.setWordWrap(True)
+        g2.addWidget(mode_hint, r, 0, 1, 3)
         r += 1
 
         g2.addWidget(QLabel("目标语言"), r, 0)
@@ -644,73 +131,6 @@ class SettingsDialog(QDialog):
         g2.addWidget(self.target_lang, r, 1, 1, 2)
         r += 1
 
-        # ── 联网方案配置（本地模式时整块隐藏）──
-        self.online_cfg_widget = QWidget()
-        self.online_cfg_widget.setObjectName("onlineCfgWidget")
-        # 全局 QSS 的 QWidget { background: ... } 会给嵌套容器及内部 QLabel 强制上色，
-        # 这里覆盖为透明，避免方案配置块底部出现色块/黑框
-        self.online_cfg_widget.setStyleSheet(
-            "#onlineCfgWidget { background: transparent; }"
-            "#onlineCfgWidget QLabel { background: transparent; }")
-        ocl = QVBoxLayout(self.online_cfg_widget)
-        ocl.setContentsMargins(0, 0, 0, 0)
-        ocl.setSpacing(8)
-
-        # ── 方案选择行 ──
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(4)
-        preset_row.addWidget(QLabel("方案"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
-        preset_row.addWidget(self.preset_combo, 1)
-        add_btn = QPushButton()
-        add_btn.setFixedWidth(32)
-        add_btn.setIcon(_circle_symbol_icon("+"))
-        add_btn.setIconSize(QSize(18, 18))
-        add_btn.setToolTip("添加新方案")
-        add_btn.clicked.connect(self._add_preset)
-        preset_row.addWidget(add_btn)
-        self.del_btn = QPushButton()
-        self.del_btn.setFixedWidth(32)
-        self.del_btn.setIcon(_circle_symbol_icon("-"))
-        self.del_btn.setIconSize(QSize(18, 18))
-        self.del_btn.setToolTip("删除当前方案")
-        self.del_btn.clicked.connect(self._del_preset)
-        preset_row.addWidget(self.del_btn)
-        preset_row.addStretch()
-        ocl.addLayout(preset_row)
-
-        # ── 当前方案的编辑字段 ──
-        name_row = QHBoxLayout()
-        name_row.setSpacing(4)
-        name_row.addWidget(QLabel("方案名称"))
-        self.preset_name = QLineEdit()
-        self.preset_name.textChanged.connect(self._on_field_changed)
-        name_row.addWidget(self.preset_name, 1)
-        ocl.addLayout(name_row)
-
-        # ── 模型配置按钮（点开二级页）──
-        cfg_row = QHBoxLayout()
-        cfg_row.setSpacing(4)
-        cfg_row.addWidget(QLabel("模型配置"))
-        self.model_cfg_btn = QPushButton()
-        self.model_cfg_btn.setObjectName("accentBtn")
-        self.model_cfg_btn.setCursor(Qt.PointingHandCursor)
-        self.model_cfg_btn.setStyleSheet("text-align:left; padding:6px 10px; font-size:12px;")
-        self.model_cfg_btn.clicked.connect(self._open_model_config)
-        cfg_row.addWidget(self.model_cfg_btn, 1)
-        self.cfg_status_dot = QLabel("●")
-        self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
-        self.cfg_status_dot.setToolTip("灰色=未配置，绿色=已配置")
-        cfg_row.addWidget(self.cfg_status_dot)
-        ocl.addLayout(cfg_row)
-
-        g2.addWidget(self.online_cfg_widget, r, 0, 1, 3)
-        r += 1
-        self._update_cfg_btn_text()
-        self._apply_mode_visibility(values.get("translation_mode", "local"))
-
-        # ── 其余选项 ──
         self.only_zh_cb = QCheckBox("只要译文（不生成双语）")
         self.only_zh_cb.setChecked(values.get("translation_only", False))
         g2.addWidget(self.only_zh_cb, r, 0, 1, 3)
@@ -722,13 +142,9 @@ class SettingsDialog(QDialog):
         self.batch_size = QSpinBox()
         self.batch_size.setRange(10, 5000)
         self.batch_size.setSingleStep(5)
-        # 批大小默认按翻译方式区分：本地 Hy-MT2=20（config batch_size），联网大模型=100（config batch_size_online）
-        _mode_now = str(values.get("translation_mode", "local")).lower()
-        _default_bs = getattr(cfg.translation, "batch_size_online", 100) if _mode_now == "online" else cfg.translation.batch_size
+        _default_bs = cfg.translation.batch_size or 20
         _saved_bs = values.get("translation_batch_size")
         self.batch_size.setValue(_default_bs if _saved_bs is None else _saved_bs)
-        self._bs_custom = False  # 用户未手动改过时，切换翻译方式自动跟随该方式默认
-        self.batch_size.valueChanged.connect(self._on_bs_changed)
         batch_row.addWidget(self.batch_size)
         self.send_all_cb = QCheckBox("一次性发送全部文本（不拆分批次）")
         self.send_all_cb.setChecked(values.get("send_all", False))
@@ -753,6 +169,27 @@ class SettingsDialog(QDialog):
         g2.addWidget(self.backup_max, r, 1, 1, 2)
         layout.addWidget(sg2)
 
+        # ── 数据管理（历史记录 / 翻译缓存）──
+        if self._history_cb or self._cache_cb:
+            sg3 = QGroupBox("🗂 数据管理")
+            g3 = QHBoxLayout(sg3)
+            g3.setContentsMargins(8, 6, 8, 6)
+            g3.setSpacing(8)
+            if self._history_cb:
+                history_btn = QPushButton("📋 处理历史…")
+                history_btn.setObjectName("bottomBtn")
+                history_btn.setToolTip("查看已处理/已忽略文件记录；删除记录可让该文件重新被「重试」处理")
+                history_btn.clicked.connect(lambda: self._history_cb())
+                g3.addWidget(history_btn)
+            if self._cache_cb:
+                cache_btn = QPushButton("🗑 翻译缓存…")
+                cache_btn.setObjectName("bottomBtn")
+                cache_btn.setToolTip("查看/逐条删除/清空句子级翻译缓存（已翻译句子复用，一般无需清理）")
+                cache_btn.clicked.connect(lambda: self._cache_cb())
+                g3.addWidget(cache_btn)
+            g3.addStretch()
+            layout.addWidget(sg3)
+
         layout.addStretch()
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -769,201 +206,6 @@ class SettingsDialog(QDialog):
         session_btn.clicked.connect(lambda: self.done(1))
         permanent_btn.clicked.connect(lambda: self.done(2))
 
-        # 填充方案下拉框
-        self._rebuild_combo()
-
-    # ── 方案管理方法 ──
-
-    def _get_preset(self, pid: str) -> dict:
-        for p in self._presets:
-            if p["id"] == pid:
-                return p
-        return self._presets[0]
-
-    def _get_current_preset(self) -> dict:
-        return self._get_preset(self._active_id)
-
-    def _save_current_preset(self):
-        """将当前 UI 字段值刷回方案字典"""
-        p = self._get_current_preset()
-        p["name"] = self.preset_name.text().strip() or "未命名方案"
-        p["model"] = self._model_name
-
-    def _load_preset_fields(self, preset: dict):
-        """将方案数据加载到 UI 编辑字段"""
-        self.preset_name.setText(preset["name"])
-        self._model_name = preset.get("model", "")
-        self._update_cfg_btn_text()
-
-    def _rebuild_combo(self):
-        """重建方案下拉框（添加/删除/切换后调用）"""
-        self._updating = True
-        self.preset_combo.clear()
-        for p in self._presets:
-            if p["id"] == self._active_id:
-                label = "● " + p["name"]
-            else:
-                label = "  " + p["name"]
-            self.preset_combo.addItem(label, p["id"])
-        # 选中激活的方案
-        for i in range(self.preset_combo.count()):
-            if self.preset_combo.itemData(i) == self._active_id:
-                self.preset_combo.setCurrentIndex(i)
-                break
-        self._load_preset_fields(self._get_current_preset())
-        self._updating = False
-        self.del_btn.setEnabled(len(self._presets) > 1)
-        self._update_cfg_btn_text()
-
-    def _refresh_combo_labels(self):
-        """更新下拉框文字上的星标（不重建控件）"""
-        self._updating = True
-        for i in range(self.preset_combo.count()):
-            pid = self.preset_combo.itemData(i)
-            p = self._get_preset(pid)
-            if p:
-                if pid == self._active_id:
-                    label = "● " + p["name"]
-                else:
-                    label = "  " + p["name"]
-                self.preset_combo.setItemText(i, label)
-        self._updating = False
-
-    def _on_preset_selected(self, idx: int):
-        """切换方案：保存当前修改，加载新方案"""
-        if self._updating or idx < 0:
-            return
-        self._save_current_preset()
-        pid = self.preset_combo.itemData(idx)
-        if pid and pid != self._active_id:
-            self._active_id = pid
-            self._updating = True
-            self._load_preset_fields(self._get_preset(pid))
-            self._refresh_combo_labels()
-            self._updating = False
-            self._update_cfg_btn_text()
-
-    def _on_field_changed(self):
-        """字段变化时自动保存到当前方案"""
-        if not self._updating:
-            self._save_current_preset()
-            # 更新方案名称到下拉框
-            idx = self.preset_combo.currentIndex()
-            if idx >= 0:
-                p = self._get_current_preset()
-                if p["id"] == self._active_id:
-                    label = "● " + p["name"]
-                else:
-                    label = "  " + p["name"]
-                self.preset_combo.setItemText(idx, label)
-            self._update_cfg_btn_text()
-
-    def _add_preset(self):
-        """添加空白新方案并选中"""
-        import time
-        self._save_current_preset()
-        new_id = f"preset_{int(time.time())}"
-        names = {p["name"] for p in self._presets}
-        name = "新方案"
-        if name in names:
-            i = 2
-            while f"{name}{i}" in names:
-                i += 1
-            name = f"{name}{i}"
-        self._presets.append({
-            "id": new_id, "name": name,
-            "api_url": "", "api_key": "", "model": "",
-        })
-        self._active_id = new_id
-        self._rebuild_combo()
-
-    def _del_preset(self):
-        """删除当前方案（至少保留一个）"""
-        if len(self._presets) <= 1:
-            QMessageBox.warning(self, "删除", "至少保留一个方案")
-            return
-        cur = self._get_current_preset()
-        box = QMessageBox(self)
-        box.setWindowTitle("删除方案")
-        box.setText(f"确定删除方案「{cur['name']}」？")
-        box.setIcon(QMessageBox.NoIcon)
-        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        if box.exec() != QMessageBox.Yes:
-            return
-        self._presets = [p for p in self._presets if p["id"] != self._active_id]
-        self._active_id = self._presets[0]["id"]
-        self._rebuild_combo()
-
-    def _open_model_config(self):
-        """打开模型配置二级对话框"""
-        self._save_current_preset()
-        cur = self._get_current_preset()
-        dlg = ModelConfigDialog(self, api_url=cur.get("api_url", ""),
-                                api_key=cur.get("api_key", ""),
-                                current_model=self._model_name,
-                                target_lang=self.target_lang.currentText())
-        if dlg.exec() == QDialog.Accepted:
-            vals = dlg.get_values()
-            cur["api_url"] = vals["api_url"]
-            cur["api_key"] = vals["api_key"]
-            cur["model"] = vals["model"]
-            self._model_name = vals["model"]
-            self._update_cfg_btn_text()
-
-    def _update_cfg_btn_text(self):
-        """更新模型配置按钮的显示文字和状态指示器"""
-        cur = self._get_current_preset()
-        api_url = cur.get("api_url", "").strip()
-        api_key = cur.get("api_key", "").strip()
-        model = self._model_name
-        configured = bool(api_url and api_key and model)
-        if model:
-            self.model_cfg_btn.setText(f"⚙  {model}")
-            self.model_cfg_btn.setToolTip(f"模型: {model}\nURL: {api_url[:40]}...\n点击修改配置")
-        else:
-            self.model_cfg_btn.setText("⚙  点击配置模型...")
-            self.model_cfg_btn.setToolTip("点击配置 API URL、Key 和模型")
-        if configured:
-            self.cfg_status_dot.setStyleSheet("color:#22c55e; font-size:16px;")
-            self.cfg_status_dot.setToolTip("已配置 ✓")
-        else:
-            self.cfg_status_dot.setStyleSheet("color:#94a3b8; font-size:16px;")
-            self.cfg_status_dot.setToolTip("未配置 - 点击配置")
-
-    def _on_translation_mode_changed(self, idx: int):
-        """翻译方式切换：本地 Hy-MT2 隐藏联网配置块"""
-        mode = self.translation_mode.itemData(idx) if idx >= 0 else "local"
-        self._apply_mode_visibility(mode)
-
-    def _on_bs_changed(self, value: int):
-        """用户手动改动批大小后，切换翻译方式不再自动跟随默认"""
-        self._bs_custom = True
-
-    def _apply_mode_visibility(self, mode: str):
-        """根据翻译方式显示/隐藏联网配置块"""
-        # 未手动自定义时，切换翻译方式让批大小跟随该方式的默认值
-        if not getattr(self, "_bs_custom", False) and getattr(self, "batch_size", None) is not None:
-            dflt = getattr(cfg.translation, "batch_size_online", 100) if str(mode).lower() != "local" else cfg.translation.batch_size
-            self.batch_size.blockSignals(True)
-            self.batch_size.setValue(dflt)
-            self.batch_size.blockSignals(False)
-        if str(mode).lower() == "local":
-            self.online_cfg_widget.setVisible(False)
-            self.mode_hint.setText(f"使用本地 Hy-MT2 服务 {service_url_prefix()}（无需配置）")
-            self.mode_hint.setStyleSheet("color:#22c55e; font-size:11px;")
-        else:
-            self.online_cfg_widget.setVisible(True)
-            self.mode_hint.setText("联网调用在线 API，请配置下方模型")
-            self.mode_hint.setStyleSheet("color:#94a3b8; font-size:11px;")
-
-    def _batch_size_value_for_mode(self):
-        """批大小保存规则：等于当前翻译方式默认值时存 None（跟随模式默认，本地 20 / 联网 100），
-        用户自定义值则保存（全局覆盖两种模式）"""
-        mode = self.translation_mode.itemData(self.translation_mode.currentIndex())
-        dflt = getattr(cfg.translation, "batch_size_online", 100) if str(mode).lower() != "local" else cfg.translation.batch_size
-        val = self.batch_size.value()
-        return None if val == dflt else val
-
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
         self.batch_size.setEnabled(not checked)
@@ -972,9 +214,14 @@ class SettingsDialog(QDialog):
         else:
             self.batch_size.setStyleSheet("")
 
+    def _batch_size_value(self):
+        """批大小保存规则：等于 config 默认值时存 None（跟随配置），
+        用户自定义值则保存覆盖"""
+        default_bs = cfg.translation.batch_size or 20
+        val = self.batch_size.value()
+        return None if val == default_bs else val
+
     def get_values(self) -> dict:
-        self._save_current_preset()
-        cur = self._get_current_preset()
         return {
             "model_dir": self.model_dir.text().strip(),
             "language": self.lang.currentText(),
@@ -985,18 +232,11 @@ class SettingsDialog(QDialog):
             "default_video_dir": self.default_dir.text().strip(),
             "reuse_auto_lang": self.reuse_lang_cb.isChecked(),
             "target_lang": self.target_lang.currentText(),
-            "translation_mode": self.translation_mode.itemData(self.translation_mode.currentIndex()),
-            "translation_model": cur["model"],
-            "api_url": cur["api_url"],
-            "api_key": cur["api_key"],
-            "pipeline": self.pipeline_cb.isChecked(),
             "translation_only": self.only_zh_cb.isChecked(),
-            "translation_batch_size": self._batch_size_value_for_mode(),
+            "translation_batch_size": self._batch_size_value(),
             "send_all": self.send_all_cb.isChecked(),
             "pause_before_embed": self.pause_embed_cb.isChecked(),
             "backup_max_files": self.backup_max.value(),
-            "presets": self._presets,
-            "active_preset": self._active_id,
         }
 
 

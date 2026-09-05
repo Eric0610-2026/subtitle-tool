@@ -31,13 +31,13 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 | `qt_app.py` | Qt 主窗口 UI、事件分发、设置保存（含 `_batch_size_save_field`） |
 | `panels.py` | 进度/预览/日志面板 + `SignalBridge`（Qt Signal 跨线程回传事件） |
 | `widgets.py` | `DropListWidget`（拖放列表）、`LogEntry`、`SCAN_VIDEO_EXTS` |
-| `dialogs.py` | 设置、模型配置、历史、缓存、嵌入对话框 |
+| `dialogs.py` | 设置、历史、缓存、嵌入对话框 |
 | `theme.py` | 明暗主题配色、QSS |
 | `notifier.py` | winotify → PowerShell 系统通知（白名单防注入） |
 | `transcriber.py` | ffmpeg 提取音频 + faster-whisper 转写、断点 `.partial.srt` |
-| `translation.py` | 翻译客户端：句子级缓存、批处理、递归降级、403 curl fallback |
+| `translation.py` | 翻译客户端：句子级缓存、批处理、递归降级、停止与熔断 |
 | `translator.py` | 翻译阶段编排：翻译→组装双语→落盘→MKV 内嵌→备份 |
-| `pipeline.py` | 串行/并行流水线编排、`_DaemonThreadPoolExecutor`、停止管理 |
+| `pipeline.py` | 两阶段流水线编排（转写→翻译 顺序）、停止管理 |
 | `srt_utils.py` | SRT 解析/写入、断句、繁简转换、`OverallProgress` |
 | `muxer.py` | MKV 软内嵌、从视频提取内嵌字幕、转 MP4（ffprobe 探测 + ffmpeg，时长验证后删除原文件；MP4 源带内嵌字幕时去字幕重封装替换原文件） |
 | `local_service.py` | 本地 Hy-MT2 llama-server 自动拉起/探测/退出清理（端口 `_PORT=8188`，不用 8080 是因为它常被 Hyper-V/WSL 动态预留；`service_url_prefix()` 供各模块识别"本地服务 URL"；启动日志落盘 `cache/.llama-server.log`，启动失败时读日志尾部给出真实原因，如端口被 Windows 预留时提示 netsh 修复命令） |
@@ -50,26 +50,25 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
          → pipeline._translate_stage → translator.translate_only → muxer 或外挂 SRT
 ```
 
-- **串行/并行统一两阶段调度**（`pipeline._run_staged`，`_process_one` 已删除）：
+- **两阶段调度**（`pipeline._run_staged`，`_process_one` 已删除）：
   阶段 1 全部转写（仅驻留 Whisper）→ `release_model()` 释放显存 →
-  阶段 2 用 `_DaemonThreadPoolExecutor` 翻译+自动内嵌（仅驻留 llama-server）。
-  串行（concurrency=1）= 文件级并发 1 的特例，模型各只加载一次。
-  文件级并发：本地模式固定 1（llama-server `--parallel 1`，多路并发只会排队超时），
-  联网模式读 `concurrency_files`；批次级并发：本地固定 1，联网读 `concurrency_translate`。
-  `pause_before_embed` 仅在文件级并发>1 时跳过（并发 1 保留逐文件预览暂停）。
+  阶段 2 顺序翻译+自动内嵌（仅驻留 llama-server）。
+  翻译走本地 llama-server（`--parallel 1`），文件级/批次级均为串行：
+  多路并发只会排队超时，模型各只加载一次；`pause_before_embed` 逐文件生效。
 - **跨线程回传**：worker 线程 post 事件 dict → `SignalBridge`（Qt Signal，队列连接）→
   主线程 `_handle_event` 按类型分发（`_event_handlers` 只构建一次）。
-- **翻译**：`translation.py` 内 `ThreadPoolExecutor` 并发批量调 API；
+- **翻译**：`translation.py` 批量调本地 API；
   进程级共享缓存 `_shared_cache` + 全局锁防并发写盘覆盖（缓存对话框删除/清空必须
-  走 `remove_shared_cache_entries`/`clear_shared_cache` 同步内存，否则条目复活）；句子级去重。
+  走 `remove_shared_cache_entries`/`clear_shared_cache` 同步内存，否则条目复活）；
+  缓存淘汰按 LRU（命中即触碰，`MAX_CACHE_ENTRIES` 超额裁掉一半最久未用）；
+  句子级去重。
   段落上下文用「future 链」实现：worker 内等本段前一批完成再带 `（上文）…` 提交，
-  段内严格有序、段间并行（`para_gate`/`para_context`）。
+  段内严格有序（`para_gate`/`para_context`，默认批次并发 1）。
   **停止与熔断**：`translate_blocks(stop_check=...)` 检测用户停止抛 `TranslationStopped`
   （translator 静默返回，不算失败）；网络类错误抛 `ApiUnavailableError` 不拆批；
   连续 `MAX_EMPTY_BATCHES`(3) 空批判定 API 不可用中止本文件；补翻连续 20 句无进展放弃；
   异常/停止时 `_abort_translation` 落盘断点并取消未开始的批次。
-- **批大小**：本地模式读 `cfg.translation.batch_size`，联网模式读
-  `cfg.translation.batch_size_online`；永久保存时 `_batch_size_save_field` 按 mode 写对应字段。
+- **批大小**：读 `cfg.translation.batch_size`；永久保存时自定义值写回该字段。
 - **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；
   `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
   replace 冲突做短暂重试。

@@ -4,7 +4,7 @@
 PySide6/Qt 版主应用窗口
 """
 import logging
-import os, re, time, traceback
+import time, traceback
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -12,7 +12,7 @@ from typing import List, Optional, Dict
 logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, QTimer, QEvent, QSize
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QCheckBox, QPushButton, QListWidgetItem,
@@ -25,15 +25,14 @@ from PySide6.QtGui import QColor, QFontMetrics
 from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
     load_json, save_json, estimate_eta,
-    seconds_to_srt_time, srt_time_to_seconds,
     OverallProgress, find_tool, IGNORE_FILE,
-    _read_text_auto,
+    _read_text_auto, shift_srt_timestamps,
 )
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
 from .muxer import embed_subtitles_to_video, extract_embedded_subtitle, convert_to_mp4
 from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
-from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_text_input, _silent_double_input
+from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_double_input
 from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
 from .notifier import notify as system_notify
 
@@ -46,24 +45,23 @@ LIGHT, DARK = load_theme_colors()
 def _batch_size_save_field(values: dict) -> Optional[tuple]:
     """决定「永久保存」批大小时应写入 config 的字段。
 
-    翻译端读取规则（见 translator.py）：本地模式读 `translation.batch_size`，
-    联网模式读 `translation.batch_size_online`。若把自定义值一律写进
-    `batch_size`，联网模式的自定义值重启后会失效，且会污染本地模式默认值。
-    返回 (字段名, 值)；自定义值为 None（等于当前模式默认）时返回 None，
+    返回 (字段名, 值)；自定义值为 None（等于当前默认）时返回 None，
     表示不覆盖 config 中原值。
     """
     bs = values.get("translation_batch_size")
     if bs is None:
         return None
-    mode = str(values.get("translation_mode", "local")).lower()
-    field = "batch_size" if mode == "local" else "batch_size_online"
-    return field, bs
+    return "batch_size", bs
 
 
 class SubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🎬 本地字幕生成工具")
+        # 任务栏 / Alt-Tab 图标（应用随系统主题没有原生图标时尤其明显）
+        _icon_path = Path(__file__).resolve().parent / "icon.ico"
+        if _icon_path.exists():
+            self.setWindowIcon(QIcon(str(_icon_path)))
         self.resize(cfg.app.window_width, cfg.app.window_height)
         self.setMinimumSize(cfg.app.window_min_width, cfg.app.window_min_height)
 
@@ -93,20 +91,6 @@ class SubtitleApp(QMainWindow):
         self.signal_bridge.event_received.connect(self._handle_event)
         # 事件分发表只构建一次，避免每次事件到达时重建
         self._event_handlers = self._build_event_handlers()
-        # ── 构建多方案配置（含向后兼容）──
-        _presets_raw = getattr(cfg.translation, "presets", None)
-        if _presets_raw:
-            _presets = [
-                {"id": p.id, "name": p.name,
-                 "api_url": p.api_url, "api_key": p.api_key, "model": p.model}
-                for p in _presets_raw]
-        else:
-            _presets = [{"id": "default", "name": "默认方案",
-                         "api_url": cfg.translation.api_url,
-                         "api_key": cfg.translation.api_key,
-                         "model": cfg.translation.model}]
-        _active_preset_id = getattr(cfg.translation, "active_preset", _presets[0]["id"])
-        _active_preset = next((p for p in _presets if p["id"] == _active_preset_id), _presets[0])
         # 默认配置（来自 config.json）
         self.settings_data = {
             "model_dir": str(APP_DIR / cfg.whisper.model_dir) if (APP_DIR / cfg.whisper.model_dir).exists() else cfg.whisper.model_dir,
@@ -118,18 +102,11 @@ class SubtitleApp(QMainWindow):
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
             "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", True),
             "target_lang": cfg.translation.target_lang,
-            "translation_mode": getattr(cfg.translation, "mode", "local"),
-            "translation_model": _active_preset["model"],
-            "api_url": _active_preset["api_url"],
-            "api_key": _active_preset["api_key"],
-            "pipeline": cfg.translation.pipeline,
             "translation_only": False,
-            "translation_batch_size": None,  # None=按模式默认（本地 cfg.batch_size / 联网 cfg.batch_size_online）
+            "translation_batch_size": None,  # None=跟随 config 的 batch_size 默认
             "send_all": False,
             "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
             "backup_max_files": getattr(cfg.translation, "backup_max_files", 50),
-            "presets": _presets,
-            "active_preset": _active_preset_id,
         }
         self._build_ui()
         self._apply_style()
@@ -190,7 +167,8 @@ class SubtitleApp(QMainWindow):
         hl.addWidget(title)
         hl.addStretch()
         ver = QLabel("Whisper + AI 翻译")
-        ver.setStyleSheet("color:#94a3b8; font-size:11px;")
+        # 头部两端都是深色（navy→accent 渐变），标签固定浅色保证两种主题下都可读
+        ver.setStyleSheet("color:rgba(255,255,255,0.62); font-size:11px;")
         hl.addWidget(ver)
         hl.addSpacing(8)
         self.theme_btn = QPushButton()
@@ -230,7 +208,6 @@ class SubtitleApp(QMainWindow):
         for text, cb in [
             ("📂 添加文件", lambda: self._add_files(self.tabs.currentIndex() == 0)),
             ("📁 添加文件夹", lambda: self._add_folder(self.tabs.currentIndex() == 0)),
-            ("🔍 扫描", lambda: self._scan_dir()),
             ("✕ 移除", lambda: self._remove_selected()),
             ("☑ 全选", lambda: self._select_all()),
             ("🗑 清空", lambda: self._clear_jobs()),
@@ -247,7 +224,7 @@ class SubtitleApp(QMainWindow):
         # ── 右侧预览面板 ──
         self.preview_panel = PreviewPanel()
         self.preview_panel.setObjectName("previewPanel")
-        self.preview_panel.connect_toolbar(self._find_in_preview, self._save_preview, self._offset_preview_time)
+        self.preview_panel.connect_toolbar(self._save_preview)
         self.preview_panel.fileDropped.connect(self._on_preview_file_dropped)
         top_splitter.addWidget(self.preview_panel)
         top_splitter.setSizes([540, 660])
@@ -322,6 +299,12 @@ class SubtitleApp(QMainWindow):
         self.stop_btn = self._make_btn("⏹ 停止", self._stop, object_name="stopBtn")
         self.stop_btn.setEnabled(False)
         ar.addWidget(self.stop_btn)
+        # 重试（断点续翻）紧挨停止：处理期间与开始按钮一并禁用
+        self.retry_btn = self._make_btn(
+            "🔄 重试", self._retry, object_name="bottomBtn",
+            stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
+                       "QPushButton:hover { background:#4f46e5; }")
+        ar.addWidget(self.retry_btn)
         # ── 当前模型状态（信息展示：Whisper/本地/联网大模型具体到种类） ──
         self.model_status = QLabel("🧠 当前模型：…")
         self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
@@ -331,11 +314,6 @@ class SubtitleApp(QMainWindow):
             tooltip="手动启动本地 Hy-MT2 翻译服务（127.0.0.1:8188）。"
                     "可在开始处理前预热，避免首个任务等待模型加载；也可用于排查本地服务启动问题")
         ar.addWidget(self.load_model_btn)
-        ar.addWidget(self._make_btn("🔄 重试", self._retry, object_name="bottomBtn",
-                           stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
-                                      "QPushButton:hover { background:#4f46e5; }"))
-        ar.addWidget(self._make_btn("📋 历史", self._show_history, object_name="bottomBtn"))
-        ar.addWidget(self._make_btn("💾 缓存", self._show_cache, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📦 嵌入字幕", self._manual_embed, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 提取字幕", self._manual_extract, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 导出", self._export_log, object_name="bottomBtn"))
@@ -377,7 +355,8 @@ class SubtitleApp(QMainWindow):
         self._add_log_entry(f"已从默认目录扫描{kind}文件：{d}")
 
     def _open_settings(self):
-        dlg = SettingsDialog(self, self.settings_data)
+        dlg = SettingsDialog(self, self.settings_data,
+                             history_cb=self._show_history, cache_cb=self._show_cache)
         result = dlg.exec()
         if result == 1:
             self.settings_data = dlg.get_values()
@@ -411,22 +390,12 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", True)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
-        trans["mode"] = values.get("translation_mode", "local")
-        trans["model"] = values.get("translation_model", "")
-        trans["api_url"] = values.get("api_url", "")
-        trans["api_key"] = values.get("api_key", "")
-        trans["pipeline"] = values.get("pipeline", True)
         _bs_save = _batch_size_save_field(values)
         if _bs_save is not None:  # 自定义值才写入 config.json；默认值不覆盖
             field, _bs_val = _bs_save
             trans[field] = _bs_val
         trans["pause_before_embed"] = values.get("pause_before_embed", False)
         trans["backup_max_files"] = values.get("backup_max_files", 50)
-        # 保存多方案配置
-        presets = values.get("presets")
-        if presets:
-            trans["presets"] = presets
-        trans["active_preset"] = values.get("active_preset", "default")
         try:
             path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError as e:
@@ -569,12 +538,6 @@ class SubtitleApp(QMainWindow):
         """切换标签页时不做任何自动扫描（扫描由「📌 默认」按钮手动触发）"""
         pass
 
-    def _scan_dir(self):
-        is_video = self.tabs.currentIndex() == 0
-        path = self.video_dir.text()
-        if path:
-            self._scan_path(path, is_video)
-
     def _remove_selected(self):
         is_video = self.tabs.currentIndex() == 0
         lb = self.video_list if is_video else self.sub_list
@@ -679,26 +642,6 @@ class SubtitleApp(QMainWindow):
                 self.sub_list.setCurrentRow(i)
                 break
 
-    def _find_in_preview(self):
-        """在预览区表格中查找原文/译文，并高亮命中行"""
-        text, ok = _silent_text_input(self, "查找", "输入要查找的文本：")
-        if not ok or not text:
-            return
-        table = self.preview_panel.preview
-        self.preview_panel.clear_highlight()
-        hit_rows = []
-        for r in range(table.rowCount()):
-            for col in (2, 3):  # 原文 / 译文
-                item = table.item(r, col)
-                if item and text in item.text():
-                    hit_rows.append(r)
-                    break
-        if hit_rows:
-            self.preview_panel.highlight_rows(hit_rows)
-            self._add_log_entry(f"预览区查找完成：{text}（命中 {len(hit_rows)} 行）")
-        else:
-            self._add_log_entry(f"预览区未找到：{text}")
-
     def _offset_preview_time(self):
         """批量调整预览区字幕时间戳"""
         content = self.preview_panel.get_text().strip()
@@ -709,15 +652,7 @@ class SubtitleApp(QMainWindow):
                                            "偏移量（秒）：正数=延后，负数=提前")
         if not ok:
             return
-        # 匹配所有 SRT 时间戳行：HH:MM:SS,mmm --> HH:MM:SS,mmm
-        ts_re = re.compile(r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})\s*-->\s*(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})")
-
-        def _shift(m):
-            start = max(0, srt_time_to_seconds(m.group(1)) + offset)
-            end = max(0, srt_time_to_seconds(m.group(2)) + offset)
-            return f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}"
-
-        new_content = ts_re.sub(_shift, content)
+        new_content = shift_srt_timestamps(content, offset)
         self.preview_panel.set_text(new_content)
         self._add_log_entry(f"时间偏移 {offset:+.1f}s（预览区）")
         # 自动保存
@@ -760,15 +695,7 @@ class SubtitleApp(QMainWindow):
 
     def _build_opts(self, skip_completed=False):
         s = self.settings_data
-        # 翻译方式：local=本地 Hy-MT2（强制走本机本地服务端口，无需配置）；online=使用用户预设的联网 API
-        mode = str(s.get("translation_mode", "local")).lower()
-        if mode == "local":
-            from .local_service import service_url_prefix
-            api_url, api_key, tmodel = (
-                service_url_prefix() + "/v1/chat/completions", "local", "hy-mt2")
-        else:
-            api_url, api_key, tmodel = (
-                s.get("api_url", ""), s.get("api_key", ""), s.get("translation_model", ""))
+        from .local_service import service_url_prefix
         return {
             "work_dir": self.work_dir,
             "model_dir": s.get("model_dir", ""),
@@ -780,15 +707,12 @@ class SubtitleApp(QMainWindow):
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
             "reuse_auto_lang": s.get("reuse_auto_lang", True),
-            "api_url": api_url,
-            "api_key": api_key,
-            "translation_model": tmodel,
+            "api_url": service_url_prefix() + "/v1/chat/completions",
             "translation_only": s.get("translation_only", False),
             "translation_batch_size": s.get("translation_batch_size"),
             "send_all": s.get("send_all", False),
             "pause_before_embed": s.get("pause_before_embed", False),
             "skip_completed": skip_completed,
-            "concurrency": cfg.translation.concurrency_pipeline if s.get("pipeline", True) else cfg.translation.concurrency_serial,
             "post": self.signal_bridge.post,
             "_is_stopped": lambda: self.worker.stop_requested,
             "_register_proc": self.worker._register_proc,
@@ -800,6 +724,7 @@ class SubtitleApp(QMainWindow):
         self._stats = {"files": len(jobs)}
         self._output_paths = []
         self.start_btn.setEnabled(False)
+        self.retry_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._reset_progress()
         self.preview_panel.clear()
@@ -852,6 +777,7 @@ class SubtitleApp(QMainWindow):
             # pipeline 顶层已兜底），按钮会卡在"运行中"；此时直接恢复可操作状态
             if self.worker.thread is not None and self.stop_btn.isEnabled():
                 self.start_btn.setEnabled(True)
+                self.retry_btn.setEnabled(True)
                 self.stop_btn.setEnabled(False)
                 self.preview_panel.setReadOnly(False)
                 self._add_log_entry("处理线程已退出，已复位界面状态", "WARNING")
@@ -873,16 +799,9 @@ class SubtitleApp(QMainWindow):
             ver = mdir.name if mdir.name and mdir.name not in (".", "/", "\\") else "Whisper"
             parts.append(f"Whisper {ver}")
 
-        # 翻译模型：本地仅运行中显示；联网始终显示（当前生效的翻译模型，无本地加载态）
-        mode = str(s.get("translation_mode", "local")).lower()
-        tmodel = (s.get("translation_model") or "").strip()
-        local_running = False
-        if mode == "local":
-            local_running = is_service_running()
-            if local_running:
-                parts.append(f"本地模型 {tmodel or 'Hy-MT2'}")
-        elif mode == "online" and s.get("api_url"):
-            parts.append(f"联网模型 {tmodel or '未配置'}")
+        # 本地翻译模型：服务运行中才显示
+        if is_service_running():
+            parts.append("本地模型 Hy-MT2")
 
         if parts:
             self.model_status.setText("🧠 当前加载：" + " · ".join(parts))
@@ -1311,9 +1230,6 @@ class SubtitleApp(QMainWindow):
         model_dir = APP_DIR / cfg.whisper.model_dir if (APP_DIR / cfg.whisper.model_dir).exists() else Path(cfg.whisper.model_dir)
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
             self._add_log_entry(f"未找到 faster-whisper 模型，请下载后放入 {cfg.whisper.model_dir}/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
-        s = self.settings_data
-        if str(s.get("translation_mode", "local")).lower() != "local" and (not s.get("api_url") or not s.get("api_key")):
-            self._add_log_entry("API 地址或密钥未设置，请在设置中配置后使用翻译功能", "WARNING")
 
     def _export_log(self):
         """导出当前日志列表到文件"""
@@ -1418,6 +1334,7 @@ class SubtitleApp(QMainWindow):
             if self._overall is not None:
                 p.overall_label.setText("总进度：已停止（部分完成）")
         self.start_btn.setEnabled(True)
+        self.retry_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.preview_panel.setReadOnly(False)
         elapsed = time.time() - self._start_time if self._start_time else 0
@@ -1434,6 +1351,7 @@ class SubtitleApp(QMainWindow):
         msg = e.get("message", "错误")
         self._add_log_entry(msg, "ERROR", trace=e.get("trace", ""))
         self.start_btn.setEnabled(True)
+        self.retry_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._reset_progress()
         self.preview_panel.setReadOnly(False)
@@ -1506,39 +1424,14 @@ class SubtitleApp(QMainWindow):
         parts.extend([f"已用 {fmt_duration(elapsed)}", f"剩余 {remain}", f"预计 {finish}"])
         p.detail_label.setText(" | ".join(parts))
 
-    def _open_output_dir(self):
-        """打开输出目录——优先使用 worker 回传的精确路径"""
-        target = None
-        if self._output_paths:
-            target = Path(self._output_paths[-1]).parent
-        elif self._last_output_dir and self._last_output_dir.exists():
-            target = self._last_output_dir
-        if not target or not target.exists():
-            for jobs in (self.video_jobs, self.subtitle_jobs):
-                for job in jobs:
-                    candidates = [job.parent / job.stem, job.parent]
-                    for c in candidates:
-                        if c.exists():
-                            target = c
-                            break
-                    if target:
-                        break
-                if target:
-                    break
-        if not target:
-            target = Path(self.work_dir)
-        try:
-            os.startfile(str(target))
-            self._add_log_entry(f"已打开目录：{target}")
-        except Exception as e:
-            self._add_log_entry(f"打开目录失败：{e}")
-
     # ─── 主题 ───
 
     def _toggle_theme(self):
         self.dark_mode = not self.dark_mode
         self.colors = DARK if self.dark_mode else LIGHT
         self._apply_style()
+        # 表格单元格的 QBrush 颜色不随 QSS 切换，需重渲染才不会残留旧主题配色
+        self.preview_panel.refresh_theme()
         self.theme_btn.setIcon(make_moon_icon() if self.dark_mode else make_sun_icon())
         self._add_log_entry(f"已切换至{'深色' if self.dark_mode else '浅色'}模式")
 
@@ -1557,32 +1450,6 @@ class SubtitleApp(QMainWindow):
             pass
         self._save_window_state()
         super().closeEvent(event)
-
-    def _notify_peak_hours(self):
-        """启动时 DeepSeek 高峰时段提醒（打开应用时调用）。
-
-        仅当当前翻译方案为「联网 API」且模型为 DeepSeek、并处于高峰时段时
-        弹一次提示；本地 Hy-MT2 / 非 DeepSeek 模型 / 非高峰时段直接跳过。
-        提示为信息性质，不阻止后续操作。
-        """
-        s = self.settings_data or {}
-        mode = str(s.get("translation_mode", "local")).lower()
-        if mode != "online":
-            return
-        api_url = str(s.get("api_url", "") or "")
-        tmodel = str(s.get("translation_model", "") or "")
-        if "deepseek" not in api_url.lower() and "deepseek" not in tmodel.lower():
-            return
-        from datetime import timezone, timedelta, datetime
-        bj_tz = timezone(timedelta(hours=8))
-        hour = datetime.now(bj_tz).hour
-        if not ((9 <= hour < 12) or (14 <= hour < 18)):
-            return
-        QMessageBox.information(
-            self, "高峰时段提醒",
-            "当前为 DeepSeek API 高峰时段（9:00-12:00、14:00-18:00），翻译价格较高。\n"
-            "如对成本敏感，可避开此时段再处理。",
-        )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1625,10 +1492,14 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName("本地字幕生成工具")
+    # 统一现代中文字体（Windows 默认 UI 字体对中文场景偏旧）；具体控件里的
+    # Consolas 等由 setFont 单独指定，仍会覆盖应用级默认
+    base_font = QFont()
+    base_font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"])
+    app.setFont(base_font)
 
     window = SubtitleApp()
     window.show()
-    window._notify_peak_hours()  # 启动时 DeepSeek 高峰时段提醒（仅联网+DeepSeek 方案）
 
     sys.exit(app.exec())
 

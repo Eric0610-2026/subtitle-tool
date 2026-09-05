@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import logging
-import time
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -20,7 +19,7 @@ from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
 )
 
-from .srt_utils import fmt_duration, estimate_eta, _read_text_auto
+from .srt_utils import _read_text_auto
 from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
@@ -175,54 +174,6 @@ class ProgressPanel(QFrame):
         self.lang_label.setText("语言：auto")
         self.counter_label.setText("已转写 0/0 | 已翻译 0/0 | 缓存 0")
 
-    def set_overall(self, pct: float, text: str):
-        self.overall_progress.setValue(int(pct))
-        self.overall_label.setText(text)
-
-    def set_language(self, lang: str):
-        self.lang_label.setText(f"语言：{lang}")
-
-    def set_counter(self, generated: int, translated: int, total: int, cache: int = 0):
-        self.counter_label.setText(f"已转写 {generated}/{total} | 已翻译 {translated}/{total} | 缓存 {cache}")
-
-    def set_detail(self, text: str):
-        self.detail_label.setText(text)
-
-    def set_sub_progress(self, stage: str, pct: float, detail: str = ""):
-        if stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成"):
-            bar_pct = 100 if stage == "转写完成" else int(pct)
-            self.transcribe_bar.setValue(bar_pct)
-            self.transcribe_bar.setFormat(f"{bar_pct}%")
-            if detail:
-                self.transcribe_detail.setText(detail)
-        elif stage == "翻译":
-            if self.transcribe_bar.value() < 100:
-                self.transcribe_bar.setValue(100)
-                self.transcribe_bar.setFormat("100%")
-            self.translate_bar.setValue(int(pct))
-            self.translate_bar.setFormat(f"{int(pct)}%")
-            if detail:
-                self.translate_detail.setText(detail)
-
-    def set_sub_complete(self):
-        self.transcribe_bar.setValue(100)
-        self.transcribe_bar.setFormat("100%")
-        self.translate_bar.setValue(100)
-        self.translate_bar.setFormat("100%")
-
-    def set_transcribe_status(self, text: str):
-        self.transcribe_label.setText(text)
-
-    def set_translate_status(self, text: str):
-        self.translate_label.setText(text)
-
-    def update_eta(self, start_ts: float, pct: float, extra: str = ""):
-        elapsed = time.time() - start_ts
-        remain, finish = estimate_eta(start_ts, pct / 100)
-        parts = [extra] if extra else []
-        parts.extend([f"已用 {fmt_duration(elapsed)}", f"剩余 {remain}", f"预计 {finish}"])
-        self.detail_label.setText(" | ".join(parts))
-
 
 class PreviewPanel(QFrame):
     """字幕预览面板，支持拖入 .srt 文件"""
@@ -236,7 +187,6 @@ class PreviewPanel(QFrame):
         # 推导目标导致"预览 A 却覆盖 B"。实时预览等无文件来源时为 None。
         self._source_path: Optional[Path] = None
         self._save_cb = None
-        self._offset_cb = None
         self._raw_text = ""
         self._updating = False
         self._highlighted_rows: set = set()
@@ -276,6 +226,18 @@ class PreviewPanel(QFrame):
             item.setFont(QFont("Consolas", 9))
             item.setForeground(QBrush(QColor(c["translation"])))
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def refresh_theme(self):
+        """主题切换后重渲染表格，使单元格颜色跟随新主题。
+
+        QSS 切换不会重设 QTableWidgetItem 的 QBrush 前景/背景色，
+        不重渲染的话旧主题的文字颜色会残留在新主题背景上（原文列近乎隐形）。
+        """
+        if self._raw_text.strip():
+            self._render_structured_preview()
+        if self._highlighted_rows:
+            self.highlight_rows(
+                [r for r in sorted(self._highlighted_rows) if r < self.preview.rowCount()])
 
     def _render_structured_preview(self):
         """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
@@ -364,7 +326,11 @@ class PreviewPanel(QFrame):
         self.preview.itemChanged.connect(self._on_item_changed)
 
         self._empty_label = QLabel(
-            "暂无字幕\n\n添加或拖入 .srt 文件后，字幕会显示在这里"
+            "<div style='text-align:center;'>"
+            "<span style='font-size:32px;'>🎬</span>"
+            "<br><br><b>暂无字幕</b>"
+            "<br><br>添加或拖入 .srt 文件后，字幕会显示在这里"
+            "</div>"
         )
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet("color:#64748b; background:transparent; font-size:13px;")
@@ -408,9 +374,8 @@ class PreviewPanel(QFrame):
                     QMessageBox.warning(self, "错误", f"读取字幕文件失败:\n{e}")
                 break
 
-    def connect_toolbar(self, find_cb, save_cb, offset_cb):
+    def connect_toolbar(self, save_cb):
         self._save_cb = save_cb
-        self._offset_cb = offset_cb
 
     def set_text(self, text: str):
         self._render_timer.stop()
@@ -538,7 +503,7 @@ class PreviewPanel(QFrame):
         if not content:
             QMessageBox.information(self, "提示", "暂无字幕可编辑")
             return
-        dlg = EditDialog(content, self, save_cb=self._save_cb, offset_cb=self._offset_cb)
+        dlg = EditDialog(content, self, save_cb=self._save_cb)
         if dlg.exec() == QDialog.Accepted:
             merged = dlg.get_merged_text()
             self.set_text(merged)
@@ -566,7 +531,7 @@ class PreviewPanel(QFrame):
 class EditDialog(QDialog):
     """分页字幕编辑弹窗（按字幕段分页）"""
 
-    def __init__(self, full_text: str, parent=None, save_cb=None, offset_cb=None):
+    def __init__(self, full_text: str, parent=None, save_cb=None):
         super().__init__(parent)
         self._full_text = full_text
         self._blocks = [b.strip() for b in full_text.split("\n\n") if b.strip()]
@@ -575,7 +540,6 @@ class EditDialog(QDialog):
         self._total_pages = 0
         self._page_edits: Dict[int, str] = {}
         self._save_cb = save_cb
-        self._offset_cb = offset_cb
         self._save_requested = False
         self.setWindowTitle("编辑字幕")
         self.setMinimumSize(560, 450)
@@ -766,17 +730,8 @@ class EditDialog(QDialog):
                                            "偏移量（秒）：正数=延后，负数=提前")
         if not ok:
             return
-        import re
-        from .srt_utils import srt_time_to_seconds, seconds_to_srt_time
-        ts_re = re.compile(r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})\s*-->\s*(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})")
-
-        def _shift(m):
-            start = max(0, srt_time_to_seconds(m.group(1)) + offset)
-            end = max(0, srt_time_to_seconds(m.group(2)) + offset)
-            return f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}"
-
-        merged = self.get_merged_text()
-        merged = ts_re.sub(_shift, merged)
+        from .srt_utils import shift_srt_timestamps
+        merged = shift_srt_timestamps(self.get_merged_text(), offset)
         self._full_text = merged
         self._blocks = [b.strip() for b in merged.split("\n\n") if b.strip()]
         self._page_edits.clear()
@@ -793,9 +748,6 @@ class EditDialog(QDialog):
                 start, end = self._page_block_range(page_idx)
                 parts.append("\n\n".join(self._blocks[start:end]))
         return "\n\n".join(parts)
-
-    def _add_log_message(self, msg: str):
-        logger.info(msg)
 
 
 class LogPanel(QFrame):
@@ -817,6 +769,10 @@ class LogPanel(QFrame):
         self.log_list.setMinimumHeight(60)
         self.log_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.log_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 日志不可选中：选中态没有功能消费方（复制走条目按钮、导出为全量），
+        # 点某条后残留的高亮点击别处也不会清除；NoFocus 同时避免点日志抢走输入焦点
+        self.log_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.log_list.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.log_list)
 
     def add_entry(self, message: str, level: str = "INFO", trace: str = None):
@@ -829,7 +785,25 @@ class LogPanel(QFrame):
         self.log_list.addItem(item)
         self.log_list.setItemWidget(item, entry)
         entry._list_item = item
-        QTimer.singleShot(0, lambda: item.setSizeHint(entry.sizeHint()))
+        QTimer.singleShot(0, lambda: item.setSizeHint(self._hint_for(entry)))
+
+    def _hint_for(self, entry):
+        """按当前可视宽度计算日志条目行高。
+
+        QLabel 开启 wordWrap 后 sizeHint 高度与实际宽度无关：列表较窄时
+        折行数比预估多，直接用 sizeHint 会把折行部分裁掉。布局完成后用
+        heightForWidth(可视宽度) 重算；未布局（宽度无意义）时退回 sizeHint。
+        """
+        hint = entry.sizeHint()
+        try:
+            vw = self.log_list.viewport().width()
+            if vw > 50:
+                h = entry.heightForWidth(vw)
+                if h and h > 0:
+                    hint.setHeight(max(hint.height(), h))
+        except Exception:
+            pass
+        return hint
 
     def trim_to(self, max_lines: int):
         while self.log_list.count() > max_lines:
@@ -866,7 +840,7 @@ class LogPanel(QFrame):
                 it = self.log_list.item(i)
                 w = self.log_list.itemWidget(it)
                 if w is not None:
-                    it.setSizeHint(w.sizeHint())
+                    it.setSizeHint(self._hint_for(w))
         finally:
             self._relayouting = False
 
@@ -876,6 +850,3 @@ class SignalBridge(QObject):
 
     def post(self, event: dict):
         self.event_received.emit(event)
-
-    def clear(self):
-        pass
