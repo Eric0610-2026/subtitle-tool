@@ -432,6 +432,8 @@ class SubtitleApp(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, "保存失败", f"写入 config.json 失败：{e}")
             return
+        # 仅刷新运行期动态读取的配置（batch_size、并发数等）；各模块 import 时
+        # 固化的模块级常量（API 超时、扩展名表、主题色等）需重启应用才生效
         cfg.reload()
 
 
@@ -1494,7 +1496,12 @@ class SubtitleApp(QMainWindow):
 
     def _set_detail_with_eta(self, p, detail: str, pct: float):
         elapsed = time.time() - self._start_time
-        remain, finish = estimate_eta(self._start_time, pct / 100)
+        # ETA 统一用 OverallProgress 的整体进度估算：按当前子阶段百分比
+        # 估算全局剩余时间在前半程会严重失真
+        if self._overall is not None:
+            remain, finish = self._overall.eta()
+        else:
+            remain, finish = estimate_eta(self._start_time, pct / 100)
         parts = [detail] if detail else []
         parts.extend([f"已用 {fmt_duration(elapsed)}", f"剩余 {remain}", f"预计 {finish}"])
         p.detail_label.setText(" | ".join(parts))

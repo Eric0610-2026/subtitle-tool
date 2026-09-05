@@ -24,18 +24,21 @@ class TestIsAudioFile(unittest.TestCase):
                 self.assertEqual(is_audio_file(Path(name)), expected)
 
 
-class TestTrimLivePreview(unittest.TestCase):
-    """panels._trim_live_preview：实时预览只保留最近若干块，避免全量重建卡顿"""
+class TestVisibleBlockSlice(unittest.TestCase):
+    """panels._visible_block_slice：预览渲染最多显示最近若干块（_raw_text 保留全文）"""
 
-    def test_trims_to_keep_only_newest_blocks(self):
-        from subtitle_app.panels import _trim_live_preview
+    def test_slice_keeps_newest_blocks_with_offset(self):
+        from subtitle_app.panels import _visible_block_slice
         block = lambda i: f"{i}\n00:00:0{i},000 --> 00:00:0{i + 1},000\nseg_{i}"
-        raw = "\n\n".join(block(i) for i in range(5))
-        # 未超上限不裁剪
-        self.assertEqual(_trim_live_preview(raw, max_blocks=10), raw)
-        # 超过上限只保留最近 max_blocks 块
-        out = _trim_live_preview(raw, max_blocks=2)
-        self.assertEqual(out, "\n\n".join(block(i) for i in (3, 4)))
+        blocks = [block(i) for i in range(5)]
+        # 未超上限不裁剪，偏移 0
+        visible, offset = _visible_block_slice(blocks, max_blocks=10)
+        self.assertEqual(visible, blocks)
+        self.assertEqual(offset, 0)
+        # 超过上限只渲染最近 max_blocks 块，偏移指向全文中的真实起点
+        visible, offset = _visible_block_slice(blocks, max_blocks=2)
+        self.assertEqual(visible, [block(3), block(4)])
+        self.assertEqual(offset, 3)
 
 
 if __name__ == "__main__":

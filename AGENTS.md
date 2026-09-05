@@ -50,27 +50,40 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
          → pipeline._translate_stage → translator.translate_only → muxer 或外挂 SRT
 ```
 
-- **并行模式（concurrency≥2）= GPU 单模型两阶段**（`pipeline._run_staged`）：
+- **串行/并行统一两阶段调度**（`pipeline._run_staged`，`_process_one` 已删除）：
   阶段 1 全部转写（仅驻留 Whisper）→ `release_model()` 释放显存 →
-  阶段 2 用 `_DaemonThreadPoolExecutor` 并行翻译+自动内嵌（仅驻留 llama-server）。
-  串行模式（concurrency=1）走 `_process_one` 逐文件。
+  阶段 2 用 `_DaemonThreadPoolExecutor` 翻译+自动内嵌（仅驻留 llama-server）。
+  串行（concurrency=1）= 文件级并发 1 的特例，模型各只加载一次。
+  文件级并发：本地模式固定 1（llama-server `--parallel 1`，多路并发只会排队超时），
+  联网模式读 `concurrency_files`；批次级并发：本地固定 1，联网读 `concurrency_translate`。
+  `pause_before_embed` 仅在文件级并发>1 时跳过（并发 1 保留逐文件预览暂停）。
 - **跨线程回传**：worker 线程 post 事件 dict → `SignalBridge`（Qt Signal，队列连接）→
   主线程 `_handle_event` 按类型分发（`_event_handlers` 只构建一次）。
 - **翻译**：`translation.py` 内 `ThreadPoolExecutor` 并发批量调 API；
-  进程级共享缓存 `_shared_cache` + 全局锁防并发写盘覆盖；句子级去重。
+  进程级共享缓存 `_shared_cache` + 全局锁防并发写盘覆盖（缓存对话框删除/清空必须
+  走 `remove_shared_cache_entries`/`clear_shared_cache` 同步内存，否则条目复活）；句子级去重。
   段落上下文用「future 链」实现：worker 内等本段前一批完成再带 `（上文）…` 提交，
   段内严格有序、段间并行（`para_gate`/`para_context`）。
+  **停止与熔断**：`translate_blocks(stop_check=...)` 检测用户停止抛 `TranslationStopped`
+  （translator 静默返回，不算失败）；网络类错误抛 `ApiUnavailableError` 不拆批；
+  连续 `MAX_EMPTY_BATCHES`(3) 空批判定 API 不可用中止本文件；补翻连续 20 句无进展放弃；
+  异常/停止时 `_abort_translation` 落盘断点并取消未开始的批次。
 - **批大小**：本地模式读 `cfg.translation.batch_size`，联网模式读
   `cfg.translation.batch_size_online`；永久保存时 `_batch_size_save_field` 按 mode 写对应字段。
 - **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；
-  `cache/.subtitle_ignore.json` 记录已完成文件。
+  `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
+  replace 冲突做短暂重试。
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验。
 - **嵌入前暂停**：`translator.py` 中 `PauseResponse`（event + action + modified_text）。
 - **事件契约**：`done` 事件可带 `stopped: True`（用户停止，UI 不再谎报"全部完成"）；
   失败按文件粒度处理（`log` ERROR + 跳过继续），全部失败才发 `error`，部分失败发 `done` 带失败数。
-- **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突）→ 报错中止；
+  `counter` 事件由 pipeline 维护真实完成计数（`_bump_counter`/`_post_counter`，
+  文件级并发下文件序号≠完成数，禁止再用 idx 当累计值）。
+- **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突，大小写不敏感）→ 报错中止；
   `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
 - **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
+- **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
+  只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
 
 ## 配置与安全
 

@@ -414,5 +414,116 @@ class TestTranslateSplit(unittest.TestCase):
         self.assertNotIn(2, by_id)  # b 丢失就是丢失，不得把 c 的译文顶到 b 的位置
 
 
+class TestStopAndBreaker(unittest.TestCase):
+    """用户停止 + API 熔断：停止快速生效，死 API 不再白烧请求"""
+
+    @staticmethod
+    def _client(d, **kw):
+        return TranslationClient("url", "key", "m",
+                                 Path(d) / "cache.json", lambda *a: None, **kw)
+
+    @staticmethod
+    def _blocks(n):
+        return [SubtitleBlock(index=i, start=i, end=i + 1, text=f"T{i}")
+                for i in range(1, n + 1)]
+
+    def test_stop_check_aborts_pending_batches(self):
+        """stop_check 置位后：不再发起新批次，未开始的批次被取消，抛 TranslationStopped"""
+        from subtitle_app.translation import TranslationStopped
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            calls = []
+            stop = threading.Event()
+
+            def fake(texts, context="", depth=0):
+                calls.append(list(texts))
+                if len(calls) >= 2:
+                    stop.set()
+                return [{"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
+
+            c._translate_batch = fake
+            with self.assertRaises(TranslationStopped):
+                c.translate_blocks(self._blocks(5), "en", True,
+                                   translation_concurrency=1, stop_check=stop.is_set)
+            self.assertLess(len(calls), 5, "停止后不应继续翻译剩余批次")
+
+    def test_empty_batches_trip_breaker(self):
+        """连续多批 0 有效译文（全部拒译）→ 空批熔断中止，不再逐句补翻"""
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            calls = []
+            release = threading.Event()
+
+            def fake(texts, context="", depth=0):
+                calls.append(list(texts))
+                if len(calls) > 3:
+                    # 模拟第 4 批起仍在途：给主线程时间触发熔断并取消排队批次
+                    release.wait(5)
+                # 拒译：返回原文 → applied 计 0
+                return [{"id": i + 1, "zh": t} for i, t in enumerate(texts)]
+
+            c._translate_batch = fake
+            try:
+                with self.assertRaises(RuntimeError) as ctx:
+                    c.translate_blocks(self._blocks(6), "en", True,
+                                       translation_concurrency=1)
+            finally:
+                release.set()
+            self.assertIn("无有效译文", str(ctx.exception))
+            # 串行执行时第 3 批完成后即熔断；第 4 批若已被 worker 取走属于在途，最多 4 批
+            self.assertLessEqual(len(calls), 4)
+
+    def test_network_error_does_not_split(self):
+        """网络不可达（ApiUnavailableError）不拆批递归：一次失败即中止"""
+        from subtitle_app.translation import ApiUnavailableError
+        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+                              lambda *a: None, batch_size=10)
+        calls = []
+
+        def fake_api(payload, headers):
+            calls.append(1)
+            raise ApiUnavailableError("网络错误")
+
+        c._call_api = fake_api
+        with self.assertRaises(ApiUnavailableError):
+            c._translate_batch(["a", "b", "c", "d"])
+        self.assertEqual(len(calls), 1, "网络类错误不应触发拆批重试")
+
+    def test_missing_fix_breaks_after_consecutive_failures(self):
+        """补翻兜底熔断：连续 20 句无有效译文 → 放弃剩余补翻（不再拖死文件）"""
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=20)
+            logs = []
+            c.post_ui = lambda e: logs.append(e) if isinstance(e, dict) and e.get("type") == "log" else None
+            # 25 句、批 20 → 主阶段 2 批（不触发空批熔断），全部拒译
+            c._translate_batch = lambda texts, context="", depth=0: [
+                {"id": i + 1, "zh": t} for i, t in enumerate(texts)]
+            res = c.translate_blocks(self._blocks(25), "en", True)
+            self.assertEqual(len(res), 25)
+            self.assertTrue(any("放弃剩余补翻" in l.get("message", "") for l in logs),
+                            "补翻连续失败应触发熔断日志")
+
+
+class TestSharedCacheManagement(unittest.TestCase):
+    """缓存管理 API：就地清空/删除，已创建的 client 同步可见"""
+
+    def test_clear_and_remove_shared_cache(self):
+        from subtitle_app.translation import (
+            clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cache.json"
+            c = TranslationClient("url", "key", "m", path, lambda *a: None)
+            c.cache["k1"] = "v1"
+            clear_shared_cache()
+            self.assertEqual(c.get_cache_size(), 0, "已创建的 client 应看到清空后的缓存")
+            c.cache["k2"] = "v2"
+            removed = remove_shared_cache_entries(["k2", "不存在的key"])
+            self.assertEqual(removed, 1)
+            self.assertEqual(c.get_cache_size(), 0)
+            c.cache["k3"] = "v3"
+            self.assertEqual(shared_cache_snapshot(), {"k3": "v3"})
+
+
 if __name__ == "__main__":
     unittest.main()

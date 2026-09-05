@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app.pipeline import SubtitleWorker
+from subtitle_app.config import cfg
 from subtitle_app.local_service import service_url_prefix
 
 
@@ -333,8 +334,8 @@ class TestTranscribeStage(unittest.TestCase):
         mock_transcriber.transcribe_video.assert_called_once()
 
 
-class TestProcessOne(unittest.TestCase):
-    """_process_one 串行处理"""
+class TestUnifiedStagedSerial(unittest.TestCase):
+    """串行（concurrency=1）统一走两阶段调度：不再有独立的逐文件路径"""
 
     def setUp(self):
         self.w = SubtitleWorker()
@@ -361,16 +362,18 @@ class TestProcessOne(unittest.TestCase):
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")
-    def test_process_one_calls_both_stages(self, mock_find_tool, mock_translate):
-        """_process_one 依次调用转写和翻译"""
+    def test_serial_runs_transcribe_then_translate(self, mock_find_tool, mock_translate):
+        """concurrency=1 时仍依次执行转写与翻译（统一两阶段调度）"""
         mock_find_tool.return_value = None
 
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "test.srt"
             srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
 
-            self.w._process_one(srt, 1, 1, self.base_opts)
+            self.w._run([srt], {**self.base_opts, "concurrency": 1})
             mock_translate.assert_called_once()
+        done_calls = [c for c in self.post.call_args_list if c[0][0].get("type") == "done"]
+        self.assertTrue(done_calls)
 
 
 class TestRun(unittest.TestCase):
@@ -498,7 +501,7 @@ class TestRun(unittest.TestCase):
         self.assertNotIn("error", types, "部分失败不应发出整体 error 事件")
         done = [e for e in events if e.get("type") == "done"]
         self.assertEqual(len(done), 1)
-        self.assertIn("1 个文件失败", done[0]["message"])
+        self.assertIn("1 个文件转写失败", done[0]["message"])
         err_logs = [e for e in events if e.get("type") == "log" and e.get("level") == "ERROR"]
         self.assertTrue(err_logs, "失败文件应有 ERROR 级日志")
         self.assertIn("bad.xyz", err_logs[0]["message"])
@@ -550,9 +553,7 @@ class TestRun(unittest.TestCase):
             a.write_bytes(b"")
             b = Path(d) / "a.mkv"
             b.write_bytes(b"")
-            with patch.object(SubtitleWorker, "_process_one") as mock_one:
-                self.w._run([a, b], opts)
-            mock_one.assert_not_called()
+            self.w._run([a, b], opts)
         errors = [c[0][0] for c in self.post.call_args_list
                   if c[0][0].get("type") == "error"]
         self.assertTrue(errors)
@@ -569,12 +570,25 @@ class TestRun(unittest.TestCase):
         types = [c[0][0].get("type") for c in self.post.call_args_list]
         self.assertNotIn("error", types, "字幕+视频同 stem 不应判冲突")
 
+    def test_find_stem_conflicts_case_insensitive(self):
+        """Windows 文件名大小写不敏感：a.mp4 与 A.mkv 输出会互相覆盖，应判冲突"""
+        conflicts = SubtitleWorker._find_stem_conflicts(
+            [Path("/d/a.mp4"), Path("/d/A.MKV")])
+        self.assertEqual(len(conflicts), 1)
+        # 同一文件重复添加不误报
+        self.assertEqual(SubtitleWorker._find_stem_conflicts(
+            [Path("/d/a.mp4"), Path("/d/a.mp4")]), [])
+        # 字幕是源文件，不参与冲突
+        self.assertEqual(SubtitleWorker._find_stem_conflicts(
+            [Path("/d/a.mp4"), Path("/d/a.srt")]), [])
+
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.local_service.is_service_running")
     @patch("subtitle_app.local_service.shutdown_owned")
-    def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_running, mock_translate):
+    def test_run_staged_releases_whisper_and_pause_rules(self, mock_shutdown, mock_running, mock_translate):
         """阶段批量：转写后释放 Whisper 显存；本地模式同时清理本会话 llama；
-        pause_before_embed 被强制为 False（按用户要求阶段批量自动嵌入）；
+        文件级并发>1（联网模式）时 pause_before_embed 强制为 False（自动嵌入）；
+        本地模式文件级并发=1，保留逐文件预览暂停；
         检测到外部服务在跑时发 WARNING 提示"""
         mock_running.return_value = False
         mock_translate.return_value = None
@@ -598,15 +612,16 @@ class TestRun(unittest.TestCase):
         self.assertTrue(releases, "进入翻译阶段前应释放 Whisper 显存")
         # 转写阶段前应停掉本会话拉起的翻译服务
         mock_shutdown.assert_called_once()
-        # 阶段批量强制自动嵌入：translate_stage 收到的 opts 中 pause_before_embed 应为 False
+        # 本地模式文件级并发=1：pause_before_embed 保留（逐文件暂停可用）
         self.assertTrue(mock_translate.call_count >= 2)
         for call in mock_translate.call_args_list:
-            self.assertFalse(call[0][1]["pause_before_embed"])
+            self.assertTrue(call[0][1]["pause_before_embed"],
+                            "本地模式并发=1 时应保留逐文件预览暂停")
         # 阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）
         self.post.reset_mock()
         mock_shutdown.reset_mock()
         mock_running.return_value = True   # 外部服务在跑
-        mock_translate.return_value = None
+        mock_translate.reset_mock()
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "a.mp4"
             srt.write_bytes(b"")
@@ -614,6 +629,56 @@ class TestRun(unittest.TestCase):
         warns = [c[0][0] for c in self.post.call_args_list
                  if c[0][0].get("level") == "WARNING"]
         self.assertTrue(warns, "外部翻译服务在跑时应发出 WARNING 提示")
+
+        # 联网模式 + 并行 → 文件级并发>1，pause_before_embed 强制 False
+        self.post.reset_mock()
+        mock_translate.reset_mock()
+        online_opts = self._make_opts(concurrency=2)
+        online_opts["api_url"] = "https://api.example.com/v1/chat/completions"
+        online_opts["pause_before_embed"] = True
+        with tempfile.TemporaryDirectory() as d:
+            files = [Path(d) / f"g{i}.mp4" for i in range(2)]
+            for p in files:
+                p.write_bytes(b"")
+            self.w._run(files, online_opts)
+        for call in mock_translate.call_args_list:
+            self.assertFalse(call[0][1]["pause_before_embed"],
+                             "联网并行模式应自动嵌入（跳过逐文件暂停）")
+            self.assertEqual(call[0][1].get("translation_concurrency"),
+                             getattr(cfg.translation, "concurrency_translate", 3),
+                             "联网模式批次级并发应读 config")
+
+    @patch("subtitle_app.pipeline.translate_stage")
+    @patch("subtitle_app.pipeline.find_tool")
+    def test_run_counter_reports_true_counts(self, mock_find_tool, mock_translate):
+        """counter 事件上报真实完成计数（转写完 2 个文件 → generated=2）"""
+        mock_find_tool.return_value = None
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("a.srt", "b.srt"):
+                p = Path(d) / name
+                p.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+            self.w._run([Path(d) / "a.srt", Path(d) / "b.srt"], self._make_opts(2))
+        counters = [c[0][0] for c in self.post.call_args_list
+                    if c[0][0].get("type") == "counter"]
+        self.assertTrue(counters, "应有 counter 事件")
+        last = counters[-1]
+        self.assertEqual(last["generated"], 2, "已转写计数应为真实完成数 2")
+        self.assertEqual(last["total"], 2)
+        # translate_stage 被测试 mock，翻译完成计数由 translate_only 内部上报，
+        # 此处为 0 是预期（bumper 逻辑单独测试）
+
+    def test_translated_bumper(self):
+        """_bump_translated 回调：已翻译 +1 并携带缓存数广播 counter"""
+        post = MagicMock()
+        bump = self.w._make_translated_bumper(post, 5)
+        bump(7)
+        ev = post.call_args[0][0]
+        self.assertEqual(ev, {"type": "counter", "generated": 0,
+                              "translated": 1, "total": 5, "cache": 7})
+        bump()
+        ev = post.call_args[0][0]
+        self.assertEqual(ev["translated"], 2)
+        self.assertEqual(ev["cache"], 0)
 
 
 if __name__ == "__main__":

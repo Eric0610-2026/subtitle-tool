@@ -19,6 +19,7 @@ from PySide6.QtGui import QFont, QPalette, QIcon, QPainter, QPen, QPixmap, QColo
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
 from .local_service import service_url_prefix
+from .translation import clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot
 
 _SCROLLBAR_STYLE = """
     QScrollBar:vertical { width:8px; background:transparent; border:none; }
@@ -569,7 +570,10 @@ class SettingsDialog(QDialog):
         opts_row.addWidget(self.vad_cb)
         self.pipeline_cb = QCheckBox("并行流水线")
         self.pipeline_cb.setChecked(values.get("pipeline", True))
-        self.pipeline_cb.setToolTip("勾选：转写 N+1 与翻译 N 同时进行（节省时间）\n不勾：完全串行处理")
+        self.pipeline_cb.setToolTip(
+            "两种模式都按「先全部转写 → 再统一翻译嵌入」两阶段调度（模型只加载一次）\n"
+            "勾选：多文件时并行翻译（联网模式有效；本地翻译受服务串行限制自动逐文件）\n"
+            "不勾：文件级串行处理")
         opts_row.addWidget(self.pipeline_cb)
         opts_row.addStretch()
         g1.addLayout(opts_row, r, 0, 1, 3)
@@ -623,7 +627,7 @@ class SettingsDialog(QDialog):
         self.translation_mode.setCurrentIndex(
             ["local", "online"].index(values.get("translation_mode", "local"))
             if values.get("translation_mode", "local") in ("local", "online") else 0)
-        self.translation_mode.setToolTip("本地：使用电脑上运行的 Hy-MT2（需先启动 start-local-model.bat）\n联网：调用在线 API，需配置模型")
+        self.translation_mode.setToolTip("本地：自动启动本机 Hy-MT2 翻译服务（无需手动启动任何脚本）\n联网：调用在线 API，需配置模型")
         self.translation_mode.currentIndexChanged.connect(self._on_translation_mode_changed)
         mode_row.addWidget(self.translation_mode, 1)
         self.mode_hint = QLabel(f"使用本地 Hy-MT2 服务 {service_url_prefix()}")
@@ -1163,28 +1167,22 @@ def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         if box.exec() != QMessageBox.Yes:
             return
-        indices = set()
-        for item in sel:
-            indices.add(list_widget.row(item))
-        new_cache = {}
-        for i, k in enumerate(cache_keys):
-            if i not in indices:
-                new_cache[k] = cache[k]
-        save_json(path, new_cache)
-        cache.clear()
-        cache.update(new_cache)
-        for item in reversed(sorted(sel, key=lambda x: list_widget.row(x))):
-            list_widget.takeItem(list_widget.row(item))
-        cache_keys = [k for k in sorted(new_cache.keys())]
-        for j in range(list_widget.count()):
-            text = list_widget.item(j).text()
-            dot_pos = text.find(". ")
-            display = text[dot_pos + 2:] if dot_pos > 0 else text
-            list_widget.item(j).setText(f"{j+1:>4}. {display}")
+        indices = {list_widget.row(item) for item in sel}
+        # 必须同步删除进程级共享缓存：只改磁盘文件的话，内存里的共享缓存
+        # 会在下次写盘时把被删条目原样写回（"删了又复活"）
+        remove_shared_cache_entries(
+            cache_keys[i] for i in indices if 0 <= i < len(cache_keys))
+        fresh = shared_cache_snapshot()
+        save_json(path, fresh)
+        cache_keys = sorted(fresh.keys())
+        # 从共享缓存快照整体重建列表（并发翻译新增的条目也会如实显示）
+        list_widget.clear()
+        for j, k in enumerate(cache_keys, 1):
+            list_widget.addItem(f"{j:>4}. {fresh[k][:80]}")
         dlg.setWindowTitle(f"翻译缓存管理 ({list_widget.count()} 条)")
         size_after = path.stat().st_size if path.exists() else 0
         info.setText(f"缓存条目：{list_widget.count()} 条　　缓存大小：{size_after/1024:.1f} KB")
-        log_callback(f"已从缓存中移除 {len(sel)} 条")
+        log_callback(f"已从缓存中移除 {len(indices)} 条")
 
     del_btn.clicked.connect(_delete_selected)
     clear_btn.clicked.connect(lambda: _clear_all(dlg, path, info, list_widget, log_callback))
@@ -1192,6 +1190,8 @@ def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
 
 
 def _clear_all(dlg, path, info_label, list_widget, log_callback):
+    # 必须同步清空进程级共享缓存，否则内存条目会在下次写盘时复活
+    clear_shared_cache()
     save_json(path, {})
     log_callback("翻译缓存已清空")
     if list_widget:

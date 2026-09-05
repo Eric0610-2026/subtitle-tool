@@ -4,7 +4,7 @@ import logging
 import time
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer
 from PySide6.QtWidgets import (
@@ -25,16 +25,21 @@ from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
 
-# 转写实时预览只保留最近这么多块，避免 long 视频块数无限累积导致每次全量重建表格而卡顿
+# 实时/终版预览最多渲染这么多块：长视频块数可达数千，全量渲染表格会冻结 UI。
+# 只显示最近若干块；_raw_text 始终保留全文供编辑与保存。
 MAX_LIVE_PREVIEW_BLOCKS = 300
 
 
-def _trim_live_preview(raw: str, max_blocks: int = MAX_LIVE_PREVIEW_BLOCKS) -> str:
-    """实时预览文本裁剪：只保留最近 max_blocks 个 SRT 块（块间以空行分隔）"""
-    parts = raw.split("\n\n")
-    if len(parts) > max_blocks:
-        return "\n\n".join(parts[-max_blocks:])
-    return raw
+def _visible_block_slice(blocks: List[str],
+                         max_blocks: int = MAX_LIVE_PREVIEW_BLOCKS) -> Tuple[List[str], int]:
+    """返回渲染可见的块（最近 max_blocks 块）与其在全文中的起始偏移。
+
+    偏移用于把表格行映射回 _raw_text 的真实块索引（编辑回写按它定位）。
+    """
+    if len(blocks) > max_blocks:
+        offset = len(blocks) - max_blocks
+        return blocks[offset:], offset
+    return blocks, 0
 
 
 def _silent_text_input(parent, title: str, label: str) -> tuple:
@@ -275,9 +280,11 @@ class PreviewPanel(QFrame):
     def _render_structured_preview(self):
         """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
 
-        原始文本始终保留在 _raw_text 中，供编辑与保存使用；表格只负责展示。
+        原始文本始终保留在 _raw_text 中，供编辑与保存使用；表格只负责展示
+        （最多渲染最近 MAX_LIVE_PREVIEW_BLOCKS 块）。
         """
-        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        all_blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        blocks, offset = _visible_block_slice(all_blocks)
         rows = []
         for block_idx, block in enumerate(blocks):
             lines = block.splitlines()
@@ -289,10 +296,10 @@ class PreviewPanel(QFrame):
                 continue
             original = text_lines[0]
             translated = "\n".join(text_lines[1:]) or "—"
-            # block_idx 随单元格存入 UserRole：编辑回写按它定位源块。
+            # 全文块索引随单元格存入 UserRole：编辑回写按它定位源块。
             # 渲染会跳过无效块（行数不足/无文本），表格行号 ≠ 块序号，
             # 若按行号回写会写错块或静默丢失编辑。
-            rows.append((block_idx, timeline, original, translated))
+            rows.append((offset + block_idx, timeline, original, translated))
         if not rows:
             self._highlighted_rows.clear()
             self._stack.setCurrentWidget(self._empty_label)
@@ -367,6 +374,14 @@ class PreviewPanel(QFrame):
         self._stack.addWidget(self.preview)
         layout.addWidget(self._stack, 1)
 
+        # 实时追加渲染节流：转写速度快时 preview_append 事件密集，
+        # 每次都全量重建表格会卡 UI；200ms 内的多次追加合并为一次渲染
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(200)
+        self._render_timer.timeout.connect(self._flush_live_render)
+        self._scroll_on_render = False
+
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -398,11 +413,15 @@ class PreviewPanel(QFrame):
         self._offset_cb = offset_cb
 
     def set_text(self, text: str):
+        self._render_timer.stop()
+        self._scroll_on_render = False
         self._raw_text = text
         self.setReadOnly(True)
         self._render_structured_preview()
 
     def clear(self):
+        self._render_timer.stop()
+        self._scroll_on_render = False
         self._raw_text = ""
         self._source_path = None
         self._highlighted_rows.clear()
@@ -415,11 +434,19 @@ class PreviewPanel(QFrame):
         self._stack.setCurrentWidget(self._empty_label)
 
     def append(self, text: str):
+        # _raw_text 保留全文（内存开销可忽略，编辑/保存需要完整内容）；
+        # 渲染由 _visible_block_slice 裁剪 + 定时器节流
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
-        # 只保留最近若干块：实时预览跟随转写速度，避免长视频数千块时全量重建卡死 UI
-        self._raw_text = _trim_live_preview(self._raw_text)
+        self._scroll_on_render = True
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _flush_live_render(self):
+        """节流定时器回调：合并渲染期间到达的多次追加，一次性重建表格"""
         self._render_structured_preview()
-        self.preview.scrollToBottom()
+        if self._scroll_on_render:
+            self._scroll_on_render = False
+            self.preview.scrollToBottom()
 
     def get_text(self) -> str:
         return self._raw_text
