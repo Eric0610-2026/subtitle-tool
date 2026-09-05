@@ -11,12 +11,9 @@ import subprocess
 import threading
 import traceback
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures.thread import _threads_queues, _worker
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from .config import cfg
 from .srt_utils import (
     VIDEO_EXTS, AUDIO_EXTS, SUB_EXTS, safe_stem,
     find_existing_subtitle, find_tool,
@@ -38,36 +35,6 @@ def _is_resume_srt_candidate(f2: Path, stem: str, final_srt: Path) -> bool:
     if f2.resolve() == final_srt.resolve():
         return False
     return f_stem == stem or f_stem.startswith(stem + ".")
-
-
-class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
-    """工作线程为 daemon 的线程池。
-
-    ThreadPoolExecutor 的工作线程默认非 daemon：用户停止后，正在执行的
-    翻译请求（最长可达 API 超时 × 重试次数）会阻塞解释器退出，导致
-    关闭窗口后进程挂起数分钟。这里仅重写线程创建逻辑并标记 daemon。
-    """
-
-    def _adjust_thread_count(self):
-        # 与父类实现一致，唯一区别是 t.daemon = True
-        if self._idle_semaphore.acquire(timeout=0):
-            return
-
-        def weakref_cb(_, q=self._work_queue):
-            q.put(None)
-
-        num_threads = len(self._threads)
-        if num_threads < self._max_workers:
-            thread_name = '%s_%d' % (self._thread_name_prefix or self, num_threads)
-            t = threading.Thread(name=thread_name, target=_worker,
-                                 args=(weakref.ref(self, weakref_cb),
-                                       self._work_queue,
-                                       self._initializer,
-                                       self._initargs))
-            t.daemon = True
-            t.start()
-            self._threads.add(t)
-            _threads_queues[t] = self._work_queue
 
 
 class SubtitleWorker:
@@ -227,30 +194,16 @@ class SubtitleWorker:
         return conflicts
 
     def _run_staged(self, jobs: List[Path], opts: dict) -> None:
-        """两阶段批量调度（串行/并行统一走这里）。
+        """两阶段批量调度。
 
         阶段 1 全部转写（GPU 只驻留 Whisper）→ 释放显存 → 阶段 2 全部翻译 + 自动嵌入
         （GPU 只驻留 llama.cpp）。避免两者同时占用显存导致 OOM。
 
-        并发决策（文件级与批次级分离）：
-        - 本地模式：llama-server 以 --parallel 1 运行，多路并发只会排队等待，
-          甚至把请求拖过 API 超时触发重试（重试又加长队列），文件级/批次级固定 1。
-        - 联网模式：文件级读 cfg.translation.concurrency_files，
-          批次级读 cfg.translation.concurrency_translate。
-        - concurrency=1（串行）：文件级并发 1，两阶段结构不变。
+        翻译走本地 llama-server（--parallel 1），阶段 2 顺序执行：
+        每个文件翻译+内嵌完再处理下一个，pause_before_embed 逐文件生效。
         """
         post = opts["post"]
         total = len(jobs)
-        p_depth = max(1, int(opts.get("concurrency", 2) or 1))
-
-        from .local_service import service_url_prefix
-        is_local = str(opts.get("api_url", "")).lower().startswith(service_url_prefix())
-        if p_depth <= 1 or is_local:
-            file_concurrency = 1
-        else:
-            file_concurrency = max(1, getattr(cfg.translation, "concurrency_files", 3))
-        batch_concurrency = 1 if is_local else max(
-            1, getattr(cfg.translation, "concurrency_translate", 3))
         translate_errors: List[Tuple[str, Exception, str]] = []
 
         # ── 阶段 1：全部转写 ──
@@ -304,37 +257,22 @@ class SubtitleWorker:
         post({"type": "log", "message": f"阶段 1/2 完成（{len(results)} 个字幕）。正在释放显存并准备翻译模型"
                                         "（首次加载约需数十秒）…", "level": "INFO"})
 
-        # ── 阶段 2：全部翻译 + 自动嵌入 ──
-        # pause_before_embed 仅在文件级并发 > 1 时跳过（多文件同时弹确认框会嵌套阻塞）；
-        # 并发 1（串行/本地）时保留逐文件预览暂停能力
+        # ── 阶段 2：全部翻译 + 自动嵌入（顺序执行，逐文件预览暂停可用）──
         stage_opts = dict(opts)
-        stage_opts["translation_concurrency"] = batch_concurrency
-        if stage_opts.get("pause_before_embed", False) and file_concurrency > 1:
-            stage_opts["pause_before_embed"] = False
-            post({"type": "log", "message": "阶段批量模式：自动嵌入字幕，跳过逐文件预览暂停", "level": "INFO"})
-        tpool = _DaemonThreadPoolExecutor(max_workers=file_concurrency)
-        futures: List[Tuple[str, Future]] = []
-        try:
-            for r in results:
-                if self.stop_requested:
-                    break
-                futures.append((r["item"].name, tpool.submit(self._translate_stage, r, stage_opts, post)))
-            for name, future in futures:
-                if self.stop_requested:
-                    future.cancel()
-                    continue
-                try:
-                    future.result()
-                except TranslationStopped:
-                    pass  # 用户停止：文件静默结束，不算失败
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    logger.error("翻译任务异常 %s: %s\n%s", name, e, tb)
-                    translate_errors.append((name, e, tb))
-                    post({"type": "log", "message": f"❌ 翻译失败（已跳过）: {name} — {e}",
-                          "level": "ERROR", "trace": tb})
-        finally:
-            tpool.shutdown(wait=True)
+        for r in results:
+            if self.stop_requested:
+                break
+            try:
+                self._translate_stage(r, stage_opts, post)
+            except TranslationStopped:
+                pass  # 用户停止：文件静默结束，不算失败
+            except Exception as e:
+                tb = traceback.format_exc()
+                name = r["item"].name
+                logger.error("翻译任务异常 %s: %s\n%s", name, e, tb)
+                translate_errors.append((name, e, tb))
+                post({"type": "log", "message": f"❌ 翻译失败（已跳过）: {name} — {e}",
+                      "level": "ERROR", "trace": tb})
 
         if self.stop_requested:
             post({"type": "done", "message": "用户已停止处理", "stopped": True})

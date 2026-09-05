@@ -122,6 +122,24 @@ def srt_time_to_seconds(t_str: str) -> float:
     return h * 3600 + mi * 60 + s + ms / 1000
 
 
+# 时间轴行：HH:MM:SS,mmm --> HH:MM:SS,mmm
+SRT_TIMING_LINE_RE = re.compile(
+    r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})\s*-->\s*(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})")
+
+
+def shift_srt_timestamps(text: str, offset: float) -> str:
+    """把 SRT 文本中所有时间轴行整体平移 offset 秒（正=延后，负=提前），不改动其他内容。
+
+    预览区时间偏移与编辑对话框共用，避免两份正则+平移逻辑漂移。
+    """
+    def _shift(m):
+        start = max(0.0, srt_time_to_seconds(m.group(1)) + offset)
+        end = max(0.0, srt_time_to_seconds(m.group(2)) + offset)
+        return f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}"
+
+    return SRT_TIMING_LINE_RE.sub(_shift, text)
+
+
 def fmt_duration(sec: Optional[float]) -> str:
     if sec is None or sec == float("inf"):
         return "--:--"

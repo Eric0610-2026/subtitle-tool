@@ -56,6 +56,41 @@ def _arrow_png(key: str, color_hex: str) -> str:
     return _ARROW_PNG_CACHE[key]
 
 
+def _spin_arrow_png(key: str, color_hex: str, direction: str) -> str:
+    """生成微调框（QSpinBox/QDoubleSpinBox）上下箭头 PNG。
+
+    QSS 里用 border 画三角形的技巧在 Qt 中不生效（渲染成方块），
+    与下拉框一致走 PNG 方案。direction: "up" / "down"。
+    """
+    name = f"zimu_spin_{direction}_{key}"
+    cached = _ARROW_PNG_CACHE.get(name)
+    if cached:
+        return cached
+    path = Path(tempfile.gettempdir()) / f"{name}.png"
+    if not path.exists():
+        pm = QPixmap(10, 8)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color_hex))
+        tri = QPainterPath()
+        if direction == "up":
+            tri.moveTo(1.0, 6.5)
+            tri.lineTo(5.0, 1.5)
+            tri.lineTo(9.0, 6.5)
+        else:
+            tri.moveTo(1.0, 1.5)
+            tri.lineTo(9.0, 1.5)
+            tri.lineTo(5.0, 6.5)
+        tri.closeSubpath()
+        p.drawPath(tri)
+        p.end()
+        pm.save(str(path))
+    _ARROW_PNG_CACHE[name] = path.as_posix()
+    return _ARROW_PNG_CACHE[name]
+
+
 def checkmark_png() -> str:
     """生成白色勾选标记 PNG（仅一次），返回用于 QSS url() 的绝对路径"""
     global _CHECK_PNG_CACHE
@@ -132,6 +167,14 @@ def detect_system_dark() -> bool:
         return False
 
 
+def _mix_hex(c1: str, c2: str, t: float) -> str:
+    """线性混合两个 #rrggbb 颜色，t=0 返回 c1，t=1 返回 c2（用于渐变中间色）"""
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r, g, b = (round(a + (b_ - a) * t) for a, b_ in ((r1, r2), (g1, g2), (b1, b2)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def build_qss(colors: dict, is_dark: bool) -> str:
     """根据配色与明暗模式生成全局 QSS 样式表"""
     c = colors
@@ -142,9 +185,33 @@ def build_qss(colors: dict, is_dark: bool) -> str:
     hover_bg = "#232741" if is_dark else "#eef2ff"
     theme_key = "dark" if is_dark else "light"
     arrow = _arrow_png(theme_key, c['text_muted'])
+    # 头部渐变中间色：让右侧过渡更柔和，避免 accent 在标题区形成生硬色块
+    header_mid = _mix_hex(c['header'], c['accent'], 0.45)
+    spin_up = _spin_arrow_png(theme_key, c['text_sec'], "up")
+    spin_down = _spin_arrow_png(theme_key, c['text_sec'], "down")
     return f"""
         QMainWindow {{ background: {c['bg']}; }}
         QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
+        QFrame#header {{
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                stop:0 {c['header']}, stop:0.55 {c['header']},
+                stop:0.85 {header_mid}, stop:1 {c['accent']});
+            border: none;
+            border-bottom: 1px solid {c['border']};
+        }}
+        QToolTip {{
+            background: {c['header']}; color: {c['text']};
+            border: 1px solid {c['accent']}; border-radius: 4px;
+            padding: 5px 8px; font-size: 12px;
+        }}
+        QMenu {{
+            background: {c['card']}; color: {c['text']};
+            border: 1px solid {c['border']}; border-radius: 6px; padding: 4px;
+        }}
+        QMenu::item {{ padding: 6px 26px 6px 14px; border-radius: 4px; background: transparent; }}
+        QMenu::item:selected {{ background: {sel_bg}; color: {c['text']}; }}
+        QMenu::item:disabled {{ color: {c['text_muted']}; }}
+        QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 8px; }}
         QTableWidget#subtitlePreview {{
             background: transparent; color: {c['text']};
             border: none; gridline-color: transparent;
@@ -161,12 +228,6 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             padding: 5px 8px; font-size: 11px; font-weight: 600;
         }}
         QTableCornerButton::section {{ background: transparent; border: none; }}
-        QFrame#header {{
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                stop:0 {c['header']}, stop:0.62 {c['header']}, stop:1 {c['accent']});
-            border: none;
-            border-bottom: 1px solid {c['border']};
-        }}
         QFrame#card {{ background: {c['card']}; {border_radius} border:1px solid {c['border']}; }}
         QFrame#filePanel, QFrame#previewPanel, QFrame#logPanel {{
             background: {c['card']}; {border_radius}
@@ -183,13 +244,30 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             subcontrol-origin:margin; left:12px; padding:0 7px;
             background:{c['card']};
         }}
-        QLineEdit, QComboBox, QTextEdit, QListWidget {{
+        QLineEdit, QComboBox, QTextEdit, QListWidget, QAbstractSpinBox {{
             background:{c['card']}; color:{c['text']};
             border:1px solid {c['border']}; {border_radius} padding:7px 9px;
             selection-background-color:{c['accent']}; selection-color:white;
         }}
-        QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus {{
+        QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus,
+        QAbstractSpinBox:focus {{
             border:1px solid {c['accent']};
+        }}
+        QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {{
+            color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']};
+        }}
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+            width:16px; border:none; background:transparent;
+        }}
+        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover,
+        QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{
+            background:{hover_bg}; border-radius:3px;
+        }}
+        QAbstractSpinBox::up-arrow {{
+            image: url("{spin_up}"); width:10px; height:8px;
+        }}
+        QAbstractSpinBox::down-arrow {{
+            image: url("{spin_down}"); width:10px; height:8px;
         }}
         QComboBox:hover {{ border-color:{c['accent']}; }}
         QComboBox:disabled {{
@@ -224,6 +302,7 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QPushButton:hover {{ background:{c['border']}; border-color:{c['accent']}; }}
         QPushButton:pressed {{ padding-top:8px; padding-bottom:6px; }}
         QPushButton:disabled {{ color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']}; }}
+        QPushButton:focus {{ border-color:{c['accent']}; }}
         QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:600; }}
         QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
         QPushButton#startBtn:hover {{ background:#16a34a; }}
@@ -251,13 +330,16 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         }}
         QTabBar::tab:hover {{ color:{c['accent']}; }}
         QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
-        QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; }}
+        QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; background:transparent; }}
         QCheckBox::indicator {{
             width:16px; height:16px;
             background:{c['card']}; border:1px solid {c['text_muted']};
             border-radius:3px;
         }}
         QCheckBox::indicator:hover {{ border-color:{c['accent']}; }}
+        QCheckBox::indicator:disabled {{
+            background:{c['bg']}; border:1px solid {c['text_muted']};
+        }}
         QCheckBox::indicator:checked {{
             background:{c['accent']}; border-color:{c['accent']};
             image: url("{check_png}");
@@ -273,11 +355,15 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; border:none; }}
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background:none; }}
         QSplitter::handle {{ background:{c['border']}; }}
-        QSplitter::handle:horizontal {{ width:2px; }}
-        QSplitter::handle:vertical {{ height:4px; }}
+        QSplitter::handle:hover {{ background:{c['accent']}; }}
+        QSplitter::handle:horizontal {{ width:5px; }}
+        QSplitter::handle:vertical {{ height:5px; }}
         QLabel {{ background:transparent; }}
         QListWidget#logList {{ background:{c['card']}; border:none; }}
-        QListWidget#logList::item {{ padding:2px 4px; border-bottom:1px solid {c['border']}; }}
+        QListWidget#logList::item {{ padding:0; border-bottom:1px solid {c['border']}; }}
         QListWidget::item:hover {{ background:{c['bg']}; }}
         QListWidget::item:selected {{ background:{c['accent']}; color:white; }}
+        QListWidget[dragOver="true"] {{
+            border:1px dashed {c['accent']}; background:{hover_bg};
+        }}
     """

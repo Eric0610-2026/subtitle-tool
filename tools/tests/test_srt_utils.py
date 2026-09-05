@@ -274,5 +274,24 @@ class TestWrapSubtitleText(unittest.TestCase):
             self.assertEqual(re[0].text.replace("\n", ""), long_text)
 
 
+class TestShiftSrtTimestamps(unittest.TestCase):
+    """shift_srt_timestamps：时间轴整体平移，其他内容不动"""
+
+    def test_shift_positive_negative_and_content_untouched(self):
+        from subtitle_app.srt_utils import shift_srt_timestamps
+        srt = (
+            "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n"
+            "2\n00:01:00,200 --> 00:01:03,000\nWorld\n"
+        )
+        out = shift_srt_timestamps(srt, 1.5)
+        self.assertIn("00:00:02,500 --> 00:00:04,000", out)
+        self.assertIn("00:01:01,700 --> 00:01:04,500", out)
+        self.assertIn("Hello", out)
+        self.assertIn("World", out)
+        # 负偏移裁到 0
+        out = shift_srt_timestamps(srt, -2.0)
+        self.assertIn("00:00:00,000 --> 00:00:00,500", out)
+
+
 if __name__ == "__main__":
     unittest.main()

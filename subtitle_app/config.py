@@ -69,7 +69,7 @@ class Config:
         """重新读取配置文件。
 
         范围有限：只影响运行期通过 `cfg.xxx` 动态读取的配置
-        （如 batch_size、concurrency_translate、backup_max_files）。
+        （如 batch_size、backup_max_files）。
         各模块 import 时固化的模块级常量（translation.API_TIMEOUT、
         srt_utils.VIDEO_EXTS、transcriber._MODEL_SPEED、theme 配色等）
         不会刷新——这些字段完整生效需重启应用。

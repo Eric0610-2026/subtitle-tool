@@ -51,12 +51,8 @@ def _get_whisper_model():
                            "如遇外部包管理冲突，可加 --break-system-packages 参数")
     return WhisperModel
 
-# 各模型相对速度因子（越大越慢），用于进度条权重估算
+# 各模型相对速度因子（越大越慢），用于进度条权重估算（静态表，来自 config）
 _MODEL_SPEED: Dict[str, float] = {k: v for k, v in cfg.whisper.model_speed_factors.__dict__.items()}
-# _MODEL_SPEED 读写锁（自适应更新在多线程下安全）
-_model_speed_lock = threading.Lock()
-# 自适应学习率：每处理一个文件，把实测速度按此比例融合到估算值
-_ADAPT_ALPHA = 0.2
 # 模型加载锁，防止并发加载同一模型
 _model_load_lock = threading.Lock()
 
@@ -275,8 +271,7 @@ class Transcriber:
         """按音频时长 + 模型大小估算各阶段耗时权重，用于动态分配进度条"""
         name = model_dir.stem.lower() if model_dir else "large-v3-turbo"
         model_name = next((k for k in _MODEL_SPEED if k in name), "large-v3-turbo")
-        with _model_speed_lock:
-            speed = _MODEL_SPEED.get(model_name, 1.5)
+        speed = _MODEL_SPEED.get(model_name, 1.5)
         return {
             "extract": duration * 0.15,
             "model": 15.0,
@@ -456,7 +451,6 @@ class Transcriber:
                           "level": "INFO"})
                 t_post({"type": "language", "message": f"语言：{detected_lang}"})
 
-                transcribe_start = time.time()
                 source_srt = output_dir / f"{safe_stem(video.name)}.{detected_lang}.srt"
                 # ── 从断点 segments 开始累积 ──
                 blocks: List[SubtitleBlock] = list(completed_blocks)
@@ -532,9 +526,6 @@ class Transcriber:
                         pass
                 t_post({"type": "progress", "percent": 100, "stage": "转写完成",
                         "detail": f"转写完成：{len(blocks)} 段字幕（{detected_lang}）"})
-                transcribe_elapsed = time.time() - transcribe_start
-                if duration > 0 and transcribe_elapsed > 0:
-                    self._adapt_model_speed(model_dir, duration, transcribe_elapsed, post)
                 t_post({"type": "log", "message": f"转写完成：{len(blocks)} 段字幕（{detected_lang}）", "level": "INFO"})
                 return source_srt, detected_lang
             except Exception:
@@ -548,19 +539,6 @@ class Transcriber:
                     except Exception as save_err:
                         logger.warning("保存断点失败: %s", save_err)
                 raise
-
-    @staticmethod
-    def _adapt_model_speed(model_dir: Path, duration: float, elapsed: float, post: Callable) -> None:
-        """自适应调整模型速度因子"""
-        observed_speed = elapsed / duration
-        name = model_dir.stem.lower() if model_dir else ""
-        model_name = next((k for k in _MODEL_SPEED if k in name), None)
-        if model_name:
-            with _model_speed_lock:
-                old = _MODEL_SPEED[model_name]
-                new_speed = old * (1 - _ADAPT_ALPHA) + observed_speed * _ADAPT_ALPHA
-                _MODEL_SPEED[model_name] = new_speed
-            post({"type": "log", "message": f"速度因子调整：{old:.2f} → {new_speed:.2f}", "level": "INFO"})
 
     @staticmethod
     def _write_partial_srt(path: Path, blocks: List[SubtitleBlock]) -> None:

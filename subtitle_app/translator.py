@@ -106,8 +106,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     work_dir = Path(opts["work_dir"])
     translate_enabled = opts.get("translate_enabled", True)
     api_url = opts.get("api_url", "")
-    api_key = opts.get("api_key", "")
-    translation_model = opts.get("translation_model", "") or ""
     translation_only = opts.get("translation_only", False)
     language = opts["language"]
     detected_lang = opts.get("_detected_lang", language)
@@ -125,22 +123,21 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         return
 
     translated_srt: Optional[Path] = None
-    if translate_enabled and api_url and api_key:
-        # 本地模式：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
-        if api_url.lower().startswith(service_url_prefix()):
-            post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
-            ok, detail, first = ensure_running(on_progress=lambda sec: post({
-                "type": "log",
-                "message": f"正在启动本地模型服务… 已等待 {sec}s（首次加载通常 10~60 秒）",
-                "level": "INFO",
-            }))
-            if not ok:
-                post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
-                                                f"请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 {service_url_prefix()} 未被其它程序占用。",
-                      "level": "ERROR"})
-                raise RuntimeError(f"本地模型服务不可用：{detail}")
-            if first:
-                post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
+    if translate_enabled and api_url:
+        # 本地翻译：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
+        post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
+        ok, detail, first = ensure_running(on_progress=lambda sec: post({
+            "type": "log",
+            "message": f"正在启动本地模型服务… 已等待 {sec}s（首次加载通常 10~60 秒）",
+            "level": "INFO",
+        }))
+        if not ok:
+            post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
+                                            f"请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 {service_url_prefix()} 未被其它程序占用。",
+                  "level": "ERROR"})
+            raise RuntimeError(f"本地模型服务不可用：{detail}")
+        if first:
+            post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
         # 始终传入 state_path：state 文件由 translate_blocks 在首批落盘时创建，
@@ -163,24 +160,13 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         if already_translated_idx:
             post({"type": "log", "message": f"检测到 {len(already_translated_idx)} 条已有中文翻译，跳过翻译", "level": "INFO"})
 
-        # 批次级并发：优先用 pipeline 传入的覆盖值（阶段调度按模式算好）；
-        # 无覆盖时本地服务固定 1（llama-server --parallel 1，多线程只会排队
-        # 并有拖过 API 超时的风险），联网模式读 config
-        trans_concurrency = getattr(cfg.translation, "concurrency_translate", 3)
-        concurrency_override = opts.get("translation_concurrency")
-        if concurrency_override is not None:
-            trans_concurrency = max(1, int(concurrency_override))
-        elif api_url.lower().startswith(service_url_prefix()):
-            trans_concurrency = 1
+        # 本地 llama-server 以 --parallel 1 运行：批次并发固定 1，
+        # 多线程并发只会排队等待，还有把请求拖过 API 超时的风险
         send_all = opts.get("send_all", False)
         _bs = opts.get("translation_batch_size")
         if _bs is None:
-            # 模式相关默认批量：本地 Hy-MT2 用 config 的 batch_size（20），联网大模型用 100
-            if api_url.lower().startswith(service_url_prefix()):
-                _bs = cfg.translation.batch_size or 20
-            else:
-                _bs = getattr(cfg.translation, "batch_size_online", 100) or 100
-        client = TranslationClient(api_url, api_key, translation_model, cache_path, post,
+            _bs = cfg.translation.batch_size or 20
+        client = TranslationClient(api_url, "local", "hy-mt2", cache_path, post,
                                  batch_size=_bs,
                                  target_lang=opts.get("target_lang", "zh"),
                                  send_all=send_all)
@@ -191,7 +177,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 is_bilingual = not translation_only
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
                                                      is_bilingual, state_path,
-                                                     translation_concurrency=trans_concurrency,
                                                      stop_check=is_stopped)
                 zh_texts = [""] * len(blocks)
                 for j, i in enumerate(need_translate_idx):
