@@ -350,8 +350,11 @@ class Transcriber:
                 elif extract_audio and is_audio:
                     post({"type": "log", "message": "音频文件，转换为标准格式...", "level": "INFO"})
                     if ffmpeg:
+                        # 用 ffprobe 探测真实时长做进度基准；探测失败退回 300s 估计值
+                        #（旧实现固定按 300s 算，长音频进度条几乎不动、短音频直接满格）
+                        probe = self.get_duration(video, ffprobe) if ffprobe else 0.0
                         duration = self.extract_audio_with_progress(
-                            video, ffmpeg, 300.0, audio_path,
+                            video, ffmpeg, probe if probe > 0 else 300.0, audio_path,
                             make_post_mapper(post, 0, 15))
                     else:
                         audio_path = video

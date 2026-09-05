@@ -17,7 +17,7 @@ from .srt_utils import (
     load_json, save_json, IGNORE_FILE,
     match_video_for_subtitle,
 )
-from .translation import TranslationClient
+from .translation import TranslationClient, TranslationStopped
 from .muxer import embed_subtitles_to_video
 from .local_service import ensure_running, service_url_prefix
 
@@ -120,7 +120,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     post({"type": "log", "message": f"解析字幕: {source_srt.name}", "level": "INFO"})
     blocks = parse_srt(source_srt)
     sanitize_blocks(blocks)  # 过滤空文本条目
-    post({"type": "counter", "generated": idx, "translated": 0, "total": total})
 
     if is_stopped and is_stopped():
         return
@@ -164,7 +163,15 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         if already_translated_idx:
             post({"type": "log", "message": f"检测到 {len(already_translated_idx)} 条已有中文翻译，跳过翻译", "level": "INFO"})
 
+        # 批次级并发：优先用 pipeline 传入的覆盖值（阶段调度按模式算好）；
+        # 无覆盖时本地服务固定 1（llama-server --parallel 1，多线程只会排队
+        # 并有拖过 API 超时的风险），联网模式读 config
         trans_concurrency = getattr(cfg.translation, "concurrency_translate", 3)
+        concurrency_override = opts.get("translation_concurrency")
+        if concurrency_override is not None:
+            trans_concurrency = max(1, int(concurrency_override))
+        elif api_url.lower().startswith(service_url_prefix()):
+            trans_concurrency = 1
         send_all = opts.get("send_all", False)
         _bs = opts.get("translation_batch_size")
         if _bs is None:
@@ -177,13 +184,15 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                                  batch_size=_bs,
                                  target_lang=opts.get("target_lang", "zh"),
                                  send_all=send_all)
+        cache_size = 0
         try:
             if need_translate_idx:
                 need_blocks = [blocks[i] for i in need_translate_idx]
                 is_bilingual = not translation_only
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
                                                      is_bilingual, state_path,
-                                                     translation_concurrency=trans_concurrency)
+                                                     translation_concurrency=trans_concurrency,
+                                                     stop_check=is_stopped)
                 zh_texts = [""] * len(blocks)
                 for j, i in enumerate(need_translate_idx):
                     zh_texts[i] = need_texts[j]
@@ -191,6 +200,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     zh_texts[i] = blocks[i].text
             else:
                 zh_texts = [b.text for b in blocks]
+            cache_size = client.get_cache_size()
+        except TranslationStopped:
+            # 用户停止：静默结束本文件（不写输出、不算失败；done 由 pipeline 统一发）
+            return
         except RuntimeError as e:
             post({"type": "error", "message": f"断点续翻失败: {e}", "trace": ""})
             raise
@@ -234,8 +247,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             write_srt(translated_srt, blocks, simplified_texts)
             final_texts = simplified_texts
 
-        post({"type": "counter", "generated": idx, "translated": idx,
-              "total": total, "cache": client.get_cache_size()})
         # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；
         # 双语模式下 final_texts 已是"原文\n译文"合并文本，译文列只取纯译文行，避免原文重复显示
         preview_lines = []
@@ -254,6 +265,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             except OSError as e:
                 logger.warning("删除翻译状态文件失败: %s", e)
     else:
+        cache_size = 0
         final_texts = [block.text for block in blocks]
         # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；单语模式译文列即原文
         preview_lines = []
@@ -415,6 +427,13 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     # ── 记录进度 ──
     _record_progress(opts["work_dir"], item)
+    # 上报真实翻译完成计数（pipeline 提供回调；旧实现用文件序号，并行下失真）
+    bump_translated = opts.get("_bump_translated")
+    if bump_translated:
+        try:
+            bump_translated(cache_size)
+        except Exception as e:
+            logger.warning("上报翻译完成计数失败: %s", e)
     post({"type": "language", "message": f"语言：{language}"})
 
 

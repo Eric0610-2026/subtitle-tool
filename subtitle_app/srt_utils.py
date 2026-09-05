@@ -163,10 +163,19 @@ def save_json(path: Path, data: Any) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        try:
-            tmp.replace(path)
-        except OSError:
-            # 跨文件系统回退：复制后删除临时文件
+        # Windows 并发场景下目标文件可能被其它线程瞬时占用（replace 期间出现
+        # 共享冲突抛 PermissionError），短暂重试即可恢复，属于常态抖动而非故障
+        last_err: Optional[OSError] = None
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+                time.sleep(0.01 * (attempt + 1))
+        if last_err is not None:
+            # 跨文件系统 / 重试耗尽回退：复制后删除临时文件
             shutil.copy2(str(tmp), str(path))
             tmp.unlink(missing_ok=True)
     except Exception as e:

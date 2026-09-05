@@ -46,6 +46,32 @@ def _get_shared_cache(cache_path: Path) -> Dict[str, str]:
         return _shared_cache
 
 
+def shared_cache_snapshot() -> Dict[str, str]:
+    """当前共享缓存的快照（缓存管理对话框展示/落盘用）。"""
+    with _shared_cache_lock:
+        return dict(_shared_cache)
+
+
+def remove_shared_cache_entries(keys) -> int:
+    """从进程级共享缓存移除指定条目（缓存管理对话框逐条删除用）。
+
+    必须就地修改内存 dict：已创建的 client 都持有同一对象的引用，
+    若整体重新赋值，它们的写入会落回旧 dict，被删条目在下次写盘时复活。
+    """
+    removed = 0
+    with _shared_cache_lock:
+        for k in keys:
+            if _shared_cache.pop(k, None) is not None:
+                removed += 1
+    return removed
+
+
+def clear_shared_cache() -> None:
+    """清空进程级共享缓存（缓存管理对话框「清空缓存」用；就地清空，理由同上）。"""
+    with _shared_cache_lock:
+        _shared_cache.clear()
+
+
 # ── 常量（从 config.json 读取）──
 
 API_TIMEOUT = cfg.translation.api_timeout
@@ -55,6 +81,11 @@ MAX_CACHE_ENTRIES = cfg.translation.max_cache_entries
 PARAGRAPH_GAP = cfg.translation.paragraph_gap_seconds
 CONTEXT_WINDOW = cfg.translation.context_window
 MAX_RECURSION_DEPTH = getattr(cfg.translation, "max_recursion_depth", 5)
+# 熔断：连续 N 批没有任何有效译文 → 判定 API 不可用/全部拒译，中止本文件
+#（防止死 API 或全部拒译时把整批拖进漫长的逐句补翻）
+MAX_EMPTY_BATCHES = 3
+# 补翻兜底：连续 N 句补翻仍无有效译文 → 放弃剩余补翻（API 大概率不可用）
+MISSING_FIX_MAX_CONSEC_FAIL = 20
 
 LANG_NAMES = {k: v for k, v in cfg.translation_lang_names.__dict__.items()}
 
@@ -76,6 +107,20 @@ def make_prompt(target_lang: str) -> str:
 
 class ApiForbiddenError(RuntimeError):
     """API 返回 403 时的专用异常，用来触发 curl fallback"""
+    pass
+
+
+class ApiUnavailableError(RuntimeError):
+    """网络不可达/请求超时等「API 暂时不可用」错误。
+
+    与普通失败的区别：拆小批重试无济于事（问题不在批次大小），
+    _translate_batch 收到后直接抛出，不进入递归拆分，让上层快速失败。
+    """
+    pass
+
+
+class TranslationStopped(RuntimeError):
+    """用户主动停止：翻译循环检测到 stop_check 后抛出，调用方静默处理（不算失败）。"""
     pass
 
 
@@ -179,7 +224,8 @@ class TranslationClient:
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
                          is_bilingual: bool, state_path: Optional[Path] = None,
-                         translation_concurrency: int = 3) -> List[str]:
+                         translation_concurrency: int = 3,
+                         stop_check: Optional[Callable[[], bool]] = None) -> List[str]:
         # Step 0: 按时间间隔划分段落
         para_of_block: List[int] = []
         current_para = 0
@@ -289,6 +335,10 @@ class TranslationClient:
                 "level": "INFO",
             })
             for batch_idx in range(0, len(unique_texts), effective_batch_size):
+                if stop_check is not None and stop_check():
+                    self._abort_translation(batch_futures, state_path,
+                                            sent_originals, sent_trans)
+                    raise TranslationStopped()
                 batch = unique_texts[batch_idx:batch_idx + effective_batch_size]
                 batch_id = batch_idx // self.batch_size + 1
                 para_ids = set()
@@ -301,6 +351,9 @@ class TranslationClient:
                 gates = [para_gate[p] for p in para_ids if p in para_gate]
 
                 def _job(batch=batch, gates=gates, para_ids=para_ids):
+                    # 用户停止：不再发起新的 API 调用（在途请求无法中断，自然结束）
+                    if stop_check is not None and stop_check():
+                        raise TranslationStopped()
                     # 段内有序：前一批的译文已被它的 worker 应用进 para_context
                     for g in gates:
                         g.result()
@@ -318,31 +371,27 @@ class TranslationClient:
                                     para = gsid_to_para[gsid]
                                     para_context.setdefault(para, []).append(zh_text)
                                     para_context[para] = para_context[para][-CONTEXT_WINDOW:]
-                    return batch_id
+                    # 返回本批有效译文数（0 = 整批无产出，供空批熔断统计）
+                    return sum(1 for _, zh in applied if zh)
 
                 future = executor.submit(_job)
                 for p in para_ids:
                     para_gate[p] = future
                 batch_futures.append((future, batch_id))
 
-            # 按提交顺序收结果（state 串行写盘；异常中止整轮）
+            # 按提交顺序收结果（state 串行写盘；异常/停止时取消未开始的批次）
             completed_count = 0
+            consecutive_empty = 0
             for future, batch_id in batch_futures:
+                if stop_check is not None and stop_check():
+                    self._abort_translation(batch_futures, state_path,
+                                            sent_originals, sent_trans)
+                    raise TranslationStopped()
                 # 轮询等待，每隔 15s 发送心跳防止 UI 假死
                 while True:
                     try:
-                        future.result(timeout=15)
+                        applied_count = future.result(timeout=15)
                         break
-                    except RuntimeError:
-                        # 翻译失败：先落盘断点，避免整轮进度丢失
-                        self._save_cache()
-                        if state_path:
-                            save_json(state_path, {
-                                "done": _snapshot_done(sent_trans, self._cache_lock),
-                                "originals": sent_originals,
-                                "updated_at": datetime.now().isoformat(),
-                            })
-                        raise
                     except (concurrent.futures.TimeoutError, TimeoutError):
                         is_local = ("127.0.0.1" in self.api_url or "localhost" in self.api_url
                                     or "::1" in self.api_url)
@@ -354,6 +403,29 @@ class TranslationClient:
                             "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（{slow_hint}，已完成 {completed_count}/{total_batches} 批）",
                             "total": len(blocks), "cache": len(self.cache),
                         })
+                    except Exception:
+                        # 批次失败（含 curl 子进程超时等非 RuntimeError 异常）：
+                        # 先落盘断点，再取消未开始的批次，避免白烧 API
+                        self._abort_translation(batch_futures, state_path,
+                                                sent_originals, sent_trans)
+                        raise
+                # 空批熔断：连续多批没有任何有效译文 → API 不可用或全部拒译，
+                # 继续下去只会白烧请求并拖进漫长的补翻，直接中止本文件
+                if applied_count == 0:
+                    consecutive_empty += 1
+                    if consecutive_empty >= MAX_EMPTY_BATCHES:
+                        self.post_ui({
+                            "type": "log",
+                            "message": f"连续 {MAX_EMPTY_BATCHES} 批无任何有效译文，"
+                                       f"判定翻译 API 不可用，中止本文件（已完成的批次已保存）",
+                            "level": "ERROR",
+                        })
+                        self._abort_translation(batch_futures, state_path,
+                                                sent_originals, sent_trans)
+                        raise RuntimeError(
+                            f"连续 {MAX_EMPTY_BATCHES} 批无有效译文（API 可能不可用或全部拒译）")
+                else:
+                    consecutive_empty = 0
                 if state_path:
                     save_json(state_path, {
                         "done": _snapshot_done(sent_trans, self._cache_lock),
@@ -382,7 +454,9 @@ class TranslationClient:
             miss_map: Dict[str, List[int]] = {}
             for gsid, sent in missing:
                 miss_map.setdefault(sent, []).append(gsid)
+            consec_fail = 0
             for i, (orig, gsids) in enumerate(miss_map.items(), 1):
+                got_translation = False
                 try:
                     items = self._translate_batch([orig], "", 0)
                     zh = ""
@@ -402,6 +476,7 @@ class TranslationClient:
                             self.cache[key] = zh
                         for gsid in gsids:
                             sent_trans[gsid] = zh
+                        got_translation = True
                     elif zh:
                         # 与原文相同也写入，避免反复补翻同一句；双语组装层会处理
                         for gsid in gsids:
@@ -410,6 +485,17 @@ class TranslationClient:
                         logger.warning("单条补翻仍无结果: %r", orig[:80])
                 except Exception as e:
                     logger.warning("单条补翻失败 %r: %s", orig[:80], e)
+                # 熔断统计：异常/无译文/译文=原文（拒译）都算无进展，
+                # 连续过多说明 API 不可用，放弃剩余补翻避免拖死整个文件
+                consec_fail = 0 if got_translation else consec_fail + 1
+                if consec_fail >= MISSING_FIX_MAX_CONSEC_FAIL:
+                    self.post_ui({
+                        "type": "log",
+                        "message": f"连续 {consec_fail} 句补翻无有效译文，放弃剩余补翻"
+                                   f"（{len(miss_map) - i} 句未补，无译文处将保留原文）",
+                        "level": "WARNING",
+                    })
+                    break
                 if i % 10 == 0 or i == len(miss_map):
                     self.post_ui({
                         "type": "progress",
@@ -446,6 +532,23 @@ class TranslationClient:
         self._save_cache()
         return result_texts
 
+    def _abort_translation(self, batch_futures: List[tuple], state_path: Optional[Path],
+                           sent_originals: Dict[str, str], sent_trans: Dict[int, str]) -> None:
+        """中止本轮翻译：落盘断点 + 取消尚未开始的批次（在途批次自然结束）。
+
+        不取消的话，线程池里已提交的剩余批次会继续执行，把 API 费用/时间
+        全部烧完，而结果随后被丢弃。
+        """
+        for f, _ in batch_futures:
+            f.cancel()
+        self._save_cache()
+        if state_path:
+            save_json(state_path, {
+                "done": _snapshot_done(sent_trans, self._cache_lock),
+                "originals": sent_originals,
+                "updated_at": datetime.now().isoformat(),
+            })
+
     def _translate_batch(self, texts: List[str], context: str = "", depth: int = 0) -> List[Dict]:
         """批量翻译，带递归深度限制防止栈溢出"""
         prompt_text = json.dumps(texts, ensure_ascii=False)
@@ -468,6 +571,10 @@ class TranslationClient:
                 resp_data = self._curl_fallback(payload, headers)
             except Exception as e2:
                 raise RuntimeError(f"翻译 API 调用失败（curl fallback 也失败）: {e2}")
+        except ApiUnavailableError:
+            # 网络不可达/超时：拆小批不解决问题（_call_api 内部已重试 3 次），
+            # 直接失败交给上层熔断/停止，避免 2^depth 个子请求各重试一轮
+            raise
         except Exception as e:
             # 修正缩进：正确处理递归拆分，增加深度限制
             if len(texts) > 1 and depth < MAX_RECURSION_DEPTH:
@@ -534,13 +641,13 @@ class TranslationClient:
                 last_err = RuntimeError(f"HTTP {e.code}: {body[:200]}")
                 logger.warning("API HTTP 错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.code)
             except urllib.error.URLError as e:
-                last_err = RuntimeError(f"网络错误: {e.reason}")
+                last_err = ApiUnavailableError(f"网络错误: {e.reason}")
                 logger.warning("API 网络错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.reason)
             except TimeoutError:
-                last_err = RuntimeError("API 请求超时")
+                last_err = ApiUnavailableError("API 请求超时")
                 logger.warning("API 超时 (尝试 %d/%d)", attempt, API_RETRY_COUNT)
             except Exception as e:
-                last_err = RuntimeError(f"API 请求失败: {e}")
+                last_err = ApiUnavailableError(f"API 请求失败: {e}")
                 logger.warning("API 请求异常 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e)
             if attempt < API_RETRY_COUNT:
                 delay = API_RETRY_BASE * (2 ** (attempt - 1))
@@ -717,15 +824,16 @@ def _extract_json(text: str) -> Optional[Any]:
             return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-    # 尝试正则提取对象
-    m = re.search(r"(\{.*?\})", text, re.DOTALL)
+    # 尝试正则提取对象（贪婪：匹配到最后一个 }，容忍 JSON 前有说明文字；
+    # 非贪婪会在第一个 } 截断导致必然解析失败）
+    m = re.search(r"(\{.*\})", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    # 尝试正则提取数组
-    m = re.search(r"(\[.*?\])", text, re.DOTALL)
+    # 尝试正则提取数组（同为贪婪匹配）
+    m = re.search(r"(\[.*\])", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
