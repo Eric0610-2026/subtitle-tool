@@ -6,7 +6,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent, QObject, QPropertyAnimation, QEasingCurve, QAbstractAnimation
 from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QListWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -87,6 +87,40 @@ class DropListWidget(QListWidget):
         else:
             super().dropEvent(event)
             self.reordered.emit()
+
+
+class PopupFade(QObject):
+    """QComboBox 弹层增强：淡入过渡动画 + 去除原生灰底。
+
+    QSS 不支持 transition；弹层容器是独立原生窗口：
+    - 灰底：Windows 在 Qt 绘制前会先用系统灰擦除原生窗口背景，视图的
+      圆角缺口处会露出灰边 → 设置 WA_TranslucentBackground 让圆角外真透明；
+    - 动画：监听容器 Show 事件，对 windowOpacity 做 0→1 短动画（OutCubic）。
+    """
+
+    def __init__(self, combo, duration_ms: int = 130):
+        super().__init__(combo)  # 挂在 combo 下，随控件销毁
+        container = combo.view().window()
+        # 必须在原生窗口首次显示前设置（attach 时弹层尚未创建过窗口）
+        container.setAttribute(Qt.WA_TranslucentBackground, True)
+        container.installEventFilter(self)
+        self._duration = duration_ms
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Show:
+            obj.setWindowOpacity(0.0)  # 首帧前置零，避免闪一帧全不透明
+            anim = QPropertyAnimation(obj, b"windowOpacity", obj)
+            anim.setDuration(self._duration)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        return False
+
+
+def attach_popup_fade(combo, duration_ms: int = 130) -> None:
+    """为下拉框启用弹层淡入动画（见 PopupFade）"""
+    PopupFade(combo, duration_ms)
 
 
 class LogEntry(QWidget):
