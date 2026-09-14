@@ -126,16 +126,6 @@ class ProgressPanel(QFrame):
         header.addWidget(title)
         header.addStretch()
         layout.addLayout(header)
-        self.overall_label = QLabel("总进度：等待中")
-        self.overall_label.setStyleSheet("font-weight:600; color:#6366f1;")
-        layout.addWidget(self.overall_label)
-        self.overall_progress = QProgressBar()
-        self.overall_progress.setRange(0, 100)
-        self.overall_progress.setValue(0)
-        self.overall_progress.setFixedHeight(16)
-        self.overall_progress.setTextVisible(True)
-        self.overall_progress.setFormat("%p%")
-        layout.addWidget(self.overall_progress)
 
         top = QHBoxLayout()
         self.lang_label = QLabel("语言：auto")
@@ -145,14 +135,16 @@ class ProgressPanel(QFrame):
         top.addWidget(self.counter_label)
         layout.addLayout(top)
 
-        dual = QVBoxLayout()
-        self._transcribe_group, self.transcribe_label, self.transcribe_bar, self.transcribe_detail = \
-            self._build_sub_group("转写")
-        self._translate_group, self.translate_label, self.translate_bar, self.translate_detail = \
-            self._build_sub_group("翻译")
-        dual.addWidget(self._transcribe_group, 1)
-        dual.addWidget(self._translate_group, 1)
-        layout.addLayout(dual)
+        # 上下两行：上行两阶段串行（先全部转写、后顺序翻译）共用的阶段进度条，
+        # 下行总进度条；两行结构一致、等宽对齐
+        self._stage_group, self.stage_label, self.stage_bar, self.stage_detail = \
+            self._build_sub_group("处理")
+        layout.addWidget(self._stage_group)
+        self._overall_group, self.overall_label, self.overall_progress, self.overall_detail = \
+            self._build_sub_group("总进度")
+        self.overall_label.setStyleSheet("font-weight:600; color:#6366f1;")
+        self.overall_progress.setFormat("%p%")
+        layout.addWidget(self._overall_group)
 
         bot = QHBoxLayout()
         self.detail_label = QLabel("已用 --:-- | 剩余 --:-- | 预计 --")
@@ -161,15 +153,12 @@ class ProgressPanel(QFrame):
 
     def reset(self):
         self.overall_progress.setValue(0)
-        self.overall_label.setText("总进度：等待中")
-        self.transcribe_bar.setValue(0)
-        self.transcribe_bar.setFormat("")
-        self.transcribe_label.setText("等待中")
-        self.transcribe_detail.setText("")
-        self.translate_bar.setValue(0)
-        self.translate_bar.setFormat("")
-        self.translate_label.setText("等待中")
-        self.translate_detail.setText("")
+        self.overall_label.setText("等待中")
+        self.overall_detail.setText("")
+        self.stage_bar.setValue(0)
+        self.stage_bar.setFormat("")
+        self.stage_label.setText("等待中")
+        self.stage_detail.setText("")
         self.detail_label.setText("")
         self.lang_label.setText("语言：auto")
         self.counter_label.setText("已转写 0/0 | 已翻译 0/0 | 缓存 0")

@@ -92,11 +92,11 @@ class SubtitleApp(QMainWindow):
         # 事件分发表只构建一次，避免每次事件到达时重建
         self._event_handlers = self._build_event_handlers()
         # 默认配置（来自 config.json）
+        # 设备/精度不进设置界面，仅通过 config.json 的 whisper.device /
+        # whisper.compute_type 调整
         self.settings_data = {
             "model_dir": str(APP_DIR / cfg.whisper.model_dir) if (APP_DIR / cfg.whisper.model_dir).exists() else cfg.whisper.model_dir,
             "language": cfg.whisper.language,
-            "device": cfg.whisper.device,
-            "compute_type": cfg.whisper.compute_type,
             "extract_audio": cfg.whisper.extract_audio,
             "vad_filter": cfg.whisper.vad_filter,
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
@@ -383,8 +383,6 @@ class SubtitleApp(QMainWindow):
         raw.setdefault("app", {})["default_video_dir"] = values.get("default_video_dir", "")
         raw.setdefault("whisper", {})["model_dir"] = values.get("model_dir", "")
         raw["whisper"]["language"] = values.get("language", "auto")
-        raw["whisper"]["device"] = values.get("device", "cuda")
-        raw["whisper"]["compute_type"] = values.get("compute_type", "int8_float16")
         raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
         raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
         raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", True)
@@ -701,8 +699,8 @@ class SubtitleApp(QMainWindow):
             "model_dir": s.get("model_dir", ""),
             "language": s.get("language", "auto"),
             "target_lang": s.get("target_lang", "zh"),
-            "device": s.get("device", "cuda"),
-            "compute_type": s.get("compute_type", "int8_float16"),
+            "device": cfg.whisper.device,
+            "compute_type": cfg.whisper.compute_type,
             "translate_enabled": self.trans_cb.isChecked(),
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
@@ -733,7 +731,7 @@ class SubtitleApp(QMainWindow):
         self._overall = OverallProgress(len(jobs), transcribe_weight=w)
         self._overall.start()
         self.progress_panel.overall_progress.setValue(0)
-        self.progress_panel.overall_label.setText(f"总进度：第 1/{len(jobs)} 个 · 已完成 0% · 等待中")
+        self.progress_panel.overall_label.setText(f"第 1/{len(jobs)} 个 · 已完成 0%")
         self.worker.start(jobs, opts)
 
     def _get_jobs(self):
@@ -1270,48 +1268,45 @@ class SubtitleApp(QMainWindow):
         stage = e.get("stage", "")
         detail = e.get("detail", "")
         # 转写相关 stage：含「转写完成」（旧逻辑只认「转写中」，完成事件 percent=100 被丢弃，
-        # 条会停在最后一段 seg_end/duration，并行流水线里翻译已开始时更明显）
+        # 条会停在最后一段 seg_end/duration）
         if stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成"):
             bar_pct = 100 if stage == "转写完成" else int(pct)
-            p.transcribe_bar.setValue(bar_pct)
-            p.transcribe_bar.setFormat(f"{bar_pct}%")
+            p.stage_bar.setValue(bar_pct)
+            p.stage_bar.setFormat(f"转写 {bar_pct}%")
             if detail:
-                p.transcribe_detail.setText(detail)
+                p.stage_detail.setText(detail)
         elif stage == "翻译":
-            # 进入翻译说明当前文件转写已结束；若条未满则补到 100%
-            if p.transcribe_bar.value() < 100:
-                p.transcribe_bar.setValue(100)
-                p.transcribe_bar.setFormat("100%")
-            p.translate_bar.setValue(int(pct))
-            p.translate_bar.setFormat(f"{int(pct)}%")
-            p.translate_detail.setText(detail)
+            # 串行两阶段：进入翻译说明转写阶段已结束，条从头展示翻译进度
+            p.stage_bar.setValue(int(pct))
+            p.stage_bar.setFormat(f"翻译 {int(pct)}%")
+            p.stage_detail.setText(detail)
             # 翻译阶段已开始：本地模型可能已加载，刷新「当前模型」标签（不再是 whisper）
             if not self._model_status_refreshed:
                 self._model_status_refreshed = True
                 self._update_model_status()
         elif stage in ("组织输出", "完成", "跳过"):
-            p.transcribe_bar.setValue(100)
-            p.transcribe_bar.setFormat("100%")
-            p.translate_bar.setValue(100)
-            p.translate_bar.setFormat("100%")
-        # 转写/翻译阶段已设置对应子进度条的详情，跳过底部 detail_label
-        if stage not in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成", "翻译"):
-            if detail and self._start_time and pct:
-                self._set_detail_with_eta(p, detail, pct)
-            elif detail:
-                p.detail_label.setText(detail)
-            elif self._start_time and pct:
+            p.stage_bar.setValue(100)
+            p.stage_bar.setFormat("100%")
+        # 底部 ETA 行：所有进度事件都刷新已用/剩余/预计；stage 详情只写 stage_detail，不重复到底部
+        if stage in ("提取音频", "加载模型", "读取字幕", "转写中", "转写完成", "翻译"):
+            if self._start_time and pct:
                 self._set_detail_with_eta(p, "", pct)
             else:
                 p.detail_label.setText("")
+        elif detail and self._start_time and pct:
+            self._set_detail_with_eta(p, detail, pct)
+        elif detail:
+            p.detail_label.setText(detail)
+        elif self._start_time and pct:
+            self._set_detail_with_eta(p, "", pct)
+        else:
+            p.detail_label.setText("")
         idx = e.get("idx", 0)
         if idx and self._overall is not None:
             overall_pct = self._overall.tick(idx, pct, stage)
             p.overall_progress.setValue(int(overall_pct))
-            remain, finish = self._overall.eta()
             p.overall_label.setText(
-                f"总进度：第 {idx}/{self._overall.total} 个 · 已完成 {overall_pct:.0f}% · "
-                f"预计全部完成 {finish}（剩余 {remain}）")
+                f"第 {idx}/{self._overall.total} 个 · 已完成 {overall_pct:.0f}%")
 
     def _handle_done(self, e):
         p = self.progress_panel
@@ -1319,20 +1314,18 @@ class SubtitleApp(QMainWindow):
         stopped = e.get("stopped", False)
         self._add_log_entry(msg, "INFO")
         if not stopped:
-            p.transcribe_bar.setValue(100)
-            p.transcribe_bar.setFormat("100%")
-            p.translate_bar.setValue(100)
-            p.translate_bar.setFormat("100%")
+            p.stage_bar.setValue(100)
+            p.stage_bar.setFormat("100%")
             p.detail_label.setText("")
             if self._overall is not None:
                 self._overall.set_complete()
                 p.overall_progress.setValue(100)
-                p.overall_label.setText("总进度：全部完成 100%")
+                p.overall_label.setText("全部完成 100%")
         else:
             # 用户主动停止：保留当前进度，不谎报"全部完成"
             p.detail_label.setText("")
             if self._overall is not None:
-                p.overall_label.setText("总进度：已停止（部分完成）")
+                p.overall_label.setText("已停止（部分完成）")
         self.start_btn.setEnabled(True)
         self.retry_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1368,13 +1361,13 @@ class SubtitleApp(QMainWindow):
         """预构建事件分发表（仅一次，避免每次事件到达时重建）"""
         return {
             "log": lambda e: self._add_log_entry(e.get("message", ""), e.get("level", "INFO")),
-            "transcribe_status": lambda e: self._set_elided(self.progress_panel.transcribe_label,
-                f"🎤 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
+            "transcribe_status": lambda e: self._set_elided(self.progress_panel.stage_label,
+                f"🎤 转写 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
             "file_mode": lambda e: self._overall.set_file_translation_only(e.get("idx", 0))
                 if self._overall and not e.get("needs_transcribe", True) else None,
-            "translate_status": lambda e: self._set_elided(self.progress_panel.translate_label,
-                f"🌍 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
-            "current": lambda e: self._set_elided(self.progress_panel.transcribe_label, f"🎤 {e.get('message', '')}"),
+            "translate_status": lambda e: self._set_elided(self.progress_panel.stage_label,
+                f"🌍 翻译 {e.get('file','')} [{e.get('idx',0)}/{e.get('total',0)}]"),
+            "current": lambda e: self._set_elided(self.progress_panel.stage_label, f"🎤 {e.get('message', '')}"),
             "progress": self._handle_progress,
             "counter": lambda e: self.progress_panel.counter_label.setText(
                 f"已转写 {e.get('generated',0)}/{e.get('total',0)} | "

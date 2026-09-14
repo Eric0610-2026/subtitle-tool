@@ -18,7 +18,10 @@ from PySide6.QtGui import QFont
 from .srt_utils import load_json, save_json, IGNORE_FILE
 from .config import cfg
 from .local_service import service_url_prefix
-from .translation import clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot
+from .widgets import attach_popup_fade
+from .translation import (
+    LANG_NAMES, clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot,
+)
 
 _SCROLLBAR_STYLE = """
     QScrollBar:vertical { width:8px; background:transparent; border:none; }
@@ -65,22 +68,12 @@ class SettingsDialog(QDialog):
         r += 1
         g1.addWidget(QLabel("识别语言"), r, 0)
         self.lang = QComboBox()
-        self.lang.addItems(["auto", "zh", "en", "ja", "ko", "fr", "de", "es", "ru"])
-        self.lang.setCurrentText(values.get("language", "auto"))
+        # 展示中文名、userData 存代号（whisper 识别与配置存储仍用 auto/zh/en…）
+        self.lang.addItem("自动检测", "auto")
+        for code in ["zh", "en", "ja", "ko", "fr", "de", "es", "ru"]:
+            self.lang.addItem(LANG_NAMES.get(code, code), code)
+        self.lang.setCurrentIndex(max(0, self.lang.findData(values.get("language", "auto"))))
         g1.addWidget(self.lang, r, 1)
-        g1.addWidget(QLabel("auto=自动检测"), r, 2)
-        r += 1
-        g1.addWidget(QLabel("设备"), r, 0)
-        self.device = QComboBox()
-        self.device.addItems(["cuda", "cpu"])
-        self.device.setCurrentText(values.get("device", "cuda"))
-        g1.addWidget(self.device, r, 1)
-        r += 1
-        g1.addWidget(QLabel("精度"), r, 0)
-        self.precision = QComboBox()
-        self.precision.addItems(["int8_float16", "float16", "int8", "float32"])
-        self.precision.setCurrentText(values.get("compute_type", "int8_float16"))
-        g1.addWidget(self.precision, r, 1)
         r += 1
         opts_row = QHBoxLayout()
         opts_row.setSpacing(18)
@@ -126,8 +119,9 @@ class SettingsDialog(QDialog):
 
         g2.addWidget(QLabel("目标语言"), r, 0)
         self.target_lang = QComboBox()
-        self.target_lang.addItems(["zh", "en", "ja", "ko", "fr", "de", "es", "ru"])
-        self.target_lang.setCurrentText(values.get("target_lang", "zh"))
+        for code in ["zh", "en", "ja", "ko", "fr", "de", "es", "ru"]:
+            self.target_lang.addItem(LANG_NAMES.get(code, code), code)
+        self.target_lang.setCurrentIndex(max(0, self.target_lang.findData(values.get("target_lang", "zh"))))
         g2.addWidget(self.target_lang, r, 1, 1, 2)
         r += 1
 
@@ -206,6 +200,10 @@ class SettingsDialog(QDialog):
         session_btn.clicked.connect(lambda: self.done(1))
         permanent_btn.clicked.connect(lambda: self.done(2))
 
+        # 下拉弹层淡入过渡
+        attach_popup_fade(self.lang)
+        attach_popup_fade(self.target_lang)
+
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
         self.batch_size.setEnabled(not checked)
@@ -224,14 +222,12 @@ class SettingsDialog(QDialog):
     def get_values(self) -> dict:
         return {
             "model_dir": self.model_dir.text().strip(),
-            "language": self.lang.currentText(),
-            "device": self.device.currentText(),
-            "compute_type": self.precision.currentText(),
+            "language": self.lang.currentData(),
             "extract_audio": self.extract_cb.isChecked(),
             "vad_filter": self.vad_cb.isChecked(),
             "default_video_dir": self.default_dir.text().strip(),
             "reuse_auto_lang": self.reuse_lang_cb.isChecked(),
-            "target_lang": self.target_lang.currentText(),
+            "target_lang": self.target_lang.currentData(),
             "translation_only": self.only_zh_cb.isChecked(),
             "translation_batch_size": self._batch_size_value(),
             "send_all": self.send_all_cb.isChecked(),

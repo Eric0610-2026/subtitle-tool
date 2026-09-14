@@ -287,6 +287,10 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             selection-background-color:{c['accent']}; selection-color:white;
             outline:0; padding:4px;
         }}
+        QComboBox QFrame {{
+            /* 下拉弹层容器：默认 Fusion 灰底会从圆角/边缘渗出，统一为卡片色 */
+            background:{c['card']}; border:none;
+        }}
         QComboBox QAbstractItemView::item {{
             min-height:24px; padding:4px 10px;
         }}
