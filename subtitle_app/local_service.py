@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 # 不用 8080：该端口常被 Windows（Hyper-V/WSL）的动态端口预留占走，
 # 导致 llama-server 无法绑定、启动即退出（见 _startup_diagnosis 的 netsh 提示）。
 _PORT = 8188
-_HOST = "127.0.0.1"          # 与应用 api_url 一致，强制 IPv4 回环
+_HOST = "127.0.0.1"          # 强制 IPv4 回环，翻译端点只可能是本机
+_LOCAL_MODEL = "hy-mt2"      # llama-server 单模型名，仅用于缓存键与请求体
 _READY_TIMEOUT = 120.0        # 模型加载最长等待（秒）
 _POLL_INTERVAL = 0.4
 _PROGRESS_INTERVAL = 15.0     # 等待期间向前端反馈进度的间隔（秒）
@@ -58,6 +59,20 @@ def server_bin() -> Path:
 def service_url_prefix() -> str:
     """本地翻译服务 OpenAI 兼容 URL 前缀（供调用方识别"这是本地服务"）"""
     return f"http://{_HOST}:{_PORT}"
+
+
+def translation_endpoint() -> str:
+    """翻译请求的唯一目标地址：本机 llama-server 的 chat/completions。
+
+    全应用只此一处定义翻译端点，调用方不得自行拼接或覆盖，
+    以保证不存在任何指向外部服务器的代码路径。
+    """
+    return f"http://{_HOST}:{_PORT}/v1/chat/completions"
+
+
+def local_model_name() -> str:
+    """本地翻译模型名（llama-server 单模型加载，此值仅用于缓存键与请求体）"""
+    return _LOCAL_MODEL
 
 
 def _find_model() -> Optional[Path]:

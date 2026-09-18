@@ -305,7 +305,7 @@ class SubtitleApp(QMainWindow):
             stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
                        "QPushButton:hover { background:#4f46e5; }")
         ar.addWidget(self.retry_btn)
-        # ── 当前模型状态（信息展示：Whisper/本地/联网大模型具体到种类） ──
+        # ── 当前模型状态（信息展示：Whisper 转写模型 / 本地 Hy-MT2 翻译模型） ──
         self.model_status = QLabel("🧠 当前模型：…")
         self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
         ar.addWidget(self.model_status)
@@ -693,7 +693,6 @@ class SubtitleApp(QMainWindow):
 
     def _build_opts(self, skip_completed=False):
         s = self.settings_data
-        from .local_service import service_url_prefix
         return {
             "work_dir": self.work_dir,
             "model_dir": s.get("model_dir", ""),
@@ -705,7 +704,6 @@ class SubtitleApp(QMainWindow):
             "extract_audio": s.get("extract_audio", True),
             "vad_filter": s.get("vad_filter", True),
             "reuse_auto_lang": s.get("reuse_auto_lang", True),
-            "api_url": service_url_prefix() + "/v1/chat/completions",
             "translation_only": s.get("translation_only", False),
             "translation_batch_size": s.get("translation_batch_size"),
             "send_all": s.get("send_all", False),
@@ -1206,13 +1204,13 @@ class SubtitleApp(QMainWindow):
                 f"将 {config_example.name} 复制并重命名为 {config_path.name}：\n"
                 f"  1. 复制 {config_example.name}\n"
                 f"  2. 粘贴并重命名为 {config_path.name}\n"
-                f"  3. 编辑 {config_path.name}，填入你的 API 地址、密钥和模型名称\n\n"
+                f"  3. 按需修改 {config_path.name} 中的识别语言、模型目录、批量大小等参数\n\n"
                 "如果没有 config.json，应用会加载默认配置运行，但「永久保存」按钮不可用。\n"
                 "（仍可通过「本次有效」按钮在当前会话中使用所有功能。）"
             )
             self._add_log_entry(
                 f"未找到 {config_path.name}，已从 {config_example.name} 加载默认配置。"
-                f"请复制为 {config_path.name} 并编辑 API 信息", "WARNING")
+                f"请复制为 {config_path.name} 以启用「永久保存」", "WARNING")
             QMessageBox.information(self, "首次使用提醒", msg)
 
         missing_essential = []

@@ -36,7 +36,7 @@ class TestComposeSentences(unittest.TestCase):
 
 class TestParseResponse(unittest.TestCase):
     def setUp(self):
-        self.client = TranslationClient("url", "key", "m",
+        self.client = TranslationClient(
                                         Path(tempfile.mktemp()), lambda *a: None)
 
     def test_response_formats(self):
@@ -57,13 +57,13 @@ class TestParseResponse(unittest.TestCase):
 class TestTranslationClient(unittest.TestCase):
     @staticmethod
     def _client(d, **kw):
-        return TranslationClient("url", "key", "m",
+        return TranslationClient(
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
     def test_translate_blocks_and_cache(self):
         # 默认批次大小应跟随 config 的 translation.batch_size
         from subtitle_app.config import cfg
-        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()), lambda *a: None)
+        c = TranslationClient(Path(tempfile.mktemp()), lambda *a: None)
         self.assertEqual(c.batch_size, cfg.translation.batch_size)
         # 基本翻译 + 空缓存大小
         with tempfile.TemporaryDirectory() as d:
@@ -88,10 +88,10 @@ class TestTranslationClient(unittest.TestCase):
 
     def test_batch_size_zero_or_negative_clamped(self):
         """batch_size=0/负数会导致分批 range(0, len, 0) / `// 0` 崩溃，应钳位到至少 1"""
-        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+        c = TranslationClient(Path(tempfile.mktemp()),
                               lambda *a: None, batch_size=0)
         self.assertGreaterEqual(c.batch_size, 1)
-        c2 = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+        c2 = TranslationClient(Path(tempfile.mktemp()),
                                lambda *a: None, batch_size=-3)
         self.assertGreaterEqual(c2.batch_size, 1)
 
@@ -101,7 +101,7 @@ class TestParagraphContext(unittest.TestCase):
 
     @staticmethod
     def _client(d, **kw):
-        return TranslationClient("url", "key", "m",
+        return TranslationClient(
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
     @staticmethod
@@ -172,7 +172,7 @@ class TestRecursionProtection(unittest.TestCase):
     def test_recursion_and_fallback_paths(self):
         """递归深度保护 + 各类缓存/断点/回填路径共用一套覆盖"""
         from subtitle_app.translation import MAX_RECURSION_DEPTH
-        client = TranslationClient("url", "key", "m",
+        client = TranslationClient(
                                    Path(tempfile.mktemp()), lambda *a: None, batch_size=5)
         # 超过递归深度 → 返回原文
         def always_fail(texts_, context="", depth=0):
@@ -188,7 +188,7 @@ class TestRecursionProtection(unittest.TestCase):
         self.assertEqual(result[0]["zh"], "hello")
         # 中文源/缓存全命中时返回译文；缓存第二次命中不调 API
         with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient("url", "key", "m",
+            c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="你好世界")]
             mock = MagicMock(return_value=[{"id": 1, "zh": "你好世界"}])
@@ -196,7 +196,7 @@ class TestRecursionProtection(unittest.TestCase):
             self.assertEqual(c.translate_blocks(blocks, "zh", is_bilingual=True),
                              ["你好世界"])
         with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient("url", "key", "m",
+            c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello world")]
             mock = MagicMock(return_value=[{"id": 1, "zh": "你好世界"}])
@@ -211,7 +211,7 @@ class TestRecursionProtection(unittest.TestCase):
         # 缓存/断点 state 里的空串不应阻止重新翻译
         from subtitle_app.srt_utils import sentence_cache_key
         with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient("url", "key", "m",
+            c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
             key = sentence_cache_key("Hello", c.model, True)
@@ -221,7 +221,7 @@ class TestRecursionProtection(unittest.TestCase):
             self.assertEqual(c.translate_blocks(blocks, "en", is_bilingual=True),
                              ["你好"])
         with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient("url", "key", "m",
+            c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
             state = Path(d) / "t.translate_state.json"
@@ -235,7 +235,7 @@ class TestRecursionProtection(unittest.TestCase):
             self.assertEqual(res, ["你好"])
         # API 漏 id 时按顺序回填，不整块丢弃
         with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient("url", "key", "m",
+            c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
             blocks = [
                 SubtitleBlock(index=1, start=0, end=1, text="Hello"),
@@ -298,8 +298,8 @@ class TestSharedCache(unittest.TestCase):
         # 同一路径共享同一 dict；后写回不丢先写回的条目
         with tempfile.TemporaryDirectory() as d:
             cache_path = Path(d) / "cache.json"
-            c1 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
-            c2 = TranslationClient("url", "key", "m", cache_path, lambda *a: None)
+            c1 = TranslationClient( cache_path, lambda *a: None)
+            c2 = TranslationClient( cache_path, lambda *a: None)
             c1.cache["k1"] = "v1"
             self.assertEqual(c2.cache.get("k1"), "v1")
             c2.cache["k2"] = "v2"
@@ -312,9 +312,9 @@ class TestSharedCache(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path_a = Path(d) / "a.json"
             path_b = Path(d) / "b.json"
-            ca = TranslationClient("url", "key", "m", path_a, lambda *a: None)
+            ca = TranslationClient( path_a, lambda *a: None)
             ca.cache["only_a"] = "1"
-            cb = TranslationClient("url", "key", "m", path_b, lambda *a: None)
+            cb = TranslationClient( path_b, lambda *a: None)
             self.assertNotIn("only_a", cb.cache)
             cb.cache["only_b"] = "1"
             self.assertNotIn("only_b", ca.cache)
@@ -352,7 +352,7 @@ class TestTranslateSplit(unittest.TestCase):
     """递归拆批后第二个子批的 id 需重新编号，避免回填错位"""
 
     def test_second_half_ids_renumbered(self):
-        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+        c = TranslationClient(Path(tempfile.mktemp()),
                               lambda *a: None, batch_size=10)
         c._translate_batch = lambda texts, context="", depth=0: [
             {"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
@@ -367,7 +367,7 @@ class TestTranslateSplit(unittest.TestCase):
         旧逻辑 offset = len(left)：左半批截断丢项时右半批 id 整体前移，
         译文错位并经持久缓存污染后续所有运行。
         """
-        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+        c = TranslationClient(Path(tempfile.mktemp()),
                               lambda *a: None, batch_size=10)
 
         def fake_batch(texts, context="", depth=0):
@@ -390,7 +390,7 @@ class TestStopAndBreaker(unittest.TestCase):
 
     @staticmethod
     def _client(d, **kw):
-        return TranslationClient("url", "key", "m",
+        return TranslationClient(
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
     @staticmethod
@@ -447,7 +447,7 @@ class TestStopAndBreaker(unittest.TestCase):
     def test_network_error_does_not_split(self):
         """网络不可达（ApiUnavailableError）不拆批递归：一次失败即中止"""
         from subtitle_app.translation import ApiUnavailableError
-        c = TranslationClient("url", "key", "m", Path(tempfile.mktemp()),
+        c = TranslationClient(Path(tempfile.mktemp()),
                               lambda *a: None, batch_size=10)
         calls = []
 
@@ -480,7 +480,7 @@ class TestCacheLRU(unittest.TestCase):
 
     @staticmethod
     def _client(d, **kw):
-        return TranslationClient("url", "key", "m",
+        return TranslationClient(
                                  Path(d) / "cache.json", lambda *a: None, **kw)
 
     def test_touch_moves_key_to_end_and_eviction_keeps_recent(self):
@@ -506,7 +506,7 @@ class TestSharedCacheManagement(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "cache.json"
-            c = TranslationClient("url", "key", "m", path, lambda *a: None)
+            c = TranslationClient( path, lambda *a: None)
             c.cache["k1"] = "v1"
             clear_shared_cache()
             self.assertEqual(c.get_cache_size(), 0, "已创建的 client 应看到清空后的缓存")

@@ -310,9 +310,12 @@ class SubtitleWorker:
         return False
 
     def _prepare_transcribe_phase(self, opts: dict, post: Callable) -> None:
-        """进入转写阶段前的 GPU 清理：停掉本会话拉起的翻译服务；外部服务只提示不强制杀。"""
-        from .local_service import service_url_prefix
-        if not str(opts.get("api_url", "")).lower().startswith(service_url_prefix()):
+        """进入转写阶段前的 GPU 清理：停掉本会话拉起的翻译服务；外部服务只提示不强制杀。
+
+        门控用「本次是否请求翻译」——翻译端点已硬绑本机 llama-server，
+        不再通过地址字符串判断。
+        """
+        if not opts.get("translate_enabled", True):
             return
         try:
             from .local_service import is_service_running, shutdown_owned

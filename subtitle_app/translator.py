@@ -105,7 +105,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     """只执行翻译+输出，不转写 — 用于断点续翻"""
     work_dir = Path(opts["work_dir"])
     translate_enabled = opts.get("translate_enabled", True)
-    api_url = opts.get("api_url", "")
     translation_only = opts.get("translation_only", False)
     language = opts["language"]
     detected_lang = opts.get("_detected_lang", language)
@@ -123,7 +122,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         return
 
     translated_srt: Optional[Path] = None
-    if translate_enabled and api_url:
+    if translate_enabled:
         # 本地翻译：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
         post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
         ok, detail, first = ensure_running(on_progress=lambda sec: post({
@@ -166,10 +165,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         _bs = opts.get("translation_batch_size")
         if _bs is None:
             _bs = cfg.translation.batch_size or 20
-        client = TranslationClient(api_url, "local", "hy-mt2", cache_path, post,
-                                 batch_size=_bs,
-                                 target_lang=opts.get("target_lang", "zh"),
-                                 send_all=send_all)
+        client = TranslationClient(cache_path, post,
+                                   batch_size=_bs,
+                                   target_lang=opts.get("target_lang", "zh"),
+                                   send_all=send_all)
         cache_size = 0
         try:
             if need_translate_idx:

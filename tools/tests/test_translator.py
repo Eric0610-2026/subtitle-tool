@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app.srt_utils import SubtitleBlock
-from subtitle_app.local_service import service_url_prefix
 
 
 def _make_block(index=1, start=1.0, end=3.0, text="Hello world"):
@@ -151,7 +150,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "work_dir": str(self.d),
             "language": language,
             "translate_enabled": True,
-            "api_url": "http://127.0.0.1:8188/v1/chat/completions",
             "translation_only": translation_only,
             "_detected_lang": detected_lang,
             "_ffmpeg": "ffmpeg.exe" if mkv_ok else None,
@@ -225,9 +223,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "work_dir": str(self.d),
             "language": "zh",
             "translate_enabled": True,
-            "api_url": "https://api.example.com",
-            "api_key": "sk-test",
-            "translation_model": "gpt-4",
             "translation_only": False,
             "_detected_lang": "zh",
             "_ffmpeg": None,
@@ -275,7 +270,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                 "work_dir": str(self.d),
                 "language": "en",
                 "translate_enabled": True,
-                "api_url": service_url_prefix() + "/v1/chat/completions",
                 "translation_only": False,
                 "_detected_lang": "en",
                 "_ffmpeg": None,
@@ -334,9 +328,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "work_dir": str(self.d),
             "language": "en",
             "translate_enabled": True,
-            "api_url": "https://api.example.com",
-            "api_key": "sk-test",
-            "translation_model": "gpt-4",
             "translation_only": False,
             "_detected_lang": "en",
             "_ffmpeg": None,
@@ -385,9 +376,6 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "work_dir": str(self.d),
             "language": "en",
             "translate_enabled": True,
-            "api_url": "https://api.example.com",
-            "api_key": "sk-test",
-            "translation_model": "gpt-4",
             "translation_only": False,
             "_detected_lang": "en",
             "_ffmpeg": None,

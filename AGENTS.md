@@ -87,8 +87,13 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 ## 配置与安全
 
 - 配置在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）；改模板应改 example
-- **API 密钥明文在 config.json，已 git-ignore，切勿提交**；改配置后需重启应用（`cfg` 导入时固化）
-- `.gitignore`：config.json、models/、tools/ffmpeg*.exe、cache/、logs/、.reasonix/、reasonix.toml
+- 改配置后需重启应用（`cfg` 导入时固化）
+- **翻译为纯本地方案，不存在联网 API 能力**：翻译端点由
+  `local_service.translation_endpoint()` 单点定义（`127.0.0.1:8188`），
+  `TranslationClient` 不接受地址/密钥参数，配置中也没有 `api_url`/`api_key` 字段。
+  **禁止**重新引入可配置的外部 API 地址、密钥字段、preset 方案或厂商兼容分支
+- `.gitignore`：config.json、`*config.json`、models/、tools/ffmpeg*.exe、cache/、logs/、.zcode/、.reasonix/、reasonix.toml
+- 提交前自查：`git grep -nE "api_key|api_url|preset|sk-[A-Za-z0-9_-]{20,}"` 应无命中
 
 ## 代码惯例
 

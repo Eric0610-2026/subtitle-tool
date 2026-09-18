@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from subtitle_app.pipeline import SubtitleWorker
 from subtitle_app.config import cfg
-from subtitle_app.local_service import service_url_prefix
 
 
 class TestSubtitleWorkerInit(unittest.TestCase):
@@ -121,9 +120,6 @@ class TestTranscribeStage(unittest.TestCase):
             "translate_enabled": False,
             "extract_audio": True,
             "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
             "skip_completed": False,
             "post": self.post,
             "_is_stopped": lambda: False,
@@ -350,9 +346,6 @@ class TestUnifiedStagedSerial(unittest.TestCase):
             "translate_enabled": False,
             "extract_audio": True,
             "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
             "skip_completed": False,
             "post": self.post,
             "_is_stopped": lambda: False,
@@ -445,9 +438,6 @@ class TestRun(unittest.TestCase):
             "translate_enabled": False,
             "extract_audio": True,
             "vad_filter": True,
-            "api_url": "",
-            "api_key": "",
-            "translation_model": "",
             "skip_completed": False,
             "post": self.post,
             "concurrency": concurrency,
@@ -598,7 +588,7 @@ class TestRun(unittest.TestCase):
         self.w.transcriber.release_model = lambda: releases.append(1)
 
         opts = self._make_opts(concurrency=2)
-        opts["api_url"] = service_url_prefix() + "/v1/chat/completions"
+        opts["translate_enabled"] = True
         opts["pause_before_embed"] = True
 
         with tempfile.TemporaryDirectory() as d:

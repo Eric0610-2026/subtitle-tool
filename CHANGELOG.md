@@ -8,7 +8,7 @@
 
 ### 新功能
 
-- **本地翻译服务自动管理** — 新增 `local_service.py`，选择本地 Hy-MT2 模式时幂等自动拉起 `llama-server`（强制绑定 `127.0.0.1:8080`），应用退出时按端口清理残留进程。无需手动启动服务脚本。
+- **本地翻译服务自动管理** — 新增 `local_service.py`，选择本地 Hy-MT2 模式时幂等自动拉起 `llama-server`（强制绑定 `127.0.0.1:8188`），应用退出时按端口清理残留进程。无需手动启动服务脚本。
 - **GPU 两阶段调度** — 多文件并行流水线改为「阶段 1 全部转写 → 释放 Whisper → 阶段 2 全部翻译+嵌入」的两阶段调度，避免转写/翻译同时占显存导致 OOM。串行模式同样在转写后释放 Whisper 再进入翻译。
 - **模型生命周期优化** — Whisper 启动不预加载，转写时才加载并常驻至切阶段；Hy-MT2 仅在翻译阶段启动；底部「🧠 当前加载」只显示实际已加载的模型。
 - **系统通知** — 新增 `notifier.py`，处理完成时通过 winotify（首选）或 PowerShell BalloonTip（备选）发送 Windows 系统通知，含字符白名单防注入。
@@ -102,6 +102,17 @@
 - 去除系统弹窗声音
 - 统一标题样式
 
+### 移除（联网 API 能力彻底下线）
+
+翻译收敛为**纯本地方案**，项目中不再存在任何可指向外部服务器的配置项与代码路径：
+
+- **删除多厂商响应兼容层** — `translation.py` 的 `_normalize_response()` 整个函数移除（约 45 行），仅保留标准 OpenAI 格式解析；`_extract_error()` 同步移除「国产 API code/message」「detail 字段」两个分支
+- **`TranslationClient` 不再接受地址与密钥参数** — 签名由 `(api_url, api_key, model, cache_path, post_ui, ...)` 改为 `(cache_path, post_ui, batch_size, target_lang, send_all)`；端点改由 `local_service.translation_endpoint()` 单点定义并硬绑本机
+- **删除在线 API 专属逻辑** — `Authorization` 鉴权头、401/402/403/407 认证错误分支、本地/远程端点判断分支
+- **新增 `local_service.translation_endpoint()` / `local_model_name()`** — 全应用唯一的端点与模型名真值来源
+- **`pipeline` 门控改用语义判断** — `_prepare_transcribe_phase` 不再用 `api_url` 字符串前缀判断，改为读取 `translate_enabled`
+- **用户可见文案收口** — 启动检查提示不再教用户「填写 API 地址与密钥」，「API 错误」类日志统一改为「本地服务错误」
+
 ### 配置变更
 
 | 新增字段 | 类型 | 默认值 | 说明 |
@@ -117,6 +128,21 @@
 | `app.scan_skip_exts` | array | `[".mkv"]` | 扫描跳过的扩展名 |
 | `.gitignore` | — | — | 新增 `models/`、`tools/llama-cpp/` 忽略规则 |
 
+**删除字段**（代码从未读取的死配置，或联网方案专属字段，随本次收口一并清除）：
+
+| 删除字段 | 说明 |
+|----------|------|
+| `translation.mode` | 翻译模式（已无联网模式可选） |
+| `translation.api_url` / `translation.api_key` | 翻译服务地址与密钥（端点已硬绑本机） |
+| `translation.model` | 模型名（本地固定 `hy-mt2`） |
+| `translation.batch_size_online` | 联网模式批大小 |
+| `translation.presets` / `translation.active_preset` | 多方案配置数组与激活项 |
+| `translation.enabled` / `translation.pipeline` | 未被任何代码读取 |
+| `translation.concurrency_pipeline` / `concurrency_serial` / `concurrency_translate` | 未被任何代码读取 |
+| `translation.timeout_curl` | 未被任何代码读取 |
+
+另：`.gitignore` 新增 `*config.json`（覆盖 `1config.json` 这类改名副本）与 `.zcode/` 忽略规则。
+
 ### 测试
 
 - **新增 `test_local_service.py`** — 197 行，覆盖本地服务启动/探测/清理/心跳逻辑
@@ -126,7 +152,8 @@
 - 新增批大小持久化字段测试（`TestBatchSizePersistenceField`，四路字段选择）
 - 新增翻译缓存 key 隔离测试（双语/纯译文模式）
 - 新增预览性能测试（300 块截断）
-- 全量测试覆盖通过
+- **适配纯本地方案** — 移除 22 处 `TranslationClient(...)` 位置参数中的 `url/key/model`；清理测试中残留的 `api_url` / `api_key` / `translation_model` 传参（注意：这些用位置传参，按字段名 grep 扫不到，需按类名检索）
+- 全量测试覆盖通过（137 例）
 
 ### 文档
 
@@ -135,6 +162,8 @@
 - **README.md 更新** — 功能亮点列表、安装/使用说明、ffmpeg 查找顺序说明、常见问题、协议声明
 - **删除 `docs/README.md`** — 无用占位文档
 - **删除 `docs/AGENTS.md`** — 已迁移至根目录
+- **`docs/使用说明书.md` 同步纯本地方案** — 第 2.5 节由「配置 API 密钥」重写为「翻译服务（本地，无需配置）」；第 9 章删除「API 地址 / API 密钥 / 模型名称 / 多方案管理」四节并重新编号为 9.1~9.4；删除 18.3「自定义 API」；配置字段表与完整示例配置同步新结构；FAQ 中「翻译需联网调用 API」改为「全程离线」；修正两处将本地端口误写为 `8080` 的错误（实际 `8188`）
+- **AGENTS.md 新增安全约束** — 明确禁止重新引入外部 API 地址、密钥字段、preset 方案或厂商兼容分支，并附提交前残留自查命令
 
 ### 杂项
 

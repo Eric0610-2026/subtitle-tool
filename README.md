@@ -147,13 +147,14 @@ python subtitle_app/subtitle_app.py
 │   ├── widgets.py                 # 拖放文件列表、日志条目等自定义控件
 │   ├── dialogs.py                 # 设置、历史记录、缓存管理对话框
 │   ├── transcriber.py             # 音频提取 + faster-whisper 语音转写
-│   ├── translation.py             # AI 翻译客户端（缓存、批量、断点续翻）
+│   ├── translation.py             # 本地翻译客户端（缓存、批量、断点续翻）
 │   ├── translator.py              # 翻译阶段编排（翻译 → 落盘 → MKV 内嵌）
 │   ├── pipeline.py                # 两阶段流水线编排（转写→翻译）
 │   ├── srt_utils.py               # SRT 解析/写入、进度跟踪、繁简转换
 │   ├── muxer.py                   # MKV 字幕软内嵌、SRT 提取
+│   ├── local_service.py           # 本地 Hy-MT2 llama-server 自动拉起与清理
 │   ├── config.py                  # JSON 配置加载模块
-│   ├── config.example.json        # 配置模板（不含密钥）
+│   ├── config.example.json        # 本地配置模板（无需密钥）
 │   └── config.json                # 本地配置（不提交到仓库）
 ├── tools/                         # 第三方工具与测试
 │   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（可选：可改用系统 PATH 版）

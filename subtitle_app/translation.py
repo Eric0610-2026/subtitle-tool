@@ -18,6 +18,7 @@ from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import cfg
+from .local_service import local_model_name, translation_endpoint
 from .srt_utils import (
     SubtitleBlock, split_sentences, sentence_cache_key,
     load_json, save_json, is_cjk,
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # ── 进程级共享翻译缓存 ──
 # 并行流水线中每个文件会创建独立的 TranslationClient，若各自加载/写回同一
-# cache 文件，后写会覆盖先写的增量（缓存条目丢失、重复扣费）。
+# cache 文件，后写会覆盖先写的增量（缓存条目丢失、重复翻译）。
 # 这里把缓存提升为进程级单例 + 全局锁：所有 client 共享同一份内存 dict，
 # 写盘时串行化，彻底消除互相覆盖。
 _shared_cache_lock = Lock()
@@ -105,7 +106,7 @@ def make_prompt(target_lang: str) -> str:
 
 
 class ApiUnavailableError(RuntimeError):
-    """网络不可达/请求超时等「API 暂时不可用」错误。
+    """本机翻译服务不可达/请求超时等「服务暂时不可用」错误。
 
     与普通失败的区别：拆小批重试无济于事（问题不在批次大小），
     _translate_batch 收到后直接抛出，不进入递归拆分，让上层快速失败。
@@ -118,71 +119,18 @@ class TranslationStopped(RuntimeError):
     pass
 
 
-def _normalize_response(resp: dict) -> dict:
-    """标准化不同厂商 API 响应为 OpenAI 兼容格式。
-
-    处理常见兼容性问题：
-    1. 商汤等：choices/usage 包裹在 data 字段下（非标准 OpenAPI）
-    2. 部分厂商 data 是列表直接包含 choices/结果
-    3. choices[i].message 是字符串而非 {"content": "..."}
-    """
-    resp = dict(resp)  # 不修改原始 dict
-
-    # 0) 检测顶层 error 字段并直接返回（让调用方提取错误消息）
-    if "error" in resp:
-        return resp
-
-    # 1) 当顶层无 choices 但 data 中有时，提升到顶层
-    if "choices" not in resp and "data" in resp:
-        data = resp["data"]
-        if isinstance(data, dict):
-            if "choices" in data:
-                resp["choices"] = data["choices"]
-            if "usage" in data and "usage" not in resp:
-                resp["usage"] = data["usage"]
-            if "id" in data and "id" not in resp:
-                resp["id"] = data["id"]
-        elif isinstance(data, list):
-            # 部分厂商 data 是列表：看列表元素是否包含 message/choices
-            if data and isinstance(data[0], dict):
-                first = data[0]
-                if "message" in first or "content" in first or "text" in first:
-                    # data 本身就是 choices 列表
-                    resp["choices"] = data
-                elif "choices" in first:
-                    resp["choices"] = first["choices"]
-    # 2) 标准化 choices[i].message 为对象格式
-    for choice in resp.get("choices", []):
-        if isinstance(choice, dict):
-            msg = choice.get("message")
-            if isinstance(msg, str):
-                choice["message"] = {"content": msg}
-            # 部分厂商直接把内容放在 choice.text 而非 message.content
-            if "message" not in choice and "text" in choice:
-                choice["message"] = {"content": choice["text"]}
-    return resp
-
-
 def _extract_error(resp: dict) -> str:
-    """从 API 响应中提取错误消息"""
-    # 标准 OpenAI 错误格式：{"error": {"message": "..."}}
+    """从本地翻译服务响应中提取错误消息
+
+    本地 llama-server 遵循标准 OpenAI 错误格式：{"error": {"message": "..."}}。
+    不做多厂商兼容——本项目不存在外部 API。
+    """
     err = resp.get("error")
     if isinstance(err, dict):
         msg = err.get("message", "") or err.get("msg", "") or str(err)
-        if msg:
-            return msg
-    elif isinstance(err, str) and err:
+        return msg or ""
+    if isinstance(err, str):
         return err
-    # 部分国产 API 用 code/message 表示错误
-    code = resp.get("code")
-    msg = resp.get("message", "") or resp.get("msg", "")
-    # code 为 0 或省略表示成功
-    if code is not None and code != 0 and code != "0" and msg:
-        return f"[{code}] {msg}"
-    # 部分 API 把错误放在 detail 字段
-    detail = resp.get("detail")
-    if isinstance(detail, str) and detail:
-        return detail
     return ""
 
 
@@ -190,10 +138,15 @@ def _extract_error(resp: dict) -> str:
 
 
 class TranslationClient:
-    """翻译客户端：句子级缓存 + 批量翻译 + 断点续翻 + 403 fallback"""
+    """翻译客户端：句子级缓存 + 批量翻译 + 断点续翻
 
-    def __init__(self, api_url: str, api_key: str, model: str, cache_path: Path,
-                 post_ui: Callable, batch_size: int = None, target_lang: str = "zh",
+    端点固定为本机 llama-server（local_service.translation_endpoint），
+    构造函数不接受任何地址参数，因此无需 API 密钥与鉴权头，
+    也就不存在把请求发往外部服务器的代码路径。
+    """
+
+    def __init__(self, cache_path: Path, post_ui: Callable,
+                 batch_size: int = None, target_lang: str = "zh",
                  send_all: bool = False):
         if batch_size is None:
             batch_size = cfg.translation.batch_size
@@ -203,9 +156,8 @@ class TranslationClient:
         except (TypeError, ValueError):
             self.batch_size = max(1, int(cfg.translation.batch_size or 20))
         self.send_all = send_all
-        self.api_url = api_url
-        self.api_key = api_key
-        self.model = model
+        self.endpoint = translation_endpoint()   # 固定本机 llama-server，无外部地址
+        self.model = local_model_name()
         self.target_lang = target_lang
         self.system_prompt = make_prompt(target_lang)
         # 进程级共享缓存：并发流水线中所有 client 共享同一内存 dict，
@@ -391,9 +343,7 @@ class TranslationClient:
                         applied_count = future.result(timeout=15)
                         break
                     except (concurrent.futures.TimeoutError, TimeoutError):
-                        is_local = ("127.0.0.1" in self.api_url or "localhost" in self.api_url
-                                    or "::1" in self.api_url)
-                        slow_hint = "本地模型推理中" if is_local else "API 响应较慢"
+                        slow_hint = "本地模型推理中"
                         self.post_ui({
                             "type": "progress",
                             "percent": (completed_count / max(total_batches, 1)) * 100,
@@ -415,13 +365,13 @@ class TranslationClient:
                         self.post_ui({
                             "type": "log",
                             "message": f"连续 {MAX_EMPTY_BATCHES} 批无任何有效译文，"
-                                       f"判定翻译 API 不可用，中止本文件（已完成的批次已保存）",
+                                       f"判定本地翻译服务不可用，中止本文件（已完成的批次已保存）",
                             "level": "ERROR",
                         })
                         self._abort_translation(batch_futures, state_path,
                                                 sent_originals, sent_trans)
                         raise RuntimeError(
-                            f"连续 {MAX_EMPTY_BATCHES} 批无有效译文（API 可能不可用或全部拒译）")
+                            f"连续 {MAX_EMPTY_BATCHES} 批无有效译文（本地服务可能不可用或全部拒译）")
                 else:
                     consecutive_empty = 0
                 if state_path:
@@ -534,8 +484,8 @@ class TranslationClient:
                            sent_originals: Dict[str, str], sent_trans: Dict[int, str]) -> None:
         """中止本轮翻译：落盘断点 + 取消尚未开始的批次（在途批次自然结束）。
 
-        不取消的话，线程池里已提交的剩余批次会继续执行，把 API 费用/时间
-        全部烧完，而结果随后被丢弃。
+        不取消的话，线程池里已提交的剩余批次会继续占用推理算力把时间跑完，
+        而结果随后被丢弃。
         """
         for f, _ in batch_futures:
             f.cancel()
@@ -561,7 +511,7 @@ class TranslationClient:
             "temperature": cfg.translation.temperature,
             "stream": False,
         }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
         try:
             resp_data = self._call_api(payload, headers)
         except ApiUnavailableError:
@@ -616,30 +566,24 @@ class TranslationClient:
 
     def _call_api(self, payload: dict, headers: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.api_url, data=data, headers=headers, method="POST")
+        req = urllib.request.Request(self.endpoint, data=data, headers=headers, method="POST")
         last_err: Optional[Exception] = None
         for attempt in range(1, API_RETRY_COUNT + 1):
             try:
                 with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-                    resp_json = json.loads(resp.read().decode("utf-8"))
-                    return _normalize_response(resp_json)
+                    return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
-                if e.code in (401, 402, 403, 407):
-                    body = e.read().decode("utf-8", errors="replace")
-                    err_detail = body[:200]
-                    # 认证/代理错误重试无意义，直接失败（不进入拆批重试）
-                    raise RuntimeError(f"API 认证错误 (HTTP {e.code}): {err_detail}")
                 body = e.read().decode("utf-8", errors="replace")
                 last_err = RuntimeError(f"HTTP {e.code}: {body[:200]}")
-                logger.warning("API HTTP 错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.code)
+                logger.warning("本地服务 HTTP 错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.code)
             except urllib.error.URLError as e:
-                last_err = ApiUnavailableError(f"网络错误: {e.reason}")
-                logger.warning("API 网络错误 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.reason)
+                last_err = ApiUnavailableError(f"本地服务连接失败: {e.reason}")
+                logger.warning("本地服务连接失败 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e.reason)
             except TimeoutError:
-                last_err = ApiUnavailableError("API 请求超时")
-                logger.warning("API 超时 (尝试 %d/%d)", attempt, API_RETRY_COUNT)
+                last_err = ApiUnavailableError("本地服务请求超时")
+                logger.warning("本地服务超时 (尝试 %d/%d)", attempt, API_RETRY_COUNT)
             except Exception as e:
-                last_err = ApiUnavailableError(f"API 请求失败: {e}")
+                last_err = ApiUnavailableError(f"本地服务请求失败: {e}")
                 logger.warning("API 请求异常 (尝试 %d/%d): %s", attempt, API_RETRY_COUNT, e)
             if attempt < API_RETRY_COUNT:
                 delay = API_RETRY_BASE * (2 ** (attempt - 1))
@@ -658,7 +602,7 @@ class TranslationClient:
             ],
             "temperature": cfg.translation.temperature, "stream": False,
         }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
         try:
             resp_data = self._call_api(payload, headers)
             # 先检测 API 错误
