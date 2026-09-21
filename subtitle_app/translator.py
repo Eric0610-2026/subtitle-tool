@@ -114,6 +114,24 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     if is_stopped and is_stopped():
         return
 
+    if not source_srt.exists():
+        # 源字幕在阶段 1 存在、阶段 2 消失：只可能是同批视频任务内嵌成功后
+        # 清理了该字幕（视频与其外挂字幕同时入队的场景），或文件被外部删除。
+        # 静默跳过并视为已完成，避免 parse_srt 抛 FileNotFoundError 误报"翻译失败"。
+        post({"type": "log",
+              "message": f"跳过：源字幕 {source_srt.name} 不存在（可能已被同批视频任务内嵌后清理）",
+              "level": "WARNING"})
+        post({"type": "progress", "percent": 100, "stage": "跳过",
+              "detail": f"源字幕不存在，跳过: {item.name}", "idx": idx, "total": total})
+        _record_progress(opts["work_dir"], item)
+        bump_translated = opts.get("_bump_translated")
+        if bump_translated:
+            try:
+                bump_translated(0)
+            except Exception as e:
+                logger.warning("上报翻译完成计数失败: %s", e)
+        return
+
     post({"type": "log", "message": f"解析字幕: {source_srt.name}", "level": "INFO"})
     blocks = parse_srt(source_srt)
     sanitize_blocks(blocks)  # 过滤空文本条目
@@ -162,9 +180,9 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         # 本地 llama-server 以 --parallel 1 运行：批次并发固定 1，
         # 多线程并发只会排队等待，还有把请求拖过 API 超时的风险
         send_all = opts.get("send_all", False)
-        _bs = opts.get("translation_batch_size")
-        if _bs is None:
-            _bs = cfg.translation.batch_size or 20
+        # 由 qt_app._build_opts 在任务开始前解析为具体值，不能在这里回读 cfg。
+        # 否则配置保存/重载会让同一任务的后续文件使用不同批大小。
+        _bs = opts.get("translation_batch_size", cfg.translation.batch_size or 20)
         client = TranslationClient(cache_path, post,
                                    batch_size=_bs,
                                    target_lang=opts.get("target_lang", "zh"),
@@ -285,7 +303,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             post({"type": "log", "message": f"原文字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份原文字幕失败: %s", e)
-        _prune_backups(backup_dir, getattr(cfg.translation, "backup_max_files", 50))
+        _prune_backups(backup_dir, opts.get("backup_max_files", 50))
 
     # ── 将翻译后的字幕也统一备份到 srt_backup 文件夹 ──
     # 策略：始终保留 srt_backup 中的副本；工作区临时 SRT 仍可按原规则清理
@@ -302,7 +320,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             post({"type": "log", "message": f"翻译字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)
-        _prune_backups(backup_dir, getattr(cfg.translation, "backup_max_files", 50))
+        _prune_backups(backup_dir, opts.get("backup_max_files", 50))
 
     # ── 嵌入前暂停，供用户预览/编辑 ──
     pause_resp: Optional[PauseResponse] = None

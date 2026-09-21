@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -112,6 +113,28 @@ class ApiUnavailableError(RuntimeError):
     _translate_batch 收到后直接抛出，不进入递归拆分，让上层快速失败。
     """
     pass
+
+
+@contextmanager
+def _executor_scope(max_workers: int):
+    """ThreadPoolExecutor 上下文：异常/停止时立即释放，不等待在途批次。
+
+    默认 `with ThreadPoolExecutor` 的 __exit__ 会 shutdown(wait=True)，
+    等待所有已提交任务跑完——正在执行的批次阻塞在 API 请求
+    （最多 api_timeout=600s）无法中断，用户停止/熔断后 UI 会被拖住。
+    这里改为：正常完成才等待（此时已无在途任务，立即返回）；
+    异常路径 shutdown(wait=False, cancel_futures=True) 立即返回。
+    在途请求无法中断，会在后台自然结束（工作线程非 daemon，但通常
+    本地模型单请求秒级完成；极端超时场景下最多拖到 api_timeout）。
+    """
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield ex
+    except BaseException:
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        ex.shutdown(wait=True)
 
 
 class TranslationStopped(RuntimeError):
@@ -277,7 +300,7 @@ class TranslationClient:
                         lines.append(f"（上文）{ctx}")
             return "\n".join(lines) + "\n" if lines else ""
 
-        with ThreadPoolExecutor(max_workers=translation_concurrency) as executor:
+        with _executor_scope(translation_concurrency) as executor:
             batch_futures: List[tuple] = []
             self.post_ui({
                 "type": "log",

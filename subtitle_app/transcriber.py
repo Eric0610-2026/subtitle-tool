@@ -386,12 +386,24 @@ class Transcriber:
                             creationflags=subprocess.CREATE_NO_WINDOW)
                         if self._register_proc:
                             self._register_proc(trim_proc)
+                        trim_ok = True
                         try:
                             trim_proc.wait(timeout=60)
+                        except subprocess.TimeoutExpired:
+                            # 裁剪超时：终止进程，回退为从头转写。
+                            # 旧实现让 TimeoutExpired 直接向上传播（转写失败），
+                            # 且进程未被 kill 会残留运行，停止时也清理不到它。
+                            trim_proc.kill()
+                            try:
+                                trim_proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                            logger.warning("音频裁剪超时（60s），已终止进程，回退为从头转写")
+                            trim_ok = False
                         finally:
                             if self._unregister_proc:
                                 self._unregister_proc(trim_proc)
-                        if trim_proc.returncode != 0 or not trimmed_path.exists():
+                        if not trim_ok or trim_proc.returncode != 0 or not trimmed_path.exists():
                             logger.warning("音频裁剪失败，回退为从头转写")
                             completed_blocks = []
                             resume_offset = 0.0

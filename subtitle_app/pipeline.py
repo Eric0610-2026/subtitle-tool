@@ -96,6 +96,9 @@ class SubtitleWorker:
 
     def start(self, jobs: List[Path], opts: dict) -> None:
         self.stop_requested = False
+        # 任务配置在启动瞬间冻结。设置界面之后的改动只影响下一次 start，
+        # 避免后台任务在两个文件之间读到不同的配置值。
+        opts = dict(opts)
         self._progress_file = Path(opts["work_dir"]) / IGNORE_FILE
         self.transcriber.attach_proc_handlers(self._register_proc, self._unregister_proc)
         self.transcriber.stop_check = lambda: self.stop_requested

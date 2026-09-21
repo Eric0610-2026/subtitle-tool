@@ -444,6 +444,36 @@ class TestStopAndBreaker(unittest.TestCase):
             # 串行执行时第 3 批完成后即熔断；第 4 批若已被 worker 取走属于在途，最多 4 批
             self.assertLessEqual(len(calls), 4)
 
+    def test_breaker_does_not_wait_for_inflight_batch(self):
+        """熔断/停止后不等待在途批次：死 API 场景下中止应立即返回。
+
+        旧实现 `with ThreadPoolExecutor` 的 __exit__ 会 shutdown(wait=True)，
+        等待在途批次跑完（其阻塞在 API 请求，最多 api_timeout=600s），
+        用户点停止后 UI 会被拖住。修复后异常路径立即释放线程池。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            calls = []
+            release = threading.Event()
+
+            def fake(texts, context="", depth=0):
+                calls.append(list(texts))
+                if len(calls) > 3:
+                    release.wait(10)  # 第 4 批起模拟在途慢请求（无法中断）
+                return [{"id": i + 1, "zh": t} for i, t in enumerate(texts)]
+
+            c._translate_batch = fake
+            start = time.time()
+            try:
+                with self.assertRaises(RuntimeError):
+                    c.translate_blocks(self._blocks(6), "en", True,
+                                       translation_concurrency=1)
+            finally:
+                release.set()  # 放行在途线程，避免测试进程残留
+            elapsed = time.time() - start
+            self.assertLess(elapsed, 5,
+                            "熔断/停止后不应等待在途批次（旧实现会卡到 API 超时）")
+
     def test_network_error_does_not_split(self):
         """网络不可达（ApiUnavailableError）不拆批递归：一次失败即中止"""
         from subtitle_app.translation import ApiUnavailableError

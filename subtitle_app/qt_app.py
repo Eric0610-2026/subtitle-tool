@@ -138,8 +138,9 @@ class SubtitleApp(QMainWindow):
 
     def _save_window_state(self):
         s = load_json(self._settings_path, {})
-        s["window_geometry"] = self.saveGeometry().hex()
-        s["window_state"] = self.saveState().hex()
+        # PySide6 返回 QByteArray；转为 bytes 后再编码，兼容没有 QByteArray.hex 的版本。
+        s["window_geometry"] = bytes(self.saveGeometry()).hex()
+        s["window_state"] = bytes(self.saveState()).hex()
         save_json(self._settings_path, s)
 
     def _make_btn(self, text, cb=None, object_name=None, tooltip=None, stylesheet=None, fixed_size=None):
@@ -158,17 +159,19 @@ class SubtitleApp(QMainWindow):
 
     def _build_header(self, main):
         header = QFrame()
-        header.setFixedHeight(48)
+        header.setFixedHeight(56)
         header.setObjectName("header")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(16, 0, 12, 0)
         title = QLabel("本地字幕生成工具")
-        title.setStyleSheet("color:white; font-size:15px; font-weight:700;")
+        title.setObjectName("appTitle")
         hl.addWidget(title)
+        badge = QLabel("WHISPER · LOCAL AI")
+        badge.setObjectName("headerBadge")
+        hl.addWidget(badge)
         hl.addStretch()
-        ver = QLabel("Whisper + AI 翻译")
-        # 头部两端都是深色（navy→accent 渐变），标签固定浅色保证两种主题下都可读
-        ver.setStyleSheet("color:rgba(255,255,255,0.62); font-size:11px;")
+        ver = QLabel("离线转写 · 本地翻译")
+        ver.setObjectName("headerMeta")
         hl.addWidget(ver)
         hl.addSpacing(8)
         self.theme_btn = QPushButton()
@@ -256,7 +259,10 @@ class SubtitleApp(QMainWindow):
         bl.setSpacing(8)
 
         # ── 路径行 + 翻译开关 + 更多设置 ──
-        pr = QHBoxLayout()
+        workspace_bar = QFrame()
+        workspace_bar.setObjectName("workspaceBar")
+        pr = QHBoxLayout(workspace_bar)
+        pr.setContentsMargins(12, 8, 12, 8)
         pr.setSpacing(6)
         pr.addWidget(QLabel("视频目录"))
         self.video_dir = QLineEdit()
@@ -269,7 +275,7 @@ class SubtitleApp(QMainWindow):
         self.trans_cb.setChecked(True)
         pr.addWidget(self.trans_cb)
         pr.addWidget(self._make_btn("⚙ 更多设置", self._open_settings, object_name="accentBtn"))
-        bl.addLayout(pr)
+        bl.addWidget(workspace_bar)
 
         # ── 田字型主体：左上文件、右上预览、左下进度、右下日志 ──
         grid = QGridLayout()
@@ -291,8 +297,10 @@ class SubtitleApp(QMainWindow):
         main.addWidget(body, 1)
 
         # ── 操作按钮 ──
-        ar = QHBoxLayout()
-        ar.setContentsMargins(16, 6, 16, 10)
+        action_bar = QFrame()
+        action_bar.setObjectName("actionBar")
+        ar = QHBoxLayout(action_bar)
+        ar.setContentsMargins(16, 9, 16, 9)
         ar.setSpacing(8)
         self.start_btn = self._make_btn("▶ 开始处理", self._start, object_name="startBtn")
         ar.addWidget(self.start_btn)
@@ -318,7 +326,7 @@ class SubtitleApp(QMainWindow):
         ar.addWidget(self._make_btn("📤 提取字幕", self._manual_extract, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 导出", self._export_log, object_name="bottomBtn"))
         ar.addStretch()
-        main.addLayout(ar)
+        main.addWidget(action_bar)
 
     # ─── 样式 ───
 
@@ -365,7 +373,7 @@ class SubtitleApp(QMainWindow):
         elif result == 2:
             self.settings_data = dlg.get_values()
             self._save_settings_permanently(dlg.get_values())
-            self._add_log_entry("设置已保存到 config.json（永久生效）")
+            self._add_log_entry("设置已保存到 config.json（下次启动作为默认值；本次设置已应用）")
             self._update_model_status()
 
     def _save_settings_permanently(self, values: dict):
@@ -399,9 +407,9 @@ class SubtitleApp(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, "保存失败", f"写入 config.json 失败：{e}")
             return
-        # 仅刷新运行期动态读取的配置（batch_size、并发数等）；各模块 import 时
-        # 固化的模块级常量（API 超时、扩展名表、主题色等）需重启应用才生效
-        cfg.reload()
+        # 不在运行中 reload cfg：模块级启动配置与正在执行的任务都保持稳定。
+        # values 已写入 self.settings_data，新启动的任务会在 _build_opts 中取得快照；
+        # config.json 则在下次启动时成为界面默认值。
 
 
     def _add_files(self, is_video: bool):
@@ -693,6 +701,11 @@ class SubtitleApp(QMainWindow):
 
     def _build_opts(self, skip_completed=False):
         s = self.settings_data
+        # 所有设置界面可修改的任务参数均在这里解析为具体值，随后由 worker
+        # 冻结。不要在后台阶段回读 cfg，否则同一任务可能出现配置不一致。
+        batch_size = s.get("translation_batch_size")
+        if batch_size is None:
+            batch_size = cfg.translation.batch_size
         return {
             "work_dir": self.work_dir,
             "model_dir": s.get("model_dir", ""),
@@ -705,9 +718,10 @@ class SubtitleApp(QMainWindow):
             "vad_filter": s.get("vad_filter", True),
             "reuse_auto_lang": s.get("reuse_auto_lang", True),
             "translation_only": s.get("translation_only", False),
-            "translation_batch_size": s.get("translation_batch_size"),
+            "translation_batch_size": batch_size,
             "send_all": s.get("send_all", False),
             "pause_before_embed": s.get("pause_before_embed", False),
+            "backup_max_files": s.get("backup_max_files", 50),
             "skip_completed": skip_completed,
             "post": self.signal_bridge.post,
             "_is_stopped": lambda: self.worker.stop_requested,

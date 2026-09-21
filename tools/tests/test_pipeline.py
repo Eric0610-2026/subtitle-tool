@@ -86,6 +86,21 @@ class TestStartAndStop(unittest.TestCase):
         except Exception:
             self.fail("stop() on unstarted worker raised exception")
 
+    @patch("subtitle_app.pipeline.threading.Thread")
+    def test_start_freezes_task_options(self, MockThread):
+        """设置变动只能影响下一次任务，不能修改已提交给 worker 的参数。"""
+        thread = MockThread.return_value
+        w = SubtitleWorker()
+        options = {"work_dir": "/tmp", "post": MagicMock(), "backup_max_files": 7}
+
+        w.start([Path("test.mp4")], options)
+
+        submitted_options = MockThread.call_args.kwargs["args"][1]
+        options["backup_max_files"] = 99
+        self.assertEqual(submitted_options["backup_max_files"], 7)
+        self.assertIsNot(submitted_options, options)
+        thread.start.assert_called_once()
+
 
 class TestIdxPost(unittest.TestCase):
     """_idx_post 包装器"""

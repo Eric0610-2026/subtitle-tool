@@ -13,14 +13,14 @@ AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心
 ## 测试
 
 ```powershell
-python -m unittest discover -s tools/tests      # 全部（173 例）
+python -m unittest discover -s tools/tests      # 全部（141 例）
 python -m unittest tools.tests.test_translator   # 单文件
 python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 单用例
 ```
 
 - 框架：`unittest`（无 pytest）；无需网络或模型，API 调用用 `unittest.mock`
-- 8 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
-  test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service
+- 9 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
+  test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service / test_dialogs
 - 改完必须跑全量：`python -m unittest discover -s tools/tests`
 
 ## 模块清单（subtitle_app/）
@@ -68,7 +68,9 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   （translator 静默返回，不算失败）；网络类错误抛 `ApiUnavailableError` 不拆批；
   连续 `MAX_EMPTY_BATCHES`(3) 空批判定 API 不可用中止本文件；补翻连续 20 句无进展放弃；
   异常/停止时 `_abort_translation` 落盘断点并取消未开始的批次。
-- **批大小**：读 `cfg.translation.batch_size`；永久保存时自定义值写回该字段。
+- **任务配置快照**：`qt_app._build_opts` 将设置对话框中可修改的任务参数（含批大小、
+  备份份数）解析为具体值；`SubtitleWorker.start` 随即复制并冻结该 dict。后台阶段不得
+  回读 `cfg` 覆盖这些值，设置改动只影响下一次启动的任务。
 - **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；
   `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
   replace 冲突做短暂重试。
@@ -87,7 +89,9 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 ## 配置与安全
 
 - 配置在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）；改模板应改 example
-- 改配置后需重启应用（`cfg` 导入时固化）
+- **配置生效规则**：点击「本次有效」会更新当前会话，之后新启动的任务使用该设置；点击
+  「永久保存（下次默认）」还会写入 `config.json`，供下次启动作为默认值。正在运行的任务
+  永不改变；不要在常规 UI 流程调用 `cfg.reload()`。直接编辑 `config.json` 后请重启应用。
 - **翻译为纯本地方案，不存在联网 API 能力**：翻译端点由
   `local_service.translation_endpoint()` 单点定义（`127.0.0.1:8188`），
   `TranslationClient` 不接受地址/密钥参数，配置中也没有 `api_url`/`api_key` 字段。

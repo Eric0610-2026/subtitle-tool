@@ -68,11 +68,13 @@ class Config:
     def reload(self) -> None:
         """重新读取配置文件。
 
-        范围有限：只影响运行期通过 `cfg.xxx` 动态读取的配置
-        （如 batch_size、backup_max_files）。
-        各模块 import 时固化的模块级常量（translation.API_TIMEOUT、
-        srt_utils.VIDEO_EXTS、transcriber._MODEL_SPEED、theme 配色等）
-        不会刷新——这些字段完整生效需重启应用。
+        仅供显式的维护/测试操作使用。常规设置流程不调用本方法：
+        config.json 是下次启动时的默认值来源，当前会话的设置由 UI 保存，
+        每个任务在启动时再冻结为独立快照。
+
+        即使调用本方法，已在模块导入时固化的常量（translation.API_TIMEOUT、
+        srt_utils.VIDEO_EXTS、transcriber._MODEL_SPEED、theme 配色等）仍不会更新，
+        因此完整生效仍应重启应用。
         """
         self._data = self._load()
 

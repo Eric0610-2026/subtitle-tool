@@ -179,10 +179,12 @@ def build_qss(colors: dict, is_dark: bool) -> str:
     """根据配色与明暗模式生成全局 QSS 样式表"""
     c = colors
     check_png = checkmark_png()
-    border_radius = "border-radius:8px;"
+    border_radius = "border-radius:10px;"
+    panel_radius = "border-radius:14px;"
     alt_bg = "#1c1f33" if is_dark else "#f8fafc"
-    sel_bg = "#2f3554" if is_dark else "#e0e7ff"
-    hover_bg = "#232741" if is_dark else "#eef2ff"
+    sel_bg = "#353c62" if is_dark else "#e0e7ff"
+    hover_bg = "#272c49" if is_dark else "#eef2ff"
+    surface_alt = "#20243a" if is_dark else "#f8fafc"
     theme_key = "dark" if is_dark else "light"
     arrow = _arrow_png(theme_key, c['text_muted'])
     # 头部渐变中间色：让右侧过渡更柔和，避免 accent 在标题区形成生硬色块
@@ -197,8 +199,16 @@ def build_qss(colors: dict, is_dark: bool) -> str:
                 stop:0 {c['header']}, stop:0.55 {c['header']},
                 stop:0.85 {header_mid}, stop:1 {c['accent']});
             border: none;
-            border-bottom: 1px solid {c['border']};
+            border-bottom: 1px solid rgba(255,255,255,0.12);
         }}
+        QLabel#appTitle {{ color:white; font-size:17px; font-weight:700; letter-spacing:0.2px; }}
+        QLabel#headerBadge {{
+            color:rgba(255,255,255,0.78); background:rgba(255,255,255,0.12);
+            border:1px solid rgba(255,255,255,0.16); border-radius:8px;
+            min-height:15px; max-height:15px; padding:2px 7px;
+            font-size:9px; font-weight:700; letter-spacing:0.7px;
+        }}
+        QLabel#headerMeta {{ color:rgba(255,255,255,0.68); font-size:11px; }}
         QToolTip {{
             background: {c['header']}; color: {c['text']};
             border: 1px solid {c['accent']}; border-radius: 4px;
@@ -228,16 +238,25 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             padding: 5px 8px; font-size: 11px; font-weight: 600;
         }}
         QTableCornerButton::section {{ background: transparent; border: none; }}
-        QFrame#card {{ background: {c['card']}; {border_radius} border:1px solid {c['border']}; }}
+        QFrame#card {{ background: {c['card']}; {panel_radius} border:1px solid {c['border']}; }}
         QFrame#filePanel, QFrame#previewPanel, QFrame#logPanel {{
-            background: {c['card']}; {border_radius}
+            background: {c['card']}; {panel_radius}
             border:1px solid {c['border']};
         }}
-        QFrame#progressPanel {{ background:{c['card']}; {border_radius} border:1px solid {c['border']}; }}
+        QFrame#progressPanel {{ background:{c['card']}; {panel_radius} border:1px solid {c['border']}; }}
+        QFrame#workspaceBar {{
+            background:{surface_alt}; {panel_radius} border:1px solid {c['border']};
+        }}
+        QFrame#actionBar {{
+            background:{c['card']}; border-top:1px solid {c['border']};
+        }}
+        QLabel#panelTitle {{
+            color:{c['text']}; font-size:13px; font-weight:700; padding:2px 0;
+        }}
         QGroupBox {{
             background: {c['card']}; {border_radius}
             border:1px solid {c['border']};
-            margin-top:8px; padding:8px 8px 8px 8px;
+            margin-top:10px; padding:10px 10px 8px 10px;
             font-weight:600; color:{c['accent']};
         }}
         QGroupBox::title {{
@@ -246,7 +265,7 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         }}
         QLineEdit, QComboBox, QTextEdit, QListWidget, QAbstractSpinBox {{
             background:{c['card']}; color:{c['text']};
-            border:1px solid {c['border']}; {border_radius} padding:7px 9px;
+            border:1px solid {c['border']}; {border_radius} padding:8px 10px;
             selection-background-color:{c['accent']}; selection-color:white;
         }}
         QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QListWidget:focus,
@@ -301,20 +320,20 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QPushButton {{
             background:{c['card']}; color:{c['text']};
             border:1px solid {c['border']}; {border_radius}
-            padding:7px 14px; font-weight:500;
+            padding:8px 14px; font-weight:600;
         }}
         QPushButton:hover {{ background:{c['border']}; border-color:{c['accent']}; }}
         QPushButton:pressed {{ padding-top:8px; padding-bottom:6px; }}
         QPushButton:disabled {{ color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']}; }}
         QPushButton:focus {{ border-color:{c['accent']}; }}
         QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:600; }}
-        QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
+        QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; border-radius:10px; font-weight:bold; padding:11px 24px; font-size:13px; }}
         QPushButton#startBtn:hover {{ background:#16a34a; }}
         QPushButton#startBtn:disabled {{ background:{c['text_muted']}; }}
-        QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; font-weight:bold; padding:10px 22px; font-size:13px; }}
+        QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; border-radius:10px; font-weight:bold; padding:11px 24px; font-size:13px; }}
         QPushButton#stopBtn:hover {{ background:#dc2626; }}
         QPushButton#stopBtn:disabled {{ background:{c['text_muted']}; }}
-        QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; padding:8px 16px; font-weight:600; }}
+        QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; border-radius:10px; padding:9px 16px; font-weight:700; }}
         QPushButton#accentBtn:hover {{ background:#4f46e5; }}
         QPushButton#actionBtn {{ padding:6px 11px; font-size:12px; }}
         QProgressBar {{
@@ -328,12 +347,12 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QTabWidget::pane {{ background:{c['card']}; border:none; }}
         QTabBar::tab {{
             background:{c['bg']}; color:{c['text_sec']};
-            padding:9px 18px; margin-right:3px;
+            padding:10px 18px; margin-right:4px;
             border:1px solid transparent; border-bottom:none;
             border-top-left-radius:8px; border-top-right-radius:8px;
         }}
         QTabBar::tab:hover {{ color:{c['accent']}; }}
-        QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
+        QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:700; }}
         QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; background:transparent; }}
         QCheckBox::indicator {{
             width:16px; height:16px;

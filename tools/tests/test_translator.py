@@ -122,6 +122,24 @@ class TestTranslateOnlyPassthrough(unittest.TestCase):
             self.assertEqual(len(previews), 1)
             self.assertIn("Hello world", previews[0]["message"])
 
+    @patch("subtitle_app.translator._prune_backups")
+    def test_backup_retention_uses_task_snapshot(self, prune_backups):
+        """备份份数来自任务参数，而非运行中可变化的全局配置。"""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            srt_path = _make_srt(d / "test.srt")
+            item = d / "test.mp3"
+            item.write_text("dummy")
+
+            from subtitle_app.translator import translate_only
+            translate_only(srt_path, d, item, 0, 1, {
+                "work_dir": str(d), "language": "en", "translate_enabled": False,
+                "backup_max_files": 7,
+            }, lambda event: None)
+
+            self.assertEqual(prune_backups.call_count, 2)
+            self.assertTrue(all(call.args[1] == 7 for call in prune_backups.call_args_list))
+
 
 class TestTranslateOnlyWithTranslation(unittest.TestCase):
     """translate_only 翻译路径"""
@@ -488,6 +506,34 @@ class TestTranslateOnlyNonVideo(unittest.TestCase):
             data = load_json(d / IGNORE_FILE, {})
             self.assertEqual(len(data.get("done", [])), len(items),
                              "并发写进度文件丢失了条目")
+
+
+class TestTranslateOnlyMissingSource(unittest.TestCase):
+    """源字幕不存在（如被同批视频任务内嵌后清理）→ 静默跳过，不报翻译失败"""
+
+    def test_missing_source_srt_skips(self):
+        from subtitle_app.translator import translate_only
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            missing = d / "gone.srt"  # 不创建该文件：模拟已被同批视频任务清理
+            item = d / "gone.mp4"
+            item.write_text("dummy")
+            bumped = []
+            opts = {"work_dir": str(d), "language": "en", "translate_enabled": True,
+                    "_is_stopped": lambda: False,
+                    "_bump_translated": lambda cache: bumped.append(cache)}
+            posts = []
+            translate_only(missing, d, item, 0, 1, opts, posts.append)
+            # 不发 error，有跳过 WARNING 日志
+            types = [p["type"] for p in posts]
+            self.assertNotIn("error", types)
+            warns = [p for p in posts
+                     if p["type"] == "log" and p.get("level") == "WARNING"]
+            self.assertTrue(warns, "应记录跳过原因")
+            # 视为已完成：bump 翻译计数 + 记录进度，避免下次反复尝试
+            self.assertEqual(bumped, [0])
+            progress_file = d / "cache" / ".subtitle_ignore.json"
+            self.assertTrue(progress_file.exists(), "跳过也应记录进度")
 
 
 class TestPreviewTranslation(unittest.TestCase):

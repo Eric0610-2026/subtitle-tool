@@ -117,7 +117,7 @@ python subtitle_app/subtitle_app.py
 
 所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）。
 
-**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、目标语言、语言检测复用、字幕备份份数等，点击「💾 永久保存」自动写回 `config.json`（点击「💾 本次有效」则仅对当前会话生效）。多数修改无需重启；若需回退，直接删除 `config.json` 即可恢复默认。
+**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、目标语言、语言检测复用、字幕备份份数等。点击「💾 本次有效」会应用到当前会话随后启动的任务；点击「💾 永久保存（下次默认）」还会写回 `config.json`，供下次启动时读取。已开始的任务始终使用启动时的设置快照；手动编辑 `config.json` 后请重启应用。若需回退，直接删除 `config.json` 即可恢复默认。
 
 ### 核心配置项
 
