@@ -42,6 +42,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 | `muxer.py` | MKV 软内嵌、从视频提取内嵌字幕、转 MP4（ffprobe 探测 + ffmpeg，时长验证后删除原文件；MP4 源带内嵌字幕时去字幕重封装替换原文件） |
 | `local_service.py` | 本地 Hy-MT2 llama-server 自动拉起/探测/退出清理（端口 `_PORT=8188`，不用 8080 是因为它常被 Hyper-V/WSL 动态预留；`service_url_prefix()` 供各模块识别"本地服务 URL"；启动日志落盘 `cache/.llama-server.log`，启动失败时读日志尾部给出真实原因，如端口被 Windows 预留时提示 netsh 修复命令） |
 | `config.py` | 读取 config.json → `SimpleNamespace` 单例 `cfg` |
+| `handoff.py` | 仅监听 `127.0.0.1:49732` 的下载器导入协议，校验请求格式 |
 
 ## 架构要点
 
@@ -82,6 +83,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   文件级并发下文件序号≠完成数，禁止再用 idx 当累计值）。
 - **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突，大小写不敏感）→ 报错中止；
   `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
+- **下载器联动**：`qt_app` 通过 `QTcpServer` 只监听回环地址；收到媒体路径后仅接受现存的支持格式，加入视频队列、自动跳过重复/已处理项并激活现有窗口，绝不自动开始处理。
 - **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
 - **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
   只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。

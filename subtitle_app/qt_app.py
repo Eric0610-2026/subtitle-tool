@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMenu, QDialog, QGridLayout,
 )
 from PySide6.QtGui import QColor, QFontMetrics
+from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
@@ -35,6 +36,7 @@ from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
 from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_double_input
 from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
 from .notifier import notify as system_notify
+from .handoff import HANDOFF_PORT, decode_handoff_request, encode_handoff_response
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
@@ -110,6 +112,7 @@ class SubtitleApp(QMainWindow):
         }
         self._build_ui()
         self._apply_style()
+        self._start_handoff_server()
         self._model_status_refreshed = False
         self._update_model_status()  # 初始化「当前模型」标签
 
@@ -121,6 +124,82 @@ class SubtitleApp(QMainWindow):
 
         # 启动检查
         QTimer.singleShot(500, self._run_startup_checks)
+
+    # ─── 下载器导入 ──────────────────────────────────────────────────────
+
+    def _start_handoff_server(self) -> None:
+        """监听本机下载器的媒体导入请求，不对局域网开放端口。"""
+        self._handoff_server = QTcpServer(self)
+        self._handoff_buffers: Dict[QTcpSocket, bytes] = {}
+        if not self._handoff_server.listen(QHostAddress.LocalHost, HANDOFF_PORT):
+            logger.warning("下载器导入服务启动失败（端口 %s）：%s",
+                           HANDOFF_PORT, self._handoff_server.errorString())
+            return
+        self._handoff_server.newConnection.connect(self._accept_handoff_connection)
+        logger.info("下载器导入服务已监听 127.0.0.1:%s", HANDOFF_PORT)
+
+    def _accept_handoff_connection(self) -> None:
+        while self._handoff_server.hasPendingConnections():
+            sock = self._handoff_server.nextPendingConnection()
+            self._handoff_buffers[sock] = b""
+            sock.readyRead.connect(lambda sock=sock: self._read_handoff_request(sock))
+            sock.disconnected.connect(lambda sock=sock: self._close_handoff_connection(sock))
+
+    def _close_handoff_connection(self, sock: QTcpSocket) -> None:
+        self._handoff_buffers.pop(sock, None)
+        sock.deleteLater()
+
+    def _read_handoff_request(self, sock: QTcpSocket) -> None:
+        data = self._handoff_buffers.get(sock, b"") + bytes(sock.readAll())
+        if len(data) > 64 * 1024:
+            self._reply_handoff(sock, False, error="请求过大")
+            return
+        if b"\n" not in data:
+            self._handoff_buffers[sock] = data
+            return
+        raw, _, _ = data.partition(b"\n")
+        self._handoff_buffers.pop(sock, None)
+        paths, error = decode_handoff_request(raw)
+        if error:
+            self._reply_handoff(sock, False, error=error)
+            return
+
+        allowed_exts = SCAN_VIDEO_EXTS | AUDIO_EXTS
+        media_paths = []
+        invalid = 0
+        for raw_path in paths:
+            path = Path(raw_path)
+            if (not path.is_absolute() or not path.is_file()
+                    or path.suffix.lower() not in allowed_exts):
+                invalid += 1
+                continue
+            media_paths.append(path)
+        if not media_paths:
+            self._reply_handoff(sock, False, error="没有可导入的视频或音频文件")
+            return
+
+        before = len(self.video_jobs)
+        self._add_paths(media_paths, is_video=True)
+        added = len(self.video_jobs) - before
+        skipped = len(media_paths) - added
+        self._activate_for_handoff()
+        self._add_log_entry(
+            f"下载器导入：新增 {added} 个，跳过 {skipped} 个"
+            + (f"，无效 {invalid} 个" if invalid else "")
+        )
+        self._reply_handoff(sock, True, added=added, skipped=skipped, invalid=invalid)
+
+    def _reply_handoff(self, sock: QTcpSocket, ok: bool, **extra) -> None:
+        sock.write(encode_handoff_response(ok, **extra))
+        sock.flush()
+        sock.disconnectFromHost()
+
+    def _activate_for_handoff(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     # ─── 构建 UI ───
 
