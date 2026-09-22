@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 VIDEO_EXTS = set(cfg.srt.video_exts)
 AUDIO_EXTS = set(getattr(cfg.srt, "audio_exts", []))
 SUB_EXTS = set(cfg.srt.sub_exts)
-INPUT_EXTS = VIDEO_EXTS | AUDIO_EXTS | SUB_EXTS
 MAX_FILENAME_STEM = cfg.srt.max_filename_stem
 
 _ABBREVIATIONS = set(cfg.srt.abbreviations)

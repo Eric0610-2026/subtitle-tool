@@ -10,7 +10,6 @@ import logging
 import subprocess
 import threading
 import traceback
-import weakref
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 

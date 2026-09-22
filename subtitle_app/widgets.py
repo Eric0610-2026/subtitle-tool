@@ -22,11 +22,6 @@ logger = logging.getLogger(__name__)
 SCAN_VIDEO_EXTS = set(cfg.srt.video_exts) - set(cfg.app.scan_skip_exts)
 AUDIO_EXTS = set(getattr(cfg.srt, "audio_exts", []))
 
-
-def is_audio_file(p: Path) -> bool:
-    return p.suffix.lower() in AUDIO_EXTS
-
-
 class DropListWidget(QListWidget):
     """支持拖放添加文件 + 内部拖放排序的列表控件"""
     dropped = Signal(list, bool)  # paths, is_video（外部拖入文件）

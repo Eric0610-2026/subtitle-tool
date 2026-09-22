@@ -9,8 +9,8 @@ start-local-model.bat。启动参数与 start-local-model.bat 保持一致。
 
 关键点：
 - 幂等：同一进程内只有第一个调用者负责拉起服务，其余并发调用等待就绪即返回。
-- 生命周期：只在翻译阶段才拉起（ensure_running）；应用退出时 shutdown_owned 关本会话
-  拉起的服务 + shutdown_running 按端口清理残留（用户承诺仅在应用内使用，退出即全部关闭）。
+- 生命周期：只在翻译阶段才拉起（ensure_running）；应用退出时 shutdown_owned 仅关闭本会话
+  拉起的服务，避免影响用户手动启动的其他 llama-server。
 - 失败可诊断：llama-server 的 stdout/stderr 落盘 cache/.llama-server.log，
   进程异常退出时读取日志尾部附在错误信息里（如端口被 Windows 预留导致 bind 失败）。
 """
@@ -45,15 +45,6 @@ _started_by_us = False                           # 本进程曾发起启动
 _ready_announced = False                         # 是否已向 UI 反馈过一次「就绪」
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def project_root() -> Path:
-    """项目根目录（start-local-model.bat 与 models/tools 的基准目录）"""
-    return _PROJECT_ROOT
-
-
-def server_bin() -> Path:
-    return _SERVER
 
 
 def service_url_prefix() -> str:
@@ -260,35 +251,6 @@ def is_service_running() -> bool:
     return _probe()
 
 
-def _listening_pids(timeout: float = 3.0) -> set:
-    """netstat 定位 127.0.0.1 服务端口上处于 LISTENING 的 pid（TCP 层判断，不依赖 /health 响应）"""
-    out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                         capture_output=True, text=True, timeout=timeout)
-    pids = set()
-    for line in out.stdout.splitlines():
-        if f"{_HOST}:{_PORT}" in line and "LISTENING" in line:
-            parts = line.split()
-            if parts:
-                pids.add(parts[-1])
-    return pids
-
-
-def _llama_server_pids(timeout: float = 3.0) -> set:
-    """tasklist 定位进程名为 llama-server.exe 的所有 pid（CSV 输出，兼容带逗号的列）"""
-    out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq llama-server.exe", "/FO", "CSV", "/NH"],
-        capture_output=True, text=True, timeout=timeout)
-    pids = set()
-    for line in out.stdout.splitlines():
-        line = line.strip()
-        if not line or not line.startswith('"'):
-            continue
-        cols = line.strip('"').split('","')
-        if len(cols) >= 2 and cols[1].strip().isdigit():
-            pids.add(cols[1].strip())
-    return pids
-
-
 def shutdown_owned() -> None:
     """关闭本会话拉起的 llama-server；terminate 无效时 taskkill 兜底，避免残留"""
     global _owned_proc, _started_by_us
@@ -307,30 +269,3 @@ def shutdown_owned() -> None:
                 logger.warning("强制结束 llama-server %s 失败: %s", proc.pid, e)
     _owned_proc = None
     _started_by_us = False
-
-
-def shutdown_running() -> bool:
-    """按端口关闭 127.0.0.1 服务端口上仍运行的 llama-server（无论由谁启动）。
-
-    只清理进程名为 llama-server.exe 的监听者：其他程序占用本端口不碰，
-    避免误杀用户的其他服务。仍以 netstat 的 TCP 监听状态定位 pid，
-    不依赖 /health 探测（服务半死/忙时 health 可能挂起导致漏杀与 UI 卡顿）。
-    """
-    try:
-        if not _port_listening(0.3):  # TCP connect 快速判断（无监听超快返回），避免无服务时也跑 netstat
-            return False
-        pids = _listening_pids() & _llama_server_pids()
-        if not pids:
-            return False  # 本端口上没有 llama-server 监听，无需清理
-        killed = False
-        for pid in pids:
-            try:
-                subprocess.run(["taskkill", "/F", "/PID", pid],
-                               capture_output=True, text=True, timeout=3)
-                killed = True
-            except Exception as e:
-                logger.warning("结束 llama-server 进程 %s 失败: %s", pid, e)
-        return killed
-    except Exception as e:
-        logger.warning("清理本地翻译服务失败: %s", e)
-        return False
