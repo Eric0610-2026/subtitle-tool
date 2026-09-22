@@ -486,7 +486,7 @@ class SubtitleApp(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, "保存失败", f"写入 config.json 失败：{e}")
             return
-        # 不在运行中 reload cfg：模块级启动配置与正在执行的任务都保持稳定。
+        # 不在运行中重载配置：模块级启动配置与正在执行的任务都保持稳定。
         # values 已写入 self.settings_data，新启动的任务会在 _build_opts 中取得快照；
         # config.json 则在下次启动时成为界面默认值。
 

@@ -93,7 +93,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 - 配置在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）；改模板应改 example
 - **配置生效规则**：点击「本次有效」会更新当前会话，之后新启动的任务使用该设置；点击
   「永久保存（下次默认）」还会写入 `config.json`，供下次启动作为默认值。正在运行的任务
-  永不改变；不要在常规 UI 流程调用 `cfg.reload()`。直接编辑 `config.json` 后请重启应用。
+  永不改变；直接编辑 `config.json` 后请重启应用。
 - **翻译为纯本地方案，不存在联网 API 能力**：翻译端点由
   `local_service.translation_endpoint()` 单点定义（`127.0.0.1:8188`），
   `TranslationClient` 不接受地址/密钥参数，配置中也没有 `api_url`/`api_key` 字段。

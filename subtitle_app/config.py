@@ -65,24 +65,8 @@ class Config:
                 pass  # example 自身读不了就按原配置加载，不因补默认值而阻断启动
         return _dict_to_ns(raw)
 
-    def reload(self) -> None:
-        """重新读取配置文件。
-
-        仅供显式的维护/测试操作使用。常规设置流程不调用本方法：
-        config.json 是下次启动时的默认值来源，当前会话的设置由 UI 保存，
-        每个任务在启动时再冻结为独立快照。
-
-        即使调用本方法，已在模块导入时固化的常量（translation.API_TIMEOUT、
-        srt_utils.VIDEO_EXTS、transcriber._MODEL_SPEED、theme 配色等）仍不会更新，
-        因此完整生效仍应重启应用。
-        """
-        self._data = self._load()
-
     def __getattr__(self, name: str) -> Any:
         return getattr(self._data, name)
-
-    def get_dict(self) -> dict:
-        return json.loads(self._path.read_text(encoding="utf-8"))
 
 
 cfg = Config()
