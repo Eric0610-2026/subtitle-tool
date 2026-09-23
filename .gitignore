@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
 
 # 大模型文件（GGUF / Whisper 权重）
 models/

@@ -5,6 +5,7 @@
 """
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 
 _APP_DIR = Path(__file__).resolve().parent.parent
@@ -19,12 +20,17 @@ def _msgbox(title, text):
 
 
 def _ensure_deps() -> bool:
-    if _MARKER.exists():
-        return True
     req = _APP_DIR / "tools" / "requirements.txt"
     if not req.exists():
         _msgbox("错误", f"未找到 {req}")
         return False
+    # 绑定依赖清单及解释器路径/版本。旧版空标记或环境变化后重新安装。
+    fingerprint = hashlib.sha256(
+        req.read_bytes() + b"\0" + str(Path(sys.executable).resolve()).encode("utf-8")
+        + b"\0" + sys.version.encode("utf-8")
+    ).hexdigest()
+    if _MARKER.exists() and _MARKER.read_text(encoding="utf-8").strip() == fingerprint:
+        return True
     python = sys.executable.replace("pythonw.exe", "python.exe")
     try:
         proc = subprocess.run(
@@ -37,7 +43,8 @@ def _ensure_deps() -> bool:
     if proc.returncode != 0:
         _msgbox("依赖安装失败", proc.stderr[:500])
         return False
-    _MARKER.touch()
+    _MARKER.parent.mkdir(parents=True, exist_ok=True)
+    _MARKER.write_text(fingerprint, encoding="utf-8")
     return True
 
 
