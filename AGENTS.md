@@ -7,7 +7,7 @@ AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心
 
 - 入口：`subtitle_app/subtitle_app.py` → `subtitle_app.qt_app.main()`
 - 运行：双击 `字幕工具.lnk` 或 `python subtitle_app/subtitle_app.py`
-- `subtitle_app.py` 首次运行自动 `pip install -r tools/requirements.txt`（超时 300s），成功则创建 `cache/.deps_installed` 标记
+- `subtitle_app.py` 首次运行自动 `pip install -r tools/requirements.txt`（超时 300s）；`cache/.deps_installed` 保存依赖清单与解释器路径/版本的指纹，变更时重新安装（旧版空标记也会失效）
 - 仅 Windows：ffmpeg/ffprobe 查找顺序 = 应用目录 → `tools/` → 系统 PATH（`srt_utils.find_tool`）
 
 ## 测试
