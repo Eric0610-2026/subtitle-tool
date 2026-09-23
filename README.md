@@ -47,13 +47,16 @@ cd subtitle-tool
 
 ### 2️⃣ 安装依赖
 
-```bash
-# 如需 GPU 加速，先安装 CUDA 版 PyTorch（可选，强烈推荐）
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+建议在新电脑上创建独立环境（Windows PowerShell）：
 
-# 安装全部依赖
-pip install -r tools/requirements.txt
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r tools/requirements.txt
 ```
+
+如需 NVIDIA GPU 加速，先按 [PyTorch 安装页面](https://pytorch.org/get-started/locally/) 选择适合本机驱动的 CUDA 构建，用 `.\.venv\Scripts\python.exe -m pip` 安装，再执行上方的依赖清单命令。运行 `.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"` 验证；输出 `False` 时检查驱动和 PyTorch 构建。纯 CPU 运行时，将 `subtitle_app/config.json` 中的 `whisper.device` 设为 `cpu`，`whisper.compute_type` 设为 `int8`。
+
+也可跳过手动安装：入口首次运行会尝试联网安装依赖；失败时弹出错误信息，可在终端运行上述安装命令。以后依赖清单或 Python 环境改变时，入口会重新执行安装。
 
 ### 3️⃣ 准备 ffmpeg（必需）
 
@@ -61,7 +64,7 @@ pip install -r tools/requirements.txt
 
 **方式一：使用系统已安装的 ffmpeg（推荐）**
 
-如果电脑已安装 ffmpeg（含 ffprobe）并已加入 PATH（命令行执行 `ffmpeg -version` 有输出即满足），无需任何额外操作。
+如果电脑已安装 ffmpeg（含 ffprobe）并已加入 PATH（命令行执行 `ffmpeg -version` 和 `ffprobe -version` 均有输出即满足），无需任何额外操作。
 
 **方式二：放入 `tools/` 目录**
 
@@ -73,15 +76,22 @@ pip install -r tools/requirements.txt
 
 项目已预置模型路径配置，放入即可使用。
 
-### 5️⃣ 启动应用
+### 5️⃣ 准备本地翻译（使用双语字幕时必需）
 
-```bash
-python subtitle_app/subtitle_app.py
+Git 仓库**不包含** llama.cpp 可执行文件和 Hy-MT2 模型。将 Windows 版 `llama-server.exe` 放在 `tools/llama-cpp/llama-server.exe`；将兼容 llama.cpp 的 Hy-MT2 GGUF 模型放在 `models/hy-mt2/` 下（至少一个 `*.gguf`，建议只放当前使用的一个）。可以从旧电脑复制这两个目录，或分别从 [llama.cpp 发布页](https://github.com/ggml-org/llama.cpp/releases)和模型发布方取得兼容版本。发布包中运行所需的 DLL 也应一同放在 `tools/llama-cpp/`。
+
+翻译时程序会自动启动本机 `127.0.0.1:8188` 服务，无需手动启动。只需要转写时可关闭翻译，无需准备这两个目录。
+
+### 6️⃣ 配置并启动
+
+```powershell
+Copy-Item subtitle_app/config.example.json subtitle_app/config.json
+.\.venv\Scripts\python.exe subtitle_app/subtitle_app.py
 ```
 
-> **💡 首次启动较慢**：PySide6 和 torch 加载需要 20-30 秒，界面不会立即弹出，请耐心等待。
+先用短文件验证转写，再开启翻译验证本地服务。翻译失败时检查上述两个目录和 `cache/.llama-server.log`。
 
-> **💡 首次运行自动装依赖**：入口脚本会自动检测并安装 `requirements.txt` 中的依赖，首次启动时会有命令行弹窗显示安装进度。
+> **换电脑迁移**：从旧电脑复制 `subtitle_app/config.json`（检查绝对路径）、`models/` 和所需的 `tools/llama-cpp/`、`tools/ffmpeg.exe`、`tools/ffprobe.exe`。若要保留翻译缓存、处理记录和字幕备份，再复制 `cache/` 与 `logs/srt_backup/`。这些目录或文件不会随 Git 克隆；新电脑仍需安装 Python 和显卡驱动。旧版 `cache/.deps_installed` 标记会自动失效；若复制缓存后发现新环境缺依赖，可删除该标记再启动。
 
 ---
 
