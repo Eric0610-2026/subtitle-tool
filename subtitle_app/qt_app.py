@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QPushButton, QListWidgetItem,
     QLabel, QTabWidget, QSplitter,
     QFrame, QFileDialog, QMessageBox,
-    QMenu, QDialog, QGridLayout,
+    QMenu, QDialog, QGridLayout, QSystemTrayIcon,
 )
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
@@ -80,6 +80,8 @@ class SubtitleApp(QMainWindow):
         self._ignore_set = self._load_ignore_set()
         self._start_time: Optional[float] = None
         self._closing = False  # 窗口关闭中：后台线程停止发 UI 信号
+        self._exiting = False  # 仅托盘「彻底退出」进入真正的关闭流程
+        self._pending_embed_events = []  # 隐藏期间等待用户处理的嵌入确认
         self._manual_embedding = False  # 后台手动嵌入进行中
         self._loading_local_model = False  # 后台手动加载本地模型进行中
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
@@ -112,6 +114,7 @@ class SubtitleApp(QMainWindow):
         }
         self._build_ui()
         self._apply_style()
+        self._setup_tray()
         self._start_handoff_server()
         self._model_status_refreshed = False
         self._update_model_status()  # 初始化「当前模型」标签
@@ -195,11 +198,61 @@ class SubtitleApp(QMainWindow):
         sock.disconnectFromHost()
 
     def _activate_for_handoff(self) -> None:
+        self._show_window()
+
+    def _show_window(self) -> None:
         if self.isMinimized():
             self.showNormal()
         self.show()
         self.raise_()
         self.activateWindow()
+        if self._pending_embed_events:
+            QTimer.singleShot(0, self._show_pending_embed_dialogs)
+
+    def _setup_tray(self) -> None:
+        self._tray_icon = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("系统通知区域不可用，窗口关闭将正常退出")
+            return
+        tray = QSystemTrayIcon(self.windowIcon(), self)
+        tray.setToolTip("本地字幕生成工具")
+        menu = QMenu(self)
+        menu.addAction("打开窗口", self._show_window)
+        menu.addSeparator()
+        menu.addAction("彻底退出", self._quit_from_tray)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray_icon = tray
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.Trigger:
+            self._show_window()
+
+    def _has_active_tasks(self) -> bool:
+        return bool(
+            (self.worker.thread and self.worker.thread.is_alive())
+            or self._manual_embedding
+            or getattr(self, "_manual_extracting", False)
+            or self._loading_local_model
+        )
+
+    def _quit_from_tray(self) -> None:
+        if self._has_active_tasks():
+            answer = QMessageBox.question(
+                self, "彻底退出", "当前仍有任务在运行。彻底退出会停止任务，确定退出吗？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._exiting = True
+        self.close()
+        QApplication.instance().quit()
+
+    def _show_pending_embed_dialogs(self) -> None:
+        while self.isVisible() and self._pending_embed_events and not self._closing:
+            show_embed_confirm_dialog(self, self._pending_embed_events.pop(0))
 
     # ─── 构建 UI ───
 
@@ -997,6 +1050,9 @@ class SubtitleApp(QMainWindow):
         self._update_model_status()
         if getattr(self, "_closing", False):
             return
+        if not self.isVisible():
+            system_notify("本地模型", "加载完成" if e.get("ok") else "加载失败，请打开窗口查看日志")
+            return
         if e.get("ok"):
             QMessageBox.information(self, "本地模型", "✅ 本地 Hy-MT2 翻译服务已就绪，可以开始处理了")
         else:
@@ -1113,6 +1169,10 @@ class SubtitleApp(QMainWindow):
             return
         success = e.get("success", 0)
         total = e.get("total", 0)
+        if not self.isVisible():
+            system_notify("嵌入完成" if success else "嵌入失败",
+                          f"成功嵌入 {success}/{total} 个文件" if success else "请打开窗口查看日志")
+            return
         if success:
             QMessageBox.information(self, "嵌入完成", f"成功嵌入 {success}/{total} 个文件")
         else:
@@ -1271,6 +1331,10 @@ class SubtitleApp(QMainWindow):
             return
         success = e.get("success", 0)
         total = e.get("total", 0)
+        if not self.isVisible():
+            system_notify("提取完成" if success else "提取失败",
+                          f"成功提取 {success}/{total} 个文件" if success else "请打开窗口查看日志")
+            return
         if success:
             QMessageBox.information(self, "提取完成", f"成功提取 {success}/{total} 个文件")
         else:
@@ -1440,6 +1504,8 @@ class SubtitleApp(QMainWindow):
         self._reset_progress()
         self.preview_panel.setReadOnly(False)
         self._update_model_status()
+        if not self.isVisible():
+            system_notify("字幕工具处理失败", f"{msg}。请打开窗口查看日志")
 
     def _handle_event(self, event: dict):
         if self._closing:
@@ -1485,6 +1551,10 @@ class SubtitleApp(QMainWindow):
 
     def _handle_pause_before_embed(self, e):
         """翻译完成后、嵌入前暂停，弹出对话框让用户预览/编辑字幕（见 dialogs.py）"""
+        if not self.isVisible():
+            self._pending_embed_events.append(e)
+            system_notify("字幕工具等待确认", "字幕已翻译，请打开窗口确认嵌入")
+            return
         show_embed_confirm_dialog(self, e)
 
     def _handle_preview_live(self, e):
@@ -1521,6 +1591,11 @@ class SubtitleApp(QMainWindow):
 
     def closeEvent(self, event):
         """应用关闭时停止处理线程、释放 Whisper 模型显存、关闭本会话拉起的本地翻译服务并保存窗口状态"""
+        if self._tray_icon is not None and not self._exiting:
+            self._save_window_state()
+            self.hide()
+            event.ignore()
+            return
         self._closing = True  # 通知后台线程停止发信号（daemon 随进程退出）
         # 先停 worker：终止 ffmpeg 等子进程并置停止标志，避免与下方 release_model 竞争
         self.worker.stop()
@@ -1533,6 +1608,8 @@ class SubtitleApp(QMainWindow):
         except Exception:
             pass
         self._save_window_state()
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
         super().closeEvent(event)
 
     def showEvent(self, event):
