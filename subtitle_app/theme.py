@@ -210,7 +210,7 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         }}
         QLabel#headerMeta {{ color:rgba(255,255,255,0.68); font-size:11px; }}
         QToolTip {{
-            background: {c['header']}; color: {c['text']};
+            background: {c['card']}; color: {c['text']};
             border: 1px solid {c['accent']}; border-radius: 4px;
             padding: 5px 8px; font-size: 12px;
         }}

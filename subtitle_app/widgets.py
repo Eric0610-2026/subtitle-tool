@@ -6,11 +6,11 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QEvent, QObject, QPropertyAnimation, QEasingCurve, QAbstractAnimation
-from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtCore import Qt, Signal, QEvent, QObject, QPropertyAnimation, QEasingCurve, QRectF
+from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent, QColor, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import (
     QListWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QApplication, QAbstractItemView,
+    QLabel, QPushButton, QApplication, QAbstractItemView, QStyledItemDelegate,
 )
 
 from .config import cfg
@@ -84,38 +84,68 @@ class DropListWidget(QListWidget):
             self.reordered.emit()
 
 
+class _PopupSeparatorDelegate(QStyledItemDelegate):
+    """在语言选项之间绘制细分隔线，不修改模型内容。"""
+
+    def __init__(self, border_color: str, parent=None):
+        super().__init__(parent)
+        self._border_color = QColor(border_color)
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if index.row() < index.model().rowCount(index.parent()) - 1:
+            painter.save()
+            painter.setPen(self._border_color)
+            y = option.rect.bottom()
+            painter.drawLine(option.rect.left() + 10, y,
+                             option.rect.right() - 10, y)
+            painter.restore()
+
+
 class PopupFade(QObject):
-    """QComboBox 弹层增强：淡入过渡动画 + 去除原生灰底。
+    """语言下拉弹层的圆角、选项分隔线与淡入动画。"""
 
-    QSS 不支持 transition；弹层容器是独立原生窗口：
-    - 灰底：Windows 在 Qt 绘制前会先用系统灰擦除原生窗口背景，视图的
-      圆角缺口处会露出灰边 → 设置 WA_TranslucentBackground 让圆角外真透明；
-    - 动画：监听容器 Show 事件，对 windowOpacity 做 0→1 短动画（OutCubic）。
-    """
-
-    def __init__(self, combo, duration_ms: int = 130):
+    def __init__(self, combo, colors: dict, duration_ms: int = 180):
         super().__init__(combo)  # 挂在 combo 下，随控件销毁
         container = combo.view().window()
-        # 必须在原生窗口首次显示前设置（attach 时弹层尚未创建过窗口）
+        container.setObjectName("languagePopup")
         container.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._background_color = QColor(colors["card"])
+        self._border_color = QColor(colors["border"])
+        combo.view().setItemDelegate(
+            _PopupSeparatorDelegate(colors["border"], combo.view())
+        )
         container.installEventFilter(self)
-        self._duration = duration_ms
+        self._animation = QPropertyAnimation(container, b"windowOpacity", self)
+        self._animation.setDuration(duration_ms)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Paint:
+            # Qt 的组合框弹层在列表上下留有空白；透明窗口若只绘制列表，
+            # Windows 会把底部空白显示成黑框。
+            painter = QPainter(obj)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(self._background_color)
+            painter.setPen(QPen(self._border_color, 1))
+            painter.drawRoundedRect(QRectF(obj.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+            return True
+        if event.type() in (QEvent.Show, QEvent.Resize):
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(obj.rect()), 10, 10)
+            obj.setMask(QRegion(path.toFillPolygon().toPolygon()))
         if event.type() == QEvent.Show:
-            obj.setWindowOpacity(0.0)  # 首帧前置零，避免闪一帧全不透明
-            anim = QPropertyAnimation(obj, b"windowOpacity", obj)
-            anim.setDuration(self._duration)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._animation.stop()
+            obj.setWindowOpacity(0.0)
+            self._animation.start()
         return False
 
 
-def attach_popup_fade(combo, duration_ms: int = 130) -> None:
-    """为下拉框启用弹层淡入动画（见 PopupFade）"""
-    PopupFade(combo, duration_ms)
+def attach_popup_fade(combo, colors: dict, duration_ms: int = 180) -> None:
+    """为语言下拉框启用弹层圆角、选项分隔线和淡入动画。"""
+    PopupFade(combo, colors, duration_ms)
 
 
 class LogEntry(QWidget):

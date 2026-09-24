@@ -202,8 +202,12 @@ class SettingsDialog(QDialog):
         permanent_btn.clicked.connect(lambda: self.done(2))
 
         # 下拉弹层淡入过渡
-        attach_popup_fade(self.lang)
-        attach_popup_fade(self.target_lang)
+        colors = getattr(parent, "colors", None)
+        if colors is None:
+            from .theme import load_theme_colors
+            colors, _ = load_theme_colors()
+        attach_popup_fade(self.lang, colors)
+        attach_popup_fade(self.target_lang, colors)
 
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""

@@ -84,7 +84,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 - **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突，大小写不敏感）→ 报错中止；
   `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
 - **下载器联动**：`qt_app` 通过 `QTcpServer` 只监听回环地址；收到媒体路径后仅接受现存的支持格式，加入视频队列、自动跳过重复/已处理项并激活现有窗口，绝不自动开始处理。
-- **托盘常驻**：可用时创建 `QSystemTrayIcon`，普通 `closeEvent` 仅保存窗口状态并隐藏，不设 `_closing` 或停止 worker；单击图标恢复，右键菜单可打开或彻底退出。退出时若有运行中任务先确认，再走原关闭清理。隐藏时嵌入确认事件排队并发通知，恢复窗口后再显示对话框；系统通知区域不可用时正常关闭。
+- **托盘常驻与单实例**：`qt_app.main` 在构建窗口前用按应用目录命名的 `QLockFile` 抢占实例，并用 `QLocalServer` 接收再次启动的唤醒请求；再次运行快捷方式仅恢复原窗口并退出新进程。可用时创建 `QSystemTrayIcon`，普通 `closeEvent` 仅保存窗口状态并隐藏，不设 `_closing` 或停止 worker；单击图标恢复，右键菜单可打开或彻底退出。退出时若有运行中任务先确认，再走原关闭清理。隐藏时嵌入确认事件排队并发通知，恢复窗口后再显示对话框；系统通知区域不可用时正常关闭。
 - **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
 - **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
   只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。

@@ -3,6 +3,7 @@
 """托盘隐藏、恢复和退出的窗口交互。"""
 import os
 import unittest
+import uuid
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
@@ -10,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
-from subtitle_app.qt_app import SubtitleApp
+from subtitle_app.qt_app import SubtitleApp, _claim_single_instance
 
 
 class TestTrayWindow(unittest.TestCase):
@@ -44,6 +45,19 @@ class TestTrayWindow(unittest.TestCase):
 
         self.window._on_tray_activated(QSystemTrayIcon.Trigger)
         self.assertTrue(self.window.isVisible())
+
+    def test_second_launch_restores_existing_window(self):
+        name = "subtitle-tool-test-" + uuid.uuid4().hex
+        lock, server = _claim_single_instance(self.window._show_window, name)
+        try:
+            self.window.close()
+            self.assertFalse(self.window.isVisible())
+            self.assertIsNone(_claim_single_instance(Mock(), name))
+            self.app.processEvents()
+            self.assertTrue(self.window.isVisible())
+        finally:
+            server.close()
+            lock.unlock()
 
     def test_hidden_embed_confirmation_waits_for_restore(self):
         self.window.close()

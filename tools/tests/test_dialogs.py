@@ -3,9 +3,68 @@
 """测试 dialogs 的纯函数：嵌入对话框字幕匹配（_find_matching_subtitle）"""
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
-from subtitle_app.dialogs import _find_matching_subtitle
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QWidget
+
+from subtitle_app.dialogs import SettingsDialog, _find_matching_subtitle
+from subtitle_app.theme import build_qss, load_theme_colors
+from subtitle_app.widgets import PopupFade, _PopupSeparatorDelegate
+
+
+class TestLanguagePopups(unittest.TestCase):
+    def test_both_language_popups_are_rounded_separated_and_fade_in(self):
+        app = QApplication.instance() or QApplication([])
+        colors, _ = load_theme_colors()
+        parent = QWidget()
+        parent.colors = colors
+        parent.setStyleSheet(build_qss(colors, False))
+        dialog = SettingsDialog(parent, {})
+        try:
+            parent.show()
+            dialog.show()
+            app.processEvents()
+            for combo in (dialog.lang, dialog.target_lang):
+                original = combo.currentData()
+                combo.showPopup()
+                app.processEvents()
+                popup = combo.view().window()
+                self.assertFalse(popup.mask().contains(QPoint(0, 0)))
+                self.assertIsInstance(combo.view().itemDelegate(), _PopupSeparatorDelegate)
+                self.assertIsNotNone(combo.findChild(PopupFade))
+                self.assertLess(popup.windowOpacity(), 1.0)
+                QTest.qWait(230)
+                self.assertEqual(popup.windowOpacity(), 1.0)
+                self.assertEqual(combo.currentData(), original)
+                combo.hidePopup()
+        finally:
+            dialog.close()
+            parent.close()
+
+    def test_popup_bottom_padding_uses_theme_background(self):
+        app = QApplication.instance() or QApplication([])
+        for is_dark, colors in enumerate(load_theme_colors()):
+            parent = QWidget()
+            parent.colors = colors
+            parent.setStyleSheet(build_qss(colors, bool(is_dark)))
+            dialog = SettingsDialog(parent, {})
+            try:
+                parent.show()
+                dialog.show()
+                app.processEvents()
+                dialog.lang.showPopup()
+                QTest.qWait(230)
+                image = dialog.lang.view().window().grab().toImage()
+                bottom_color = image.pixelColor(image.width() // 2, image.height() - 5)
+                self.assertEqual(bottom_color.name(), colors["card"])
+            finally:
+                dialog.close()
+                parent.close()
 
 
 class TestFindMatchingSubtitle(unittest.TestCase):

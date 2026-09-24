@@ -4,6 +4,8 @@
 PySide6/Qt 版主应用窗口
 """
 import logging
+import hashlib
+import tempfile
 import time, traceback
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import List, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QSize
+from PySide6.QtCore import Qt, QTimer, QEvent, QSize, QLockFile
 from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -21,7 +23,7 @@ from PySide6.QtWidgets import (
     QMenu, QDialog, QGridLayout, QSystemTrayIcon,
 )
 from PySide6.QtGui import QColor, QFontMetrics
-from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
+from PySide6.QtNetwork import QHostAddress, QLocalServer, QLocalSocket, QTcpServer, QTcpSocket
 
 from .srt_utils import (
     SUB_EXTS, fmt_job_display, fmt_duration,
@@ -39,6 +41,9 @@ from .notifier import notify as system_notify
 from .handoff import HANDOFF_PORT, decode_handoff_request, encode_handoff_response
 
 APP_DIR = Path(__file__).resolve().parent.parent
+_INSTANCE_NAME = "subtitle-tool-" + hashlib.sha256(
+    str(APP_DIR.resolve()).casefold().encode("utf-8")
+).hexdigest()[:24]
 
 # ─── 配色（从 config.json 读取，见 theme.py）───
 LIGHT, DARK = load_theme_colors()
@@ -1623,6 +1628,35 @@ class SubtitleApp(QMainWindow):
         return super().eventFilter(obj, event)
 
 
+def _claim_single_instance(on_activate, name: str = _INSTANCE_NAME):
+    """占有本安装目录的实例端点；再次启动时通知原窗口并退出。"""
+    lock = QLockFile(str(Path(tempfile.gettempdir()) / f"{name}.lock"))
+    if lock.tryLock(0):
+        server = QLocalServer()
+        if not server.listen(name):
+            lock.unlock()
+            raise RuntimeError(f"无法启动字幕工具：{server.errorString()}")
+
+        def accept_connections():
+            while server.hasPendingConnections():
+                socket = server.nextPendingConnection()
+                on_activate()
+                socket.disconnectFromServer()
+                socket.deleteLater()
+
+        server.newConnection.connect(accept_connections)
+        return lock, server
+
+    # 原进程可能刚取得锁、尚未开始监听；短暂重试等待它就绪。
+    for _ in range(20):
+        socket = QLocalSocket()
+        socket.connectToServer(name)
+        if socket.waitForConnected(100):
+            socket.disconnectFromServer()
+            return None
+    raise RuntimeError("检测到字幕工具已经运行，但无法唤醒原窗口")
+
+
 def main():
     import sys
     import logging
@@ -1658,6 +1692,18 @@ def main():
     base_font = QFont()
     base_font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"])
     app.setFont(base_font)
+
+    window = None
+    try:
+        instance_guard = _claim_single_instance(
+            lambda: window._show_window() if window is not None else None
+        )
+    except RuntimeError as exc:
+        logger.error("单实例启动失败：%s", exc)
+        QMessageBox.critical(None, "启动失败", str(exc))
+        sys.exit(1)
+    if instance_guard is None:
+        return
 
     window = SubtitleApp()
     window.show()
