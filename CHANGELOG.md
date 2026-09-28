@@ -25,6 +25,7 @@
 
 ### 验证
 
-- 安装标记的 2 个回归测试通过。当前 Linux 环境全量测试存在 1 个失败和 8 个错误，其中部分依赖 Windows 组件、PySide6 与未随仓库提供的 `llama-server.exe`；尚未完成 Windows、CUDA 和真实模型环境的端到端验证。
+- 安装标记的 2 个回归测试通过。当前 Linux 环境全量测试存在 1 个失败和 8 个错误，其中部分依赖 Windows 组件、PySide6 与未随仓库提供的 `llama-server.exe`。
+- **后续验证状态（2026-09-29）**：维护者已完成字幕工具测试。具体 Windows 版本、CUDA/GPU、模型与各测试项的覆盖范围及结果尚未记录；本条仅更新测试完成状态，不代表所有项目均通过。
 
 历史版本：[v2.0 更新说明](https://github.com/Eric0610-2026/subtitle-tool/releases/tag/v2.0)。
