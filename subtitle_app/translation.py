@@ -96,6 +96,27 @@ MISSING_FIX_MAX_CONSEC_FAIL = 20
 # 完整状态文件随字幕长度增长；降低重复序列化频率，同时首批和末批仍落盘。
 STATE_CHECKPOINT_BATCHES = 5
 
+
+def _generation_limits(texts: List[str]) -> dict:
+    """按原文长度限制生成量，避免短字幕重复生成耗尽整个上下文。"""
+    return {
+        "max_tokens": min(2048, max(128, sum(len(t) for t in texts) * 2 + len(texts) * 32)),
+        "repeat_penalty": 1.1,
+    }
+
+
+def _response_content(resp: dict) -> str:
+    choices = resp.get("choices") or []
+    if not choices:
+        return ""
+    choice = choices[0]
+    if choice.get("finish_reason") == "length":
+        raise RuntimeError("翻译输出达到长度上限，拆小批次重试")
+    content = choice.get("message", {}).get("content", "")
+    if re.search(r"([^\s])\1{23,}", content):
+        raise RuntimeError("翻译输出出现异常重复，拆小批次重试")
+    return content
+
 LANG_NAMES = {k: v for k, v in cfg.translation_lang_names.__dict__.items()}
 
 def make_prompt(target_lang: str) -> str:
@@ -197,12 +218,14 @@ class TranslationClient:
         self.cache_path = cache_path
         self.post_ui = post_ui
         self._cache_lock = _shared_cache_lock
+        self._stop_check: Optional[Callable[[], bool]] = None
 
 
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
                          is_bilingual: bool, state_path: Optional[Path] = None,
                          translation_concurrency: int = 1,
                          stop_check: Optional[Callable[[], bool]] = None) -> List[str]:
+        self._stop_check = stop_check
         # Step 0: 按时间间隔划分段落
         para_of_block: List[int] = []
         current_para = 0
@@ -544,6 +567,8 @@ class TranslationClient:
 
     def _translate_batch(self, texts: List[str], context: str = "", depth: int = 0) -> List[Dict]:
         """批量翻译，带递归深度限制防止栈溢出"""
+        if self._stop_check is not None and self._stop_check():
+            raise TranslationStopped()
         prompt_text = json.dumps(texts, ensure_ascii=False)
         if context:
             prompt_text = context + prompt_text
@@ -555,11 +580,12 @@ class TranslationClient:
             ],
             "temperature": cfg.translation.temperature,
             "stream": False,
+            **_generation_limits(texts),
         }
         headers = {"Content-Type": "application/json"}
         try:
             resp_data = self._call_api(payload, headers)
-        except ApiUnavailableError:
+        except (TranslationStopped, ApiUnavailableError):
             # 网络不可达/超时：拆小批不解决问题（_call_api 内部已重试 3 次），
             # 直接失败交给上层熔断/停止，避免 2^depth 个子请求各重试一轮
             raise
@@ -614,6 +640,8 @@ class TranslationClient:
         req = urllib.request.Request(self.endpoint, data=data, headers=headers, method="POST")
         last_err: Optional[Exception] = None
         for attempt in range(1, API_RETRY_COUNT + 1):
+            if self._stop_check is not None and self._stop_check():
+                raise TranslationStopped()
             try:
                 with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
                     return json.loads(resp.read().decode("utf-8"))
@@ -646,6 +674,7 @@ class TranslationClient:
                 {"role": "user", "content": text},
             ],
             "temperature": cfg.translation.temperature, "stream": False,
+            **_generation_limits([text]),
         }
         headers = {"Content-Type": "application/json"}
         try:
@@ -657,9 +686,11 @@ class TranslationClient:
             else:
                 choices = resp_data.get("choices")
                 if choices and isinstance(choices, list) and len(choices) > 0:
-                    content = choices[0].get("message", {}).get("content", "")
+                    content = _response_content(resp_data)
                     if content:
                         return [{"id": 1, "zh": content.strip()}]
+        except TranslationStopped:
+            raise
         except Exception as e:
             logger.warning("纯文本单句翻译也失败: %s，返回原文", e)
         return [{"id": 1, "zh": text}]
@@ -676,7 +707,7 @@ class TranslationClient:
         try:
             choices = resp_data.get("choices")
             if choices and isinstance(choices, list) and len(choices) > 0:
-                content = choices[0].get("message", {}).get("content", "")
+                content = _response_content(resp_data)
             else:
                 content = ""
             if content:
@@ -703,7 +734,7 @@ class TranslationClient:
         if items is None:
             logger.error("无法解析翻译响应: %s",
                          json.dumps(resp_data, ensure_ascii=False, indent=2)[:1000])
-            raise RuntimeError("无法解析翻译响应（请检查 API Key 和模型名称）")
+            raise RuntimeError("本地模型返回的译文格式无效或输出被截断")
         return items if isinstance(items, list) else []
 
     def _save_cache(self) -> None:
@@ -726,6 +757,24 @@ class TranslationClient:
 def _extract_json(text: str) -> Optional[Any]:
     """从文本中提取并解析 JSON（支持对象和数组）"""
     text = text.strip()
+    # 模型偶尔把分隔符写成中文标点；仅修复字符串外的标点，保留译文原样。
+    normalized = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            normalized.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            normalized.append({"，": ",", "：": ":"}.get(ch, ch))
+    text = "".join(normalized)
     # 同时尝试解析 JSON 对象（{...}）和 JSON 数组（[...]）
     for prefix, close in [("{", "}"), ("[", "]")]:
         if text.startswith(prefix):

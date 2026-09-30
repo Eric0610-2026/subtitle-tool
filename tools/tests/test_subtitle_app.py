@@ -3,10 +3,49 @@
 """入口依赖安装标记的回归测试。"""
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app import subtitle_app
+from subtitle_app import qt_app
+
+
+class ModelPathMigrationTest(unittest.TestCase):
+    def test_relative_model_uses_project_root_from_other_working_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "project with spaces"
+            root.mkdir()
+            previous = Path.cwd()
+            try:
+                os.chdir(d)
+                with patch.object(qt_app, "APP_DIR", root):
+                    self.assertEqual(
+                        qt_app._resolve_model_dir("models/whisper"),
+                        str(root / "models" / "whisper"),
+                    )
+            finally:
+                os.chdir(previous)
+
+    def test_saved_internal_model_follows_moved_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_root = Path(d) / "old project"
+            new_root = Path(d) / "new project"
+            with patch.object(qt_app, "APP_DIR", old_root):
+                saved = qt_app._portable_model_dir(str(old_root / "models" / "whisper"))
+            with patch.object(qt_app, "APP_DIR", new_root):
+                self.assertEqual(qt_app._resolve_model_dir(saved), str(new_root / "models" / "whisper"))
+
+    def test_external_model_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "project"
+            external = Path(d) / "shared models" / "whisper"
+            with patch.object(qt_app, "APP_DIR", root):
+                self.assertEqual(qt_app._portable_model_dir(str(external)), str(external))
+
+    def test_empty_model_stays_empty(self):
+        self.assertEqual(qt_app._resolve_model_dir(""), "")
+        self.assertEqual(qt_app._portable_model_dir(""), "")
 
 
 class DependencyInstallTest(unittest.TestCase):

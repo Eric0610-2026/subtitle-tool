@@ -76,6 +76,8 @@ py -3 -m venv .venv
 
 项目已预置模型路径配置，放入即可使用。
 
+模型相对路径始终以项目根目录为基准，支持目录名包含空格。永久保存设置时，项目内的模型目录会保存为相对路径，可随整个项目迁移；项目外的模型目录保留绝对路径。迁移后请更新「字幕工具.lnk」的启动参数、工作目录和图标路径；旧配置中的失效绝对模型路径需在设置中重新选择，或改为 `models/faster-whisper-large-v3-turbo`。
+
 ### 5️⃣ 准备本地翻译（使用双语字幕时必需）
 
 Git 仓库**不包含** llama.cpp 可执行文件和 Hy-MT2 模型。将 Windows 版 `llama-server.exe` 放在 `tools/llama-cpp/llama-server.exe`；将兼容 llama.cpp 的 Hy-MT2 GGUF 模型放在 `models/hy-mt2/` 下（至少一个 `*.gguf`，建议只放当前使用的一个）。可以从旧电脑复制这两个目录，或分别从 [llama.cpp 发布页](https://github.com/ggml-org/llama.cpp/releases)和模型发布方取得兼容版本。发布包中运行所需的 DLL 也应一同放在 `tools/llama-cpp/`。
@@ -90,6 +92,10 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 ```
 
 先用短文件验证转写，再开启翻译验证本地服务。翻译失败时检查上述两个目录和 `cache/.llama-server.log`。
+
+翻译请求会按原文长度限制输出量（128–2048 token），避免短字幕因重复生成长时间卡住。
+截断或异常重复的回复会拆批重试；模型误用的 JSON 中文分隔符会在保留译文标点的前提下修复。
+停止任务后不再发起后续拆批或重试，已经发出的请求会在后台自然结束。
 
 > **换电脑迁移**：从旧电脑复制 `subtitle_app/config.json`（检查绝对路径）、`models/` 和所需的 `tools/llama-cpp/`、`tools/ffmpeg.exe`、`tools/ffprobe.exe`。若要保留翻译缓存、处理记录和字幕备份，再复制 `cache/` 与 `logs/srt_backup/`。这些目录或文件不会随 Git 克隆；新电脑仍需安装 Python 和显卡驱动。旧版 `cache/.deps_installed` 标记会自动失效；若复制缓存后发现新环境缺依赖，可删除该标记再启动。
 

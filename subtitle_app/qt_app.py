@@ -45,6 +45,24 @@ _INSTANCE_NAME = "subtitle-tool-" + hashlib.sha256(
     str(APP_DIR.resolve()).casefold().encode("utf-8")
 ).hexdigest()[:24]
 
+
+def _resolve_model_dir(value: str) -> str:
+    """相对模型路径始终以项目根目录为基准，不依赖启动工作目录。"""
+    if not value.strip():
+        return ""
+    return str((APP_DIR / Path(value).expanduser()).resolve())
+
+
+def _portable_model_dir(value: str) -> str:
+    """项目内模型保存为相对路径，外部模型保留绝对路径。"""
+    resolved = _resolve_model_dir(value)
+    if not resolved:
+        return ""
+    try:
+        return Path(resolved).relative_to(APP_DIR).as_posix()
+    except ValueError:
+        return resolved
+
 # ─── 配色（从 config.json 读取，见 theme.py）───
 LIGHT, DARK = load_theme_colors()
 
@@ -104,7 +122,7 @@ class SubtitleApp(QMainWindow):
         # 设备/精度不进设置界面，仅通过 config.json 的 whisper.device /
         # whisper.compute_type 调整
         self.settings_data = {
-            "model_dir": str(APP_DIR / cfg.whisper.model_dir) if (APP_DIR / cfg.whisper.model_dir).exists() else cfg.whisper.model_dir,
+            "model_dir": _resolve_model_dir(cfg.whisper.model_dir),
             "language": cfg.whisper.language,
             "extract_audio": cfg.whisper.extract_audio,
             "vad_filter": cfg.whisper.vad_filter,
@@ -526,7 +544,7 @@ class SubtitleApp(QMainWindow):
                                 f"config.json 读取失败（可能被手动编辑损坏）：\n{e}")
             return
         raw.setdefault("app", {})["default_video_dir"] = values.get("default_video_dir", "")
-        raw.setdefault("whisper", {})["model_dir"] = values.get("model_dir", "")
+        raw.setdefault("whisper", {})["model_dir"] = _portable_model_dir(values.get("model_dir", ""))
         raw["whisper"]["language"] = values.get("language", "auto")
         raw["whisper"]["extract_audio"] = values.get("extract_audio", True)
         raw["whisper"]["vad_filter"] = values.get("vad_filter", True)
@@ -847,7 +865,7 @@ class SubtitleApp(QMainWindow):
             batch_size = cfg.translation.batch_size
         return {
             "work_dir": self.work_dir,
-            "model_dir": s.get("model_dir", ""),
+            "model_dir": _resolve_model_dir(s.get("model_dir", "")),
             "language": s.get("language", "auto"),
             "target_lang": s.get("target_lang", "zh"),
             "device": cfg.whisper.device,
@@ -944,7 +962,7 @@ class SubtitleApp(QMainWindow):
 
         # Whisper：仅当已加载才显示
         if self.worker.transcriber.is_loaded():
-            mdir = Path(s.get("model_dir", ""))
+            mdir = Path(_resolve_model_dir(s.get("model_dir", "")))
             ver = mdir.name if mdir.name and mdir.name not in (".", "/", "\\") else "Whisper"
             parts.append(f"Whisper {ver}")
 
@@ -1394,7 +1412,7 @@ class SubtitleApp(QMainWindow):
         if missing_essential:
             QMessageBox.warning(self, "缺少必需文件",
                 f"未找到 {', '.join(missing_essential)}，请放入项目根目录后重启应用。")
-        model_dir = APP_DIR / cfg.whisper.model_dir if (APP_DIR / cfg.whisper.model_dir).exists() else Path(cfg.whisper.model_dir)
+        model_dir = Path(_resolve_model_dir(cfg.whisper.model_dir))
         if not model_dir.is_dir() or not (model_dir / "model.bin").is_file():
             self._add_log_entry(f"未找到 faster-whisper 模型，请下载后放入 {cfg.whisper.model_dir}/ 目录（下载地址：https://www.modelscope.cn/models/pengzhendong/faster-whisper-large-v3-turbo/summary）", "WARNING")
 

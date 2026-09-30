@@ -15,6 +15,10 @@ from subtitle_app.translation import (
 
 
 class TestExtractJson(unittest.TestCase):
+    def test_chinese_separators_preserve_translation_and_escaped_quotes(self):
+        raw = '（上文）你好\n["你好，世界：你好"，"他说\\\"你好\\\"，再见"]'
+        self.assertEqual(_extract_json(raw), ['你好，世界：你好', '他说"你好"，再见'])
+
     def test_json_variants(self):
         cases = [
             ('{"items": []}', {"items": []}),          # 直接 JSON
@@ -35,6 +39,44 @@ class TestComposeSentences(unittest.TestCase):
 
 
 class TestParseResponse(unittest.TestCase):
+    def test_truncated_and_repeated_responses_are_rejected(self):
+        for choice in [
+            {"finish_reason": "length", "message": {"content": '["你好"]'}},
+            {"finish_reason": "stop", "message": {"content": '["' + 'う' * 100 + '"]'}},
+        ]:
+            with self.subTest(choice=choice), self.assertRaises(RuntimeError):
+                self.client._parse_translation_response({"choices": [choice]})
+
+    def test_plain_fallback_rejects_truncated_output(self):
+        self.client._call_api = MagicMock(return_value={"choices": [
+            {"finish_reason": "length", "message": {"content": "坏译文"}}
+        ]})
+        self.assertEqual(self.client._call_api_single_plain("original"), [{"id": 1, "zh": "original"}])
+
+    def test_generation_is_bounded_in_batch_and_plain_fallback(self):
+        self.client._call_api = MagicMock(return_value={"choices": [
+            {"finish_reason": "stop", "message": {"content": '["你好"]'}}
+        ]})
+        self.client._translate_batch(["hello"])
+        payload = self.client._call_api.call_args.args[0]
+        self.assertGreater(payload["max_tokens"], 0)
+        self.assertLessEqual(payload["max_tokens"], 2048)
+        self.client._call_api_single_plain("a" * 10000)
+        self.assertEqual(self.client._call_api.call_args.args[0]["max_tokens"], 2048)
+
+    def test_stop_prevents_recursive_retry_after_response(self):
+        from subtitle_app.translation import TranslationStopped
+        stopped = False
+        self.client._stop_check = lambda: stopped
+        def invalid_response(payload, headers):
+            nonlocal stopped
+            stopped = True
+            return {"choices": [{"message": {"content": "invalid"}}]}
+        self.client._call_api = MagicMock(side_effect=invalid_response)
+        with self.assertRaises(TranslationStopped):
+            self.client._translate_batch(["hello", "world"])
+        self.assertEqual(self.client._call_api.call_count, 1)
+
     def setUp(self):
         self.client = TranslationClient(
                                         Path(tempfile.mktemp()), lambda *a: None)

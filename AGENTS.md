@@ -72,6 +72,9 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   （translator 静默返回，不算失败）；网络类错误抛 `ApiUnavailableError` 不拆批；
   连续 `MAX_EMPTY_BATCHES`(3) 空批判定 API 不可用中止本文件；补翻连续 20 句无进展放弃；
   异常/停止时 `_abort_translation` 落盘断点并取消未开始的批次。
+  生成按原文长度设置 128–2048 token 上限，并启用轻度重复惩罚；截断或异常重复响应
+  不作为译文接受，走已有拆批/单句兜底。JSON 容错只替换字符串外的中文逗号/冒号，
+  保留译文标点；停止后禁止在途请求继续发起拆批或重试（已发出的请求自然结束）。
 - **任务配置快照**：`qt_app._build_opts` 将设置对话框中可修改的任务参数（含批大小、
   备份份数）解析为具体值；`SubtitleWorker.start` 随即复制并冻结该 dict。后台阶段不得
   回读 `cfg` 覆盖这些值，设置改动只影响下一次启动的任务。
@@ -99,6 +102,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 ## 配置与安全
 
 - 配置在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）；改模板应改 example
+- 模型路径统一由 `qt_app._resolve_model_dir` 按项目根目录解析，不依赖启动工作目录；永久保存时项目内模型路径写为相对路径，项目外模型保留绝对路径。迁移后应更新 Windows 快捷方式的参数、工作目录和图标路径。
 - **配置生效规则**：点击「本次有效」会更新当前会话，之后新启动的任务使用该设置；点击
   「永久保存（下次默认）」还会写入 `config.json`，供下次启动作为默认值。正在运行的任务
   永不改变；直接编辑 `config.json` 后请重启应用。
