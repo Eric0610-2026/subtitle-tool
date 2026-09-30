@@ -21,6 +21,31 @@ class TestVisibleBlockSlice(unittest.TestCase):
         self.assertEqual(offset, 3)
 
 
+class TestPreviewIncrementalRendering(unittest.TestCase):
+    def test_append_then_edit_keeps_full_text_and_source_mapping(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from subtitle_app.panels import PreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = PreviewPanel()
+        first = "1\n00:00:01,000 --> 00:00:02,000\nfirst"
+        second = "2\n00:00:02,000 --> 00:00:03,000\nsecond"
+        panel.set_text(first)
+        panel.append(second)
+        panel._flush_live_render()
+        self.assertEqual(panel.preview.rowCount(), 2)
+        self.assertEqual(panel.preview.item(1, 2).text(), "second")
+
+        panel.setReadOnly(False)
+        panel.preview.item(1, 2).setText("changed")
+        self.assertIn("first", panel.get_text())
+        self.assertIn("changed", panel.get_text())
+        panel.refresh_theme()
+        self.assertEqual(panel.preview.item(1, 2).text(), "changed")
+
+
 class TestLogPanelNoSelection(unittest.TestCase):
     """日志列表不可选中：点击条目不残留高亮（回归）"""
 

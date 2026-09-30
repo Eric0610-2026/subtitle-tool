@@ -207,7 +207,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             # 用户停止：静默结束本文件（不写输出、不算失败；done 由 pipeline 统一发）
             return
         except RuntimeError as e:
-            post({"type": "error", "message": f"断点续翻失败: {e}", "trace": ""})
+            post({"type": "log", "level": "ERROR", "message": f"断点续翻失败: {e}", "trace": ""})
             raise
 
         is_chinese_source = detected_lang and (detected_lang.startswith("zh") or language == "zh")

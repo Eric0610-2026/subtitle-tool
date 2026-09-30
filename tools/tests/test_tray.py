@@ -50,13 +50,16 @@ class TestTrayWindow(unittest.TestCase):
         name = "subtitle-tool-test-" + uuid.uuid4().hex
         lock, server = _claim_single_instance(self.window._show_window, name)
         try:
+            if server is None:
+                self.skipTest("当前环境不支持 QLocalServer 唤醒通道；降级启动由 mock 用例验证")
             self.window.close()
             self.assertFalse(self.window.isVisible())
             self.assertIsNone(_claim_single_instance(Mock(), name))
             self.app.processEvents()
             self.assertTrue(self.window.isVisible())
         finally:
-            server.close()
+            if server is not None:
+                server.close()
             lock.unlock()
 
     def test_hidden_embed_confirmation_waits_for_restore(self):

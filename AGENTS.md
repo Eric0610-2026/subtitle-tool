@@ -13,14 +13,15 @@ AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心
 ## 测试
 
 ```powershell
-python -m unittest discover -s tools/tests      # 全部（141 例）
+python -m unittest discover -s tools/tests      # 全部（164 例）
 python -m unittest tools.tests.test_translator   # 单文件
 python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 单用例
 ```
 
 - 框架：`unittest`（无 pytest）；无需网络或模型，API 调用用 `unittest.mock`
-- 9 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
-  test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service / test_dialogs
+- 13 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
+  test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service /
+  test_dialogs / test_tray / test_handoff / test_subtitle_app / test_bug_regressions
 - 改完必须跑全量：`python -m unittest discover -s tools/tests`
 
 ## 模块清单（subtitle_app/）
@@ -63,6 +64,8 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   走 `remove_shared_cache_entries`/`clear_shared_cache` 同步内存，否则条目复活）；
   缓存淘汰按 LRU（命中即触碰，`MAX_CACHE_ENTRIES` 超额裁掉一半最久未用）；
   句子级去重。
+  缓存键使用 v2 格式并包含目标语言，旧键保留但不再命中；缓存对话框在首次翻译前也会
+  按路径加载共享缓存，删除条目与写盘在同一锁内完成。
   段落上下文用「future 链」实现：worker 内等本段前一批完成再带 `（上文）…` 提交，
   段内严格有序（`para_gate`/`para_context`，默认批次并发 1）。
   **停止与熔断**：`translate_blocks(stop_check=...)` 检测用户停止抛 `TranslationStopped`
@@ -73,8 +76,10 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   备份份数）解析为具体值；`SubtitleWorker.start` 随即复制并冻结该 dict。后台阶段不得
   回读 `cfg` 覆盖这些值，设置改动只影响下一次启动的任务。
 - **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；
+  翻译状态在首批、每 5 批、末批及主动停止/批次异常时写盘，以降低长字幕反复序列化的开销；
   `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
   replace 冲突做短暂重试。
+  续翻状态包含 `target_lang`，只恢复目标语言一致的状态；旧状态无此字段时重新翻译。
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验。
 - **嵌入前暂停**：`translator.py` 中 `PauseResponse`（event + action + modified_text）。
 - **事件契约**：`done` 事件可带 `stopped: True`（用户停止，UI 不再谎报"全部完成"）；
@@ -86,8 +91,10 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 - **下载器联动**：`qt_app` 通过 `QTcpServer` 只监听回环地址；收到媒体路径后仅接受现存的支持格式，加入视频队列、自动跳过重复/已处理项并激活现有窗口，绝不自动开始处理。
 - **托盘常驻与单实例**：`qt_app.main` 在构建窗口前用按应用目录命名的 `QLockFile` 抢占实例，并用 `QLocalServer` 接收再次启动的唤醒请求；再次运行快捷方式仅恢复原窗口并退出新进程。可用时创建 `QSystemTrayIcon`，普通 `closeEvent` 仅保存窗口状态并隐藏，不设 `_closing` 或停止 worker；单击图标恢复，右键菜单可打开或彻底退出。退出时若有运行中任务先确认，再走原关闭清理。隐藏时嵌入确认事件排队并发通知，恢复窗口后再显示对话框；系统通知区域不可用时正常关闭。
 - **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
+- **启动降级**：实例锁成功但唤醒通道监听失败时保留锁继续运行，记录 WARNING；此时再次启动无法唤醒窗口。
+- **设置持久化**：`translation.translation_only` 与 `translation.send_all` 默认均为 false，永久保存后重启读取。
 - **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
-  只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
+  增量维护预览块列表，只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
 
 ## 配置与安全
 

@@ -267,26 +267,25 @@ def parse_srt_text(text: str) -> List[SubtitleBlock]:
 
 def sanitize_blocks(blocks: List[SubtitleBlock],
                      min_duration: float = 0.5) -> List[SubtitleBlock]:
-    """就地修正字幕块时间戳，保证：start>=0、时间单调不回退、end>start 且至少 min_duration。
+    """就地修正字幕块时间戳，保证 start>=0、start 单调、end>start。
 
     同时过滤掉空文本的 block，并重编号。
     这能避免转写结果中偶发的 end<=start / 时间回退导致 SRT 非法、进而 ffmpeg 内嵌失败。"""
-    prev_end = 0.0
+    prev_start = 0.0
     result: List[SubtitleBlock] = []
     for b in blocks:
         text = b.text.strip()
         if not text:
             continue  # 跳过空文本
         start = max(0.0, b.start)
-        if start < prev_end:
-            start = prev_end
+        start = max(start, prev_start)
+        if result and result[-1].end > start and start > result[-1].start:
+            result[-1].end = start
         end = max(start + min_duration, b.end)
         if end <= start:
             end = start + min_duration
-        if end < prev_end:
-            end = prev_end + 0.01
         result.append(SubtitleBlock(len(result) + 1, start, end, text))
-        prev_end = end
+        prev_start = start
     blocks.clear()
     blocks.extend(result)
     return blocks
@@ -471,10 +470,11 @@ def _is_short_and_no_endmark(s: str) -> bool:
     return False
 
 
-def sentence_cache_key(sentence: str, model: str, is_bilingual: bool) -> str:
+def sentence_cache_key(sentence: str, model: str, is_bilingual: bool,
+                       target_lang: str = "zh") -> str:
     mode = "bilingual" if is_bilingual else "chinese_only"
     normalized = sentence.strip().lower()
-    payload = f"{model}\n{mode}\n{normalized}".encode("utf-8")
+    payload = f"v2\n{model}\n{mode}\n{target_lang}\n{normalized}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -628,6 +628,10 @@ def has_chinese(text: str, source_lang: str = "") -> bool:
     if "\n" in text:
         parts = text.split("\n", 1)
         second = parts[1].strip()
+        if ((source_lang or "").startswith("ja")
+                or any(0x3040 <= ord(c) <= 0x30FF for c in second)
+                or any(c in _JAPANESE_SPECIFIC_KANJI for c in second)):
+            return False
         return _has_han(second) or (not second and _has_han(parts[0]))
 
     is_jp = source_lang and source_lang.startswith("ja")

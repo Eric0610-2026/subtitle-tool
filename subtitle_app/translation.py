@@ -28,7 +28,7 @@ from .srt_utils import (
 logger = logging.getLogger(__name__)
 
 # ── 进程级共享翻译缓存 ──
-# 并行流水线中每个文件会创建独立的 TranslationClient，若各自加载/写回同一
+# 不同文件会创建独立的 TranslationClient，若各自加载/写回同一
 # cache 文件，后写会覆盖先写的增量（缓存条目丢失、重复翻译）。
 # 这里把缓存提升为进程级单例 + 全局锁：所有 client 共享同一份内存 dict，
 # 写盘时串行化，彻底消除互相覆盖。
@@ -47,23 +47,29 @@ def _get_shared_cache(cache_path: Path) -> Dict[str, str]:
         return _shared_cache
 
 
-def shared_cache_snapshot() -> Dict[str, str]:
+def shared_cache_snapshot(cache_path: Optional[Path] = None) -> Dict[str, str]:
     """当前共享缓存的快照（缓存管理对话框展示/落盘用）。"""
+    if cache_path is not None:
+        _get_shared_cache(cache_path)
     with _shared_cache_lock:
         return dict(_shared_cache)
 
 
-def remove_shared_cache_entries(keys) -> int:
+def remove_shared_cache_entries(keys, cache_path: Optional[Path] = None) -> int:
     """从进程级共享缓存移除指定条目（缓存管理对话框逐条删除用）。
 
     必须就地修改内存 dict：已创建的 client 都持有同一对象的引用，
     若整体重新赋值，它们的写入会落回旧 dict，被删条目在下次写盘时复活。
     """
+    if cache_path is not None:
+        _get_shared_cache(cache_path)
     removed = 0
     with _shared_cache_lock:
         for k in keys:
             if _shared_cache.pop(k, None) is not None:
                 removed += 1
+        if cache_path is not None:
+            save_json(cache_path, _shared_cache)
     return removed
 
 
@@ -87,6 +93,8 @@ MAX_RECURSION_DEPTH = getattr(cfg.translation, "max_recursion_depth", 5)
 MAX_EMPTY_BATCHES = 3
 # 补翻兜底：连续 N 句补翻仍无有效译文 → 放弃剩余补翻（API 大概率不可用）
 MISSING_FIX_MAX_CONSEC_FAIL = 20
+# 完整状态文件随字幕长度增长；降低重复序列化频率，同时首批和末批仍落盘。
+STATE_CHECKPOINT_BATCHES = 5
 
 LANG_NAMES = {k: v for k, v in cfg.translation_lang_names.__dict__.items()}
 
@@ -226,7 +234,7 @@ class TranslationClient:
         sent_originals: Dict[str, str] = {str(gsid): sent for gsid, _, sent in flat}
         if state_path and state_path.exists():
             state = load_json(state_path, {})
-            done = state.get("done", {})
+            done = state.get("done", {}) if state.get("target_lang") == self.target_lang else {}
             saved_originals = state.get("originals", {})
             for entry in flat:
                 gsid = entry[0]
@@ -243,7 +251,7 @@ class TranslationClient:
         for gsid, bidx, sent in flat:
             if gsid in sent_trans and str(sent_trans[gsid]).strip():
                 continue
-            key = sentence_cache_key(sent, self.model, is_bilingual)
+            key = sentence_cache_key(sent, self.model, is_bilingual, self.target_lang)
             cached = self.cache.get(key)
             if isinstance(cached, str) and cached.strip():
                 sent_trans[gsid] = cached.strip()
@@ -334,7 +342,7 @@ class TranslationClient:
                     translations = self._translate_batch(batch, context_text, 0)
                     applied = _apply_batch_translations(
                         batch, translations, text_to_gsid, sent_trans,
-                        self.cache, self._cache_lock, self.model, is_bilingual)
+                        self.cache, self._cache_lock, self.model, is_bilingual, self.target_lang)
                     with para_lock:
                         for orig_text, zh_text in applied:
                             if not zh_text:
@@ -397,8 +405,12 @@ class TranslationClient:
                             f"连续 {MAX_EMPTY_BATCHES} 批无有效译文（本地服务可能不可用或全部拒译）")
                 else:
                     consecutive_empty = 0
-                if state_path:
+                # 崩溃后最多重做 4 批；主动停止/异常仍由 _abort_translation 立即落盘。
+                if state_path and (completed_count == 0
+                                   or (completed_count + 1) % STATE_CHECKPOINT_BATCHES == 0
+                                   or completed_count + 1 == total_batches):
                     save_json(state_path, {
+                        "target_lang": self.target_lang,
                         "done": _snapshot_done(sent_trans, self._cache_lock),
                         "originals": sent_originals,
                         "updated_at": datetime.now().isoformat(),
@@ -427,6 +439,10 @@ class TranslationClient:
                 miss_map.setdefault(sent, []).append(gsid)
             consec_fail = 0
             for i, (orig, gsids) in enumerate(miss_map.items(), 1):
+                if stop_check is not None and stop_check():
+                    self._abort_translation(batch_futures, state_path,
+                                            sent_originals, sent_trans)
+                    raise TranslationStopped()
                 got_translation = False
                 try:
                     items = self._translate_batch([orig], "", 0)
@@ -442,7 +458,7 @@ class TranslationClient:
                         if plain:
                             zh = str(plain[0].get("zh") or "").strip()
                     if zh and zh != orig:
-                        key = sentence_cache_key(orig, self.model, is_bilingual)
+                        key = sentence_cache_key(orig, self.model, is_bilingual, self.target_lang)
                         with self._cache_lock:
                             self.cache[key] = zh
                         for gsid in gsids:
@@ -477,6 +493,7 @@ class TranslationClient:
                     })
             if state_path:
                 save_json(state_path, {
+                    "target_lang": self.target_lang,
                     "done": _snapshot_done(sent_trans, self._cache_lock),
                     "originals": sent_originals,
                     "updated_at": datetime.now().isoformat(),
@@ -488,6 +505,10 @@ class TranslationClient:
                     "message": f"补翻后仍有 {still} 句无译文（将尽量用已有部分组装）",
                     "level": "WARNING",
                 })
+
+        if stop_check is not None and stop_check():
+            self._abort_translation(batch_futures, state_path, sent_originals, sent_trans)
+            raise TranslationStopped()
 
         # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
         self.post_ui({
@@ -515,6 +536,7 @@ class TranslationClient:
         self._save_cache()
         if state_path:
             save_json(state_path, {
+                "target_lang": self.target_lang,
                 "done": _snapshot_done(sent_trans, self._cache_lock),
                 "originals": sent_originals,
                 "updated_at": datetime.now().isoformat(),
@@ -804,6 +826,7 @@ def _apply_batch_translations(
     cache_lock: Lock,
     model: str,
     is_bilingual: bool = True,
+    target_lang: str = "zh",
 ) -> List[Tuple[str, str]]:
     """把一批 API 结果写回 sent_trans / cache。
 
@@ -856,7 +879,7 @@ def _apply_batch_translations(
             # 模型把原文当译文返回（拒译/未答）：不当有效译文，不写缓存，留待单条补翻
             applied.append((orig_text, ""))
             continue
-        key = sentence_cache_key(orig_text, model, is_bilingual)
+        key = sentence_cache_key(orig_text, model, is_bilingual, target_lang)
         # sent_trans 与 cache 同锁保护：主线程保存断点时会迭代 sent_trans，
         # worker 并发写入必须持同一把锁，否则迭代侧抛 "dictionary changed size"
         with cache_lock:

@@ -363,7 +363,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
 def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
     """显示翻译缓存弹窗，支持逐条删除和全部清空"""
     path = Path(work_dir) / "cache" / ".subtitle_translation_cache.json"
-    cache = load_json(path, {})
+    cache = shared_cache_snapshot(path)
     size = path.stat().st_size if path.exists() else 0
     dlg = QDialog(parent)
     dlg.setStyleSheet(_SCROLLBAR_STYLE)
@@ -412,9 +412,8 @@ def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
         # 必须同步删除进程级共享缓存：只改磁盘文件的话，内存里的共享缓存
         # 会在下次写盘时把被删条目原样写回（"删了又复活"）
         remove_shared_cache_entries(
-            cache_keys[i] for i in indices if 0 <= i < len(cache_keys))
+            (cache_keys[i] for i in indices if 0 <= i < len(cache_keys)), path)
         fresh = shared_cache_snapshot()
-        save_json(path, fresh)
         cache_keys = sorted(fresh.keys())
         # 从共享缓存快照整体重建列表（并发翻译新增的条目也会如实显示）
         list_widget.clear()

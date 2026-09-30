@@ -176,6 +176,7 @@ class PreviewPanel(QFrame):
         self._source_path: Optional[Path] = None
         self._save_cb = None
         self._raw_text = ""
+        self._preview_blocks: List[str] = []
         self._updating = False
         self._highlighted_rows: set = set()
         self._build_ui()
@@ -233,8 +234,7 @@ class PreviewPanel(QFrame):
         原始文本始终保留在 _raw_text 中，供编辑与保存使用；表格只负责展示
         （最多渲染最近 MAX_LIVE_PREVIEW_BLOCKS 块）。
         """
-        all_blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
-        blocks, offset = _visible_block_slice(all_blocks)
+        blocks, offset = _visible_block_slice(self._preview_blocks)
         rows = []
         for block_idx, block in enumerate(blocks):
             lines = block.splitlines()
@@ -369,6 +369,7 @@ class PreviewPanel(QFrame):
         self._render_timer.stop()
         self._scroll_on_render = False
         self._raw_text = text
+        self._preview_blocks = [b.strip() for b in text.replace("\r\n", "\n").split("\n\n") if b.strip()]
         self.setReadOnly(True)
         self._render_structured_preview()
 
@@ -376,6 +377,7 @@ class PreviewPanel(QFrame):
         self._render_timer.stop()
         self._scroll_on_render = False
         self._raw_text = ""
+        self._preview_blocks.clear()
         self._source_path = None
         self._highlighted_rows.clear()
         self._updating = True
@@ -388,8 +390,11 @@ class PreviewPanel(QFrame):
 
     def append(self, text: str):
         # _raw_text 保留全文（内存开销可忽略，编辑/保存需要完整内容）；
-        # 渲染由 _visible_block_slice 裁剪 + 定时器节流
+        # 渲染使用增量维护的块列表，避免每次刷新都重新切分全文。
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
+        self._preview_blocks.extend(
+            b.strip() for b in text.replace("\r\n", "\n").split("\n\n") if b.strip()
+        )
         self._scroll_on_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
@@ -453,7 +458,7 @@ class PreviewPanel(QFrame):
         col = item.column()
         if col not in (1, 2, 3):
             return
-        blocks = [b.strip() for b in self._raw_text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        blocks = self._preview_blocks.copy()
         # 按渲染时记录的源块索引回写（渲染跳过了无效块，行号 ≠ 块序号）
         block_idx = item.data(Qt.UserRole)
         if not isinstance(block_idx, int) or block_idx >= len(blocks):
@@ -485,6 +490,7 @@ class PreviewPanel(QFrame):
         leading = self._raw_text[: len(self._raw_text) - len(self._raw_text.lstrip())]
         trailing = self._raw_text[len(self._raw_text.rstrip()):]
         self._raw_text = leading + body + trailing
+        self._preview_blocks = blocks
 
     def _open_edit_dialog(self):
         content = self.get_text().strip()
@@ -640,6 +646,11 @@ class EditDialog(QDialog):
         self._update_nav()
 
     def _on_page_size_changed(self, text: str):
+        self._save_edit_buffer()
+        merged = self.get_merged_text()
+        self._full_text = merged
+        self._blocks = [b.strip() for b in merged.split("\n\n") if b.strip()]
+        self._page_edits.clear()
         self._page_size = 0 if text == "全部" else int(text)
         self._current_page = 0
         self._rebuild_pages()

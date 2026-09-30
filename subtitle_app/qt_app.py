@@ -111,9 +111,9 @@ class SubtitleApp(QMainWindow):
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
             "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", True),
             "target_lang": cfg.translation.target_lang,
-            "translation_only": False,
+            "translation_only": getattr(cfg.translation, "translation_only", False),
             "translation_batch_size": None,  # None=跟随 config 的 batch_size 默认
-            "send_all": False,
+            "send_all": getattr(cfg.translation, "send_all", False),
             "pause_before_embed": getattr(cfg.translation, "pause_before_embed", False),
             "backup_max_files": getattr(cfg.translation, "backup_max_files", 50),
         }
@@ -533,6 +533,8 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", True)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
+        trans["translation_only"] = values.get("translation_only", False)
+        trans["send_all"] = values.get("send_all", False)
         _bs_save = _batch_size_save_field(values)
         if _bs_save is not None:  # 自定义值才写入 config.json；默认值不覆盖
             field, _bs_val = _bs_save
@@ -977,6 +979,11 @@ class SubtitleApp(QMainWindow):
             show_history_dialog(self, self.work_dir, self._add_log_entry)
         except Exception as e:
             self._add_log_entry(f"打开历史对话框失败: {e}", level="ERROR", trace=traceback.format_exc())
+        finally:
+            self._ignore_set = self._load_ignore_set()
+            for file_list in (self.video_list, self.sub_list):
+                for i in range(file_list.count()):
+                    self._refresh_item_visual(file_list.item(i))
 
     def _show_cache(self):
         try:
@@ -1127,8 +1134,8 @@ class SubtitleApp(QMainWindow):
                     "type": "log",
                     "message": f"📦 [{i}/{total}] 嵌入: {video.name} + {srt.name}",
                 })
-                mkv, _ = embed_subtitles_to_video(video, srt, ffmpeg, post)
-                if mkv and mkv.exists():
+                mkv, trusted = embed_subtitles_to_video(video, srt, ffmpeg, post)
+                if mkv and mkv.exists() and trusted:
                     success += 1
                     self.signal_bridge.post({
                         "type": "log", "message": f"✅ [{i}/{total}] 嵌入完成: {mkv.name}",
@@ -1147,8 +1154,8 @@ class SubtitleApp(QMainWindow):
                         })
                 else:
                     self.signal_bridge.post({
-                        "type": "log", "message": f"❌ [{i}/{total}] 嵌入失败: {video.name}",
-                        "level": "WARNING",
+                        "type": "log", "message": f"❌ [{i}/{total}] 嵌入失败或时长验证未通过，已保留原文件: {video.name}",
+                        "level": "ERROR",
                     })
         except Exception as e:
             logger.error("后台嵌入线程异常: %s\n%s", e, traceback.format_exc())
@@ -1353,8 +1360,10 @@ class SubtitleApp(QMainWindow):
             logger.debug("Traceback:\n%s", trace.rstrip())
 
         # 显示到 UI 日志面板
-        self.log_panel.add_entry(message, level, trace)
-        self.log_panel.trim_to(cfg.app.max_log_lines)
+        panel = getattr(self, "log_panel", None)
+        if panel is not None:
+            panel.add_entry(message, level, trace)
+            panel.trim_to(cfg.app.max_log_lines)
 
     def _run_startup_checks(self):
         # ── 检查 config.json 是否存在 ──
@@ -1634,8 +1643,8 @@ def _claim_single_instance(on_activate, name: str = _INSTANCE_NAME):
     if lock.tryLock(0):
         server = QLocalServer()
         if not server.listen(name):
-            lock.unlock()
-            raise RuntimeError(f"无法启动字幕工具：{server.errorString()}")
+            logger.warning("单实例唤醒通道不可用，保留实例锁继续启动：%s", server.errorString())
+            return lock, None
 
         def accept_connections():
             while server.hasPendingConnections():

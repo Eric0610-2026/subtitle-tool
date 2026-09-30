@@ -42,6 +42,8 @@
   "translation": {
     "batch_size": 20,
     "target_lang": "zh",
+    "translation_only": false,
+    "send_all": false,
     "api_timeout": 120,
     "retry_count": 3,
     "retry_base_delay": 2.0,

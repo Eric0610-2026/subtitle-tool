@@ -1,6 +1,6 @@
 # 🎬 本地字幕生成与双语翻译工具
 
-基于 **faster-whisper** 的本地语音转写 + **AI** 翻译的 Windows 桌面工具。拖拽视频/音频即可一键生成双语字幕，支持批量处理、并行流水线和 MKV 字幕内嵌。
+基于 **faster-whisper** 的本地语音转写 + **AI** 翻译的 Windows 桌面工具。拖拽视频/音频即可生成字幕，支持批量处理、两阶段顺序调度和 MKV 字幕内嵌。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python">
@@ -17,8 +17,8 @@
 | **🎤 语音转写** | 本地 faster-whisper-large-v3-turbo 模型，支持 CUDA 加速，离线运行 |
 | **🌍 AI 翻译** | 本地 Hy-MT2 翻译模型（llama.cpp），批量翻译 + 句子级缓存去重，全离线运行 |
 | **📝 双语字幕** | 原文 + 译文上下对照排列，自动繁简转换 |
-| **📦 MKV 内嵌** | 自动将字幕软内嵌到 MKV 视频文件中，播放器直出双语字幕 |
-| **⏯ 断点续转/续翻** | 程序崩溃或手动中断后可从中断处继续，无需重新处理 |
+| **📦 MKV 内嵌** | 自动将原文或双语字幕软内嵌到 MKV 视频文件中 |
+| **⏯ 断点续转/续翻** | 程序崩溃或手动中断后可从最近一次检查点继续；崩溃时可能重做少量内容 |
 | **📊 实时进度** | 实时进度条 + ETA 估算 + 文件级状态追踪 |
 | **🎯 拖拽操作** | 支持文件/文件夹拖拽到列表，支持内部拖拽排序 |
 | **🔍 字幕预览** | 内嵌字幕预览面板，支持查找、时间偏移微调、手动编辑 |
@@ -101,8 +101,8 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 
 1. **添加文件**：拖拽视频/音频到「视频/音频生成字幕」标签页，或拖拽已有 `.srt` 文件到「已有字幕翻译」标签页
 2. **开启翻译**：勾选「🌍 开启 AI 翻译」复选框
-3. **点击「▶ 开始处理」**：程序自动执行语音转写 → AI 翻译 → 字幕落盘 → 可选 MKV 内嵌
-4. **查看结果**：每个视频目录下生成 SRT 字幕文件（翻译完成后如配置了 MKV 内嵌，还会自动生成内嵌字幕的视频）
+3. **点击「▶ 开始处理」**：程序先完成全部转写，再逐文件翻译（如已开启）并尝试 MKV 内嵌
+4. **查看结果**：视频内嵌成功时，在原目录生成 MKV，并删除原视频和工作目录中的 SRT；未内嵌时，在原目录保留外挂 SRT。字幕副本会写入 `logs/srt_backup/`，按设置的份数轮换
 
 > **下载器联动**：MissAV 下载器每批下载结束后选择“是”，本工具会被打开或激活，并把成功视频加入「视频/音频生成字幕」队列；不会自动开始处理，重复或已处理的视频会跳过。
 
@@ -110,17 +110,19 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 
 ### 输出文件说明
 
-处理完成后，输出目录（与输入文件同目录或同名子目录）中包含：
+输出位于输入文件所在目录。视频有可用 ffmpeg 时会自动尝试软内嵌；在「更多设置」开启「嵌入前暂停」后，可在确认窗口选择跳过。内嵌成功并通过时长验证后，程序会清理原视频和工作目录中的 SRT。
 
 | 文件 | 说明 |
 |------|------|
-| `视频名.srt` | **最终字幕**（纯译文或双语，取决于配置） |
-| `视频名.mkv` | 内嵌字幕的视频文件（如勾选 MKV 内嵌） |
+| `视频名.srt` | 未内嵌成功或跳过内嵌时保留的外挂字幕（纯译文、双语或原文，取决于设置） |
+| `视频名.mkv` | 视频内嵌成功时的输出；输入为 MKV 时通常命名为 `视频名_subbed.mkv` |
 | `*.translate_state.json` | 断点续翻状态文件（处理完成后自动清理） |
+
+翻译状态在首批、每 5 批及末批保存；主动停止或批次异常时也会保存。程序意外退出后，批量翻译最多可能重做最近 4 批；单条补翻可能重做尚未保存的部分。
 
 ### 功能详解
 
-- **翻译开关**：不勾选翻译时，仅执行语音转写，生成原文 SRT
+- **翻译开关**：不勾选翻译时使用原文字幕；视频仍会尝试自动内嵌，未内嵌时保留原文 SRT
 - **MKV 内嵌**：在「更多设置」中可开启「嵌入前暂停」，在弹窗中预览/编辑字幕后再决定是否嵌入
 - **提取内嵌字幕**：点击「📤 提取字幕」按钮，选择含内嵌字幕的视频文件（如 MKV），批量提取其第一个字幕流为独立 SRT；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。勾选「提取后转为 MP4」可同时将视频转换为 MP4（不带字幕，流复制优先、失败自动降级重编码），时长验证通过后删除原文件
 - **两阶段调度**：先批量转写全部文件，再统一翻译+内嵌（GPU 显存错峰，模型各只加载一次）
@@ -129,6 +131,11 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 ---
 
 ## ⚙ 配置文件
+
+「只要译文」与「一次性发送全部文本」支持永久保存，分别对应
+`translation.translation_only` 和 `translation.send_all`（默认均为 `false`）。
+翻译缓存键现包含目标语言，旧缓存条目保留但不再命中，需要重新翻译；
+断点状态只在目标语言一致时恢复，无语言标记的旧断点也会重新翻译。
 
 所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）。
 
@@ -174,14 +181,7 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 ├── tools/                         # 第三方工具与测试
 │   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（可选：可改用系统 PATH 版）
 │   ├── requirements.txt           # Python 依赖清单
-│   └── tests/                     # 单元测试（pipeline / srt_utils / translation 等）
-│       ├── test_pipeline.py
-│       ├── test_srt_utils.py
-│       ├── test_transcriber.py
-│       ├── test_translation.py
-│       ├── test_translator.py
-│       ├── test_muxer.py
-│       └── test_widgets.py
+│   └── tests/                     # unittest 测试（test_*.py）
 ├── models/                        # Whisper 语音模型文件
 │   └── faster-whisper-large-v3-turbo/
 ├── cache/                         # 运行时缓存（可自动清理）
@@ -189,8 +189,9 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 │   └── .subtitle_ignore.json
 ├── logs/                          # 运行日志 + SRT 备份
 │   └── subtitle_tool.log
-└── docs/
-    └── README.md                  # 本文档
+├── docs/
+│   └── 使用说明书.md
+└── README.md                      # 本文档
 ```
 
 ---
