@@ -296,6 +296,28 @@ class LocalServiceTest(unittest.TestCase):
             self.assertEqual(len(launches), 1, "并发下应只有一个调用者拉起进程")
             self.assertEqual(results, [True, True, True])
 
+    def test_owned_loading_service_is_not_foreign_port(self):
+        """本会话进程已监听、模型尚未就绪时，后续调用者应继续等待。"""
+        proc = _FakeProc()
+        local_service._owned_proc = proc
+        local_service._started_by_us = True
+        with patch.object(local_service, "_probe", side_effect=[False, True]), \
+                patch.object(local_service, "_port_listening", return_value=True), \
+                patch.object(local_service, "_launch_owned") as launch:
+            ok, detail, _ = local_service.ensure_running(timeout=1)
+        self.assertTrue(ok, detail)
+        launch.assert_not_called()
+        self.assertIs(local_service._owned_proc, proc)
+
+    def test_foreign_port_is_rejected_without_launch(self):
+        with patch.object(local_service, "_probe", return_value=False), \
+                patch.object(local_service, "_port_listening", return_value=True), \
+                patch.object(local_service, "_launch_owned") as launch:
+            ok, detail, _ = local_service.ensure_running(timeout=1)
+        self.assertFalse(ok)
+        self.assertIn("其他进程", detail)
+        launch.assert_not_called()
+
     def test_startup_diagnosis_tail_and_netsh(self):
         """诊断：无日志返回空串；普通错误附日志尾部不带 netsh；bind 失败附 netsh 提示"""
         with tempfile.TemporaryDirectory() as d:
@@ -307,6 +329,10 @@ class LocalServiceTest(unittest.TestCase):
                 self.assertIn("line two", diag)
                 self.assertIn("line one", diag)
                 self.assertNotIn("netsh", diag)  # 非 bind 失败 → 不给端口提示
+                log.write_text("旧日志\n" * 10000 + "一\n\n 二 \n三\n四\n五\n", encoding="utf-8")
+                diag = local_service._startup_diagnosis()
+                self.assertNotIn("旧日志", diag)
+                self.assertIn("一\n二\n三\n四\n五", diag)
         # bind 失败（如被 Windows 端口预留占走）→ 附管理员 netsh 修复命令
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "srv.log"

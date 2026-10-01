@@ -196,9 +196,9 @@ class PreviewPanel(QFrame):
             "highlight_bg": "#fde68a", "highlight_fg": "#1e293b",
         }
 
-    def _style_item(self, item: QTableWidgetItem, kind: str):
+    def _style_item(self, item: QTableWidgetItem, kind: str, colors: Optional[dict] = None):
         """按列类型设置单元格字体、颜色与对齐（kind: index/time/text/translation）"""
-        c = self._palette_colors()
+        c = colors if colors is not None else self._palette_colors()
         if kind == "index":
             item.setFont(QFont("Consolas", 8))
             item.setForeground(QBrush(QColor(c["index"])))
@@ -222,11 +222,12 @@ class PreviewPanel(QFrame):
         QSS 切换不会重设 QTableWidgetItem 的 QBrush 前景/背景色，
         不重渲染的话旧主题的文字颜色会残留在新主题背景上（原文列近乎隐形）。
         """
+        highlighted_rows = sorted(self._highlighted_rows)
         if self._raw_text.strip():
             self._render_structured_preview()
-        if self._highlighted_rows:
+        if highlighted_rows:
             self.highlight_rows(
-                [r for r in sorted(self._highlighted_rows) if r < self.preview.rowCount()])
+                [r for r in highlighted_rows if r < self.preview.rowCount()])
 
     def _render_structured_preview(self):
         """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
@@ -252,27 +253,37 @@ class PreviewPanel(QFrame):
             rows.append((offset + block_idx, timeline, original, translated))
         if not rows:
             self._highlighted_rows.clear()
+            self.preview.setRowCount(0)
             self._stack.setCurrentWidget(self._empty_label)
             return
         self._stack.setCurrentWidget(self.preview)
+        colors = self._palette_colors()
+        signals_blocked = self.preview.blockSignals(True)
+        updates_enabled = self.preview.updatesEnabled()
+        self.preview.setUpdatesEnabled(False)
         self._updating = True
         try:
             self._highlighted_rows.clear()
-            self.preview.setRowCount(0)
             self.preview.setRowCount(len(rows))
             for r, (block_idx, timeline, original, translated) in enumerate(rows):
                 for col, (kind, text) in enumerate(
                     (("index", str(r + 1)), ("time", timeline), ("text", original), ("translation", translated))
                 ):
-                    item = QTableWidgetItem(text)
+                    item = self.preview.item(r, col)
+                    if item is None:
+                        item = QTableWidgetItem()
+                        self.preview.setItem(r, col, item)
+                    item.setText(text)
                     item.setData(Qt.UserRole, block_idx)
-                    self._style_item(item, kind)
+                    item.setBackground(QBrush())
+                    self._style_item(item, kind, colors)
                     if kind == "index":
                         # 序号列始终不可编辑；其余列由 setReadOnly 统一控制
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                    self.preview.setItem(r, col, item)
         finally:
             self._updating = False
+            self.preview.blockSignals(signals_blocked)
+            self.preview.setUpdatesEnabled(updates_enabled)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -426,12 +437,16 @@ class PreviewPanel(QFrame):
         """高亮命中的行，并滚动到第一个命中行"""
         self.clear_highlight()
         c = self._palette_colors()
-        for r in rows:
-            for col in range(self.preview.columnCount()):
-                item = self.preview.item(r, col)
-                if item:
-                    item.setBackground(QBrush(QColor(c["highlight_bg"])))
-                    item.setForeground(QBrush(QColor(c["highlight_fg"])))
+        signals_blocked = self.preview.blockSignals(True)
+        try:
+            for r in rows:
+                for col in range(self.preview.columnCount()):
+                    item = self.preview.item(r, col)
+                    if item:
+                        item.setBackground(QBrush(QColor(c["highlight_bg"])))
+                        item.setForeground(QBrush(QColor(c["highlight_fg"])))
+        finally:
+            self.preview.blockSignals(signals_blocked)
         self._highlighted_rows = set(rows)
         if rows:
             self.preview.scrollToItem(self.preview.item(rows[0], 0), QAbstractItemView.PositionAtTop)
@@ -439,12 +454,17 @@ class PreviewPanel(QFrame):
     def clear_highlight(self):
         """恢复高亮行的默认样式（交替背景 + 各列颜色）"""
         kinds = ["index", "time", "text", "translation"]
-        for r in self._highlighted_rows:
-            for col in range(self.preview.columnCount()):
-                item = self.preview.item(r, col)
-                if item:
-                    item.setBackground(QBrush())
-                    self._style_item(item, kinds[col])
+        colors = self._palette_colors()
+        signals_blocked = self.preview.blockSignals(True)
+        try:
+            for r in self._highlighted_rows:
+                for col in range(self.preview.columnCount()):
+                    item = self.preview.item(r, col)
+                    if item:
+                        item.setBackground(QBrush())
+                        self._style_item(item, kinds[col], colors)
+        finally:
+            self.preview.blockSignals(signals_blocked)
         self._highlighted_rows.clear()
 
     # ── 单元格编辑回写 _raw_text ──

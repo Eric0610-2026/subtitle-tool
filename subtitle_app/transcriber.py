@@ -469,12 +469,7 @@ class Transcriber:
                 prev_end = resume_offset
                 for seg in segments:
                     if self.stop_check and self.stop_check():
-                        # 中断前保存 checkpoint
-                        if checkpoint_enabled and partial_srt and blocks:
-                            try:
-                                Transcriber._write_partial_srt(partial_srt, blocks)
-                            except OSError as e:
-                                logger.warning("停止时断点写入失败: %s", e)
+                        # 公共异常处理保存 checkpoint，避免停止时重复写盘。
                         raise RuntimeError("用户停止")
                     # ── 跳过空文本的 segment（Whisper 在长静音段偶发输出空 seg）──
                     text = seg.text.strip()

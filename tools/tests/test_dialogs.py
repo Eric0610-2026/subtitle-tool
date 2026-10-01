@@ -5,6 +5,8 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,7 +14,7 @@ from PySide6.QtCore import QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
-from subtitle_app.dialogs import SettingsDialog, _find_matching_subtitle
+from subtitle_app.dialogs import ExtractDialog, SettingsDialog, _find_matching_subtitle
 from subtitle_app.theme import build_qss, load_theme_colors
 from subtitle_app.widgets import PopupFade, _PopupSeparatorDelegate
 
@@ -107,6 +109,23 @@ class TestFindMatchingSubtitle(unittest.TestCase):
             (d / "movie [2024].zh.srt").write_text("x", encoding="utf-8")
             got = _find_matching_subtitle(d / "movie [2024].mp4")
             self.assertEqual(got, d / "movie [2024].zh.srt")
+
+
+class TestExtractFileSelection(unittest.TestCase):
+    def test_batch_import_keeps_order_and_skips_existing_and_batch_duplicates(self):
+        dialog = SimpleNamespace(
+            _files=[Path("existing.mp4")],
+            _default_dir="",
+            _refresh_table=Mock(),
+        )
+        with patch("subtitle_app.dialogs.QFileDialog.getOpenFileNames", return_value=(
+            ["second.mp4", "existing.mp4", "second.mp4", "third.mp4"], ""
+        )):
+            ExtractDialog._browse_files(dialog)
+        self.assertEqual(dialog._files, [
+            Path("existing.mp4"), Path("second.mp4"), Path("third.mp4")
+        ])
+        dialog._refresh_table.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from subtitle_app.srt_utils import (
     seconds_to_srt_time, srt_time_to_seconds, fmt_duration,
@@ -87,6 +88,33 @@ class TestSrtRoundtrip(unittest.TestCase):
         self.assertEqual([b.end for b in blocks], [2.0, 4.0])
 
 
+class TestReadTextAuto(unittest.TestCase):
+    def test_encoding_fallback_reads_once_and_normalizes_newlines(self):
+        from subtitle_app.srt_utils import _read_text_auto
+
+        cases = [
+            ("你好\r\n世界\r".encode("utf-8-sig"), "你好\n世界\n"),
+            ("你好\r\n世界\r".encode("gbk"), "你好\n世界\n"),
+            (b"\xff\r\n\xfe\r", "ÿ\nþ\n"),
+            (b"", ""),
+        ]
+        for data, expected in cases:
+            with self.subTest(data=data):
+                path = MagicMock(spec=Path)
+                path.read_bytes.return_value = data
+                self.assertEqual(_read_text_auto(path), expected)
+                path.read_bytes.assert_called_once_with()
+
+    def test_read_error_is_propagated(self):
+        from subtitle_app.srt_utils import _read_text_auto
+
+        path = MagicMock(spec=Path)
+        path.read_bytes.side_effect = PermissionError("blocked")
+        with self.assertRaises(PermissionError):
+            _read_text_auto(path)
+        path.read_bytes.assert_called_once_with()
+
+
 class TestSplitSentences(unittest.TestCase):
     def test_cjk_english_and_empty(self):
         self.assertEqual(split_sentences("你好。世界！你好吗？"),
@@ -94,6 +122,31 @@ class TestSplitSentences(unittest.TestCase):
         self.assertEqual(split_sentences("Hello world. How are you? I am fine."),
                          ["Hello world.", "How are you?", "I am fine."])
         self.assertEqual(split_sentences(""), [])
+
+    def test_abbreviations_initials_and_internal_periods(self):
+        from subtitle_app.srt_utils import _split_english_sentences
+
+        cases = [
+            ("Dr. Smith met A. Jones. Next sentence.",
+             ["Dr. Smith met A. Jones.", "Next sentence."]),
+            ("Use version 1.2.3 at example.com. All done.",
+             ["Use version 1.2.3 at example.com.", "All done."]),
+            ("(Mr). Smith;Dr. Lee:Prof. Green. Next sentence.",
+             ["(Mr). Smith;Dr. Lee:Prof. Green.", "Next sentence."]),
+            ("Wait...\tNext sentence!\u3000Really?\nYes.",
+             ["Wait...", "Next sentence!", "Really?", "Yes."]),
+            ("Done . Next sentence.", ["Done .", "Next sentence."]),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(_split_english_sentences(text), expected)
+
+    def test_long_paragraph_keeps_all_sentence_boundaries(self):
+        from subtitle_app.srt_utils import _split_english_sentences
+
+        sentence = "This is a complete sentence."
+        self.assertEqual(_split_english_sentences((sentence + " ") * 3000),
+                         [sentence] * 3000)
 
 
 class TestCacheKey(unittest.TestCase):

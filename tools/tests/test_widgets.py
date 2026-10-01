@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """widgets.py 单元测试（仅测试非 Qt 依赖部分）"""
 import unittest
+from unittest.mock import patch
 
 
 class TestVisibleBlockSlice(unittest.TestCase):
@@ -22,6 +23,81 @@ class TestVisibleBlockSlice(unittest.TestCase):
 
 
 class TestPreviewIncrementalRendering(unittest.TestCase):
+    @staticmethod
+    def _make_panel():
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from subtitle_app.panels import PreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        return app, PreviewPanel()
+
+    def test_render_reuses_cells_and_restores_signal_and_update_states(self):
+        app, panel = self._make_panel()
+        first = "1\n00:00:01,000 --> 00:00:02,000\nfirst"
+        second = "2\n00:00:02,000 --> 00:00:03,000\nsecond"
+        panel.set_text(first)
+        first_item = panel.preview.item(0, 2)
+        changed = []
+        panel.preview.itemChanged.connect(changed.append)
+        panel.append(second)
+        with patch.object(panel, "_palette_colors", wraps=panel._palette_colors) as colors:
+            panel._flush_live_render()
+        self.assertEqual(colors.call_count, 1)
+        self.assertIs(panel.preview.item(0, 2), first_item)
+        self.assertEqual(changed, [])
+        self.assertFalse(panel.preview.signalsBlocked())
+        self.assertTrue(panel.preview.updatesEnabled())
+
+        panel.preview.blockSignals(True)
+        panel.preview.setUpdatesEnabled(False)
+        panel._render_structured_preview()
+        self.assertTrue(panel.preview.signalsBlocked())
+        self.assertFalse(panel.preview.updatesEnabled())
+        panel.preview.blockSignals(False)
+        panel.preview.setUpdatesEnabled(True)
+        panel.clear()
+        self.assertEqual(panel.preview.rowCount(), 0)
+
+    def test_theme_keeps_highlight_without_rewriting_source_text(self):
+        app, panel = self._make_panel()
+        from PySide6.QtCore import Qt
+        text = "1\n00:00:01,000 --> 00:00:02,000\n  original  \n  translation  \n"
+        panel.set_text(text)
+        panel.setReadOnly(False)
+        panel.highlight_rows([0])
+        self.assertEqual(panel.get_text(), text)
+        panel.refresh_theme()
+        self.assertEqual(panel._highlighted_rows, {0})
+        self.assertEqual(panel.preview.item(0, 2).background().color().name(), "#fde68a")
+        panel.clear_highlight()
+        self.assertEqual(panel.get_text(), text)
+        self.assertEqual(panel._highlighted_rows, set())
+        self.assertEqual(panel.preview.item(0, 2).background().style(), Qt.NoBrush)
+        panel.highlight_rows([0])
+        panel.set_text(text)
+        self.assertEqual(panel._highlighted_rows, set())
+        self.assertEqual(panel.preview.item(0, 2).background().style(), Qt.NoBrush)
+
+    def test_reused_cells_edit_the_correct_block_after_preview_window_moves(self):
+        app, panel = self._make_panel()
+        from subtitle_app.panels import MAX_LIVE_PREVIEW_BLOCKS
+        blocks = [f"{i + 1}\n00:00:01,000 --> 00:00:02,000\nsegment_{i}"
+                  for i in range(MAX_LIVE_PREVIEW_BLOCKS)]
+        panel.set_text("\n\n".join(blocks))
+        first_item = panel.preview.item(0, 2)
+        panel.append(f"{MAX_LIVE_PREVIEW_BLOCKS + 1}\n00:00:02,000 --> 00:00:03,000\nlast")
+        panel._flush_live_render()
+        self.assertIs(panel.preview.item(0, 2), first_item)
+        self.assertEqual(first_item.text(), "segment_1")
+        panel.setReadOnly(False)
+        first_item.setText("changed")
+        updated = panel.get_text().split("\n\n")
+        self.assertEqual(updated[0], blocks[0])
+        self.assertTrue(updated[1].endswith("changed"))
+        self.assertTrue(updated[-1].endswith("last"))
+
     def test_append_then_edit_keeps_full_text_and_source_mapping(self):
         import os
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

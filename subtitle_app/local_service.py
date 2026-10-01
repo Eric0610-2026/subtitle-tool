@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -69,10 +70,9 @@ def local_model_name() -> str:
 def _find_model() -> Optional[Path]:
     """返回第一个 .gguf 模型文件；未找到返回 None"""
     try:
-        files = sorted(_MODELS_DIR.glob("*.gguf"))
+        return min(_MODELS_DIR.glob("*.gguf"), default=None)
     except OSError:
         return None
-    return files[0] if files else None
 
 
 def _probe(timeout: float = 0.8) -> bool:
@@ -133,12 +133,10 @@ def _startup_diagnosis() -> str:
     """读取 llama-server 日志尾部，给出退出的真实原因与针对性修复提示。
     无日志/读不到时返回空串（调用方退回笼统提示）。"""
     try:
-        lines = [ln.strip() for ln in
-                 _SERVER_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
-                 if ln.strip()]
+        with _SERVER_LOG.open(encoding="utf-8", errors="replace") as log:
+            tail = deque((line for ln in log if (line := ln.strip())), maxlen=5)
     except OSError:
         return ""
-    tail = lines[-5:]
     if not tail:
         return ""
     diag = "\n服务日志（最后 %d 行）：\n%s" % (len(tail), "\n".join(tail))
@@ -167,12 +165,16 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
 
     # 端口已监听但 /health 不通：非翻译服务占用了本服务端口，立即报错而不是干等
     if _port_listening():
-        return False, (
-            f"端口 {_PORT} 已被其他进程占用，且其中没有可用的翻译服务。"
-            f"请用 `netstat -ano | findstr :{_PORT}` 找到占用进程并退出后重试。"
-        ), False
+        # 本会话服务加载模型时可能已监听端口，但 /health 尚未就绪。
+        with _lock:
+            owned_loading = _owned_proc is not None and _owned_proc.poll() is None
+        if not owned_loading:
+            return False, (
+                f"端口 {_PORT} 已被其他进程占用，且其中没有可用的翻译服务。"
+                f"请用 `netstat -ano | findstr :{_PORT}` 找到占用进程并退出后重试。"
+            ), False
 
-    start_time = time.time()
+    start_time = time.monotonic()
     launcher = False
     crashed = False
     with _lock:
@@ -204,10 +206,11 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
     last_report = 0.0
     deadline = start_time + timeout
     last_err = f"服务未在预期时间内就绪（首次加载模型通常需 10~60 秒，当前上限 {timeout:.0f} 秒）"
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if _probe():
-            first = not _ready_announced
-            _ready_announced = True
+            with _lock:
+                first = not _ready_announced
+                _ready_announced = True
             return True, "本地服务已就绪", first
         proc = _owned_proc
         if proc is not None and proc.poll() is not None:
@@ -215,7 +218,7 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
             crashed = True
             break
         if on_progress:
-            now = time.time()
+            now = time.monotonic()
             if now - last_report >= _PROGRESS_INTERVAL:
                 last_report = now
                 try:

@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
@@ -296,6 +297,38 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             except RuntimeError:
                 # ffmpeg mock may fail, but Whisper transcribe should still work
                 pass
+
+    def test_stop_and_segment_error_save_checkpoint_once(self):
+        from subtitle_app.srt_utils import parse_srt
+
+        for mode in ("stop", "error"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                t = Transcriber()
+                state = {"stopped": False}
+                t.stop_check = lambda: state["stopped"]
+
+                def segments():
+                    yield SimpleNamespace(start=0.0, end=1.0, text="Saved progress.")
+                    if mode == "error":
+                        raise ValueError("segment failed")
+                    state["stopped"] = True
+                    yield SimpleNamespace(start=1.0, end=2.0, text="Must not be saved.")
+
+                model = MagicMock()
+                model.transcribe.return_value = (segments(), SimpleNamespace(language="en"))
+                video = Path(d) / "test.mp4"
+                video.touch()
+                exception = RuntimeError if mode == "stop" else ValueError
+                with patch.object(t, "load_whisper_model", return_value=model), \
+                        patch.object(Transcriber, "_write_partial_srt",
+                                     wraps=Transcriber._write_partial_srt) as write:
+                    with self.assertRaises(exception):
+                        t.transcribe_video(video, Path(d),
+                                           {**self.base_opts, "extract_audio": False})
+                write.assert_called_once()
+                saved = parse_srt(Path(d) / "test.partial.srt")
+                self.assertEqual([block.text for block in saved], ["Saved progress."])
+                self.assertEqual(saved[0].end, 1.0)
 
 
 class TestAutoLangReuse(unittest.TestCase):

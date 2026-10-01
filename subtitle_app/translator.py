@@ -141,20 +141,6 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     translated_srt: Optional[Path] = None
     if translate_enabled:
-        # 本地翻译：自动确保 llama-server 已启动（幂等，仅首次真正拉起）
-        post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
-        ok, detail, first = ensure_running(on_progress=lambda sec: post({
-            "type": "log",
-            "message": f"正在启动本地模型服务… 已等待 {sec}s（首次加载通常 10~60 秒）",
-            "level": "INFO",
-        }))
-        if not ok:
-            post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
-                                            f"请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 {service_url_prefix()} 未被其它程序占用。",
-                  "level": "ERROR"})
-            raise RuntimeError(f"本地模型服务不可用：{detail}")
-        if first:
-            post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
         # 始终传入 state_path：state 文件由 translate_blocks 在首批落盘时创建，
@@ -190,6 +176,20 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         cache_size = 0
         try:
             if need_translate_idx:
+                # 只在确有待翻译字幕时加载模型；中文转换和已有译文无需服务。
+                post({"type": "log", "message": "检查本地 Hy-MT2 服务…", "level": "INFO"})
+                ok, detail, first = ensure_running(on_progress=lambda sec: post({
+                    "type": "log",
+                    "message": f"正在启动本地模型服务… 已等待 {sec}s（首次加载通常 10~60 秒）",
+                    "level": "INFO",
+                }))
+                if not ok:
+                    post({"type": "log", "message": f"本地模型服务不可用：{detail}。"
+                                                    f"请检查 tools\\llama-cpp 与 models\\hy-mt2 目录是否完整，或确认 {service_url_prefix()} 未被其它程序占用。",
+                          "level": "ERROR"})
+                    raise RuntimeError(f"本地模型服务不可用：{detail}")
+                if first:
+                    post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
                 need_blocks = [blocks[i] for i in need_translate_idx]
                 is_bilingual = not translation_only
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
@@ -218,14 +218,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             missing_zh = 0
             for block, zh in zip(blocks, zh_texts):
                 z = (zh or "").strip()
-                src = block.text.strip()
-                if z and z != src:
-                    # 正常双语
-                    final_texts.append(f"{block.text}\n{z}")
-                elif z and z == src:
-                    # 译文与原文相同（极短语气词等）——仍写两行，避免看起来像「没翻」
-                    final_texts.append(f"{block.text}\n{z}")
-                elif z:
+                if z:
+                    # 非空译文统一写双语，包括与原文相同的极短语气词。
                     final_texts.append(f"{block.text}\n{z}")
                 else:
                     # 仍无译文：保留原文，并计数
@@ -241,13 +235,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             final_texts = zh_texts
 
         translated_srt = source_srt.with_name(f"{safe_stem(item.name)}.translated.tmp.srt")
-        write_srt(translated_srt, blocks, final_texts)
-
         if is_chinese_source:
             post({"type": "log", "message": "检测到中文源，转换为简体中文...", "level": "INFO"})
-            simplified_texts = [to_simplified(t) for t in final_texts]
-            write_srt(translated_srt, blocks, simplified_texts)
-            final_texts = simplified_texts
+            final_texts = [to_simplified(t) for t in final_texts]
+        write_srt(translated_srt, blocks, final_texts)
 
         # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；
         # 双语模式下 final_texts 已是"原文\n译文"合并文本，译文列只取纯译文行，避免原文重复显示

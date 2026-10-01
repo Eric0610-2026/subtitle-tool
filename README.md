@@ -96,6 +96,8 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 翻译请求会按原文长度限制输出量（128–2048 token），避免短字幕因重复生成长时间卡住。
 截断或异常重复的回复会拆批重试；模型误用的 JSON 中文分隔符会在保留译文标点的前提下修复。
 停止任务后不再发起后续拆批或重试，已经发出的请求会在后台自然结束。
+等待翻译结果时每轮都会检查停止信号，最多等待当前一轮 15 秒；无需调用模型的
+纯中文转换或已有中文译文处理不会启动本地翻译服务。
 
 > **换电脑迁移**：从旧电脑复制 `subtitle_app/config.json`（检查绝对路径）、`models/` 和所需的 `tools/llama-cpp/`、`tools/ffmpeg.exe`、`tools/ffprobe.exe`。若要保留翻译缓存、处理记录和字幕备份，再复制 `cache/` 与 `logs/srt_backup/`。这些目录或文件不会随 Git 克隆；新电脑仍需安装 Python 和显卡驱动。旧版 `cache/.deps_installed` 标记会自动失效；若复制缓存后发现新环境缺依赖，可删除该标记再启动。
 
@@ -213,6 +215,9 @@ python -m unittest tools.tests.test_translator -v
 python -m unittest tools.tests.test_muxer -v
 python -m unittest tools.tests.test_widgets -v
 ```
+
+目前共 187 项测试，模型与媒体处理调用使用模拟对象，无需加载真实模型。
+本次代码结构与性能审查记录见 [效率审查记录](docs/efficiency-review-2026-10-01.md)。
 
 ---
 

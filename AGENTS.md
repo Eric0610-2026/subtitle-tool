@@ -13,7 +13,7 @@ AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心
 ## 测试
 
 ```powershell
-python -m unittest discover -s tools/tests      # 全部（164 例）
+python -m unittest discover -s tools/tests      # 全部（187 例）
 python -m unittest tools.tests.test_translator   # 单文件
 python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 单用例
 ```
@@ -75,6 +75,8 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   生成按原文长度设置 128–2048 token 上限，并启用轻度重复惩罚；截断或异常重复响应
   不作为译文接受，走已有拆批/单句兜底。JSON 容错只替换字符串外的中文逗号/冒号，
   保留译文标点；停止后禁止在途请求继续发起拆批或重试（已发出的请求自然结束）。
+  等待批次结果时每轮检查停止信号，最多等待当前一轮 15 秒；仅有待翻译字幕时才
+  确保本地模型服务启动，纯中文转换/已有中文译文处理不要求模型服务。
 - **任务配置快照**：`qt_app._build_opts` 将设置对话框中可修改的任务参数（含批大小、
   备份份数）解析为具体值；`SubtitleWorker.start` 随即复制并冻结该 dict。后台阶段不得
   回读 `cfg` 覆盖这些值，设置改动只影响下一次启动的任务。
@@ -98,6 +100,13 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 - **设置持久化**：`translation.translation_only` 与 `translation.send_all` 默认均为 false，永久保存后重启读取。
 - **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
   增量维护预览块列表，只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
+  复用表格单元格，每次刷新统一计算主题色；渲染和高亮样式更新阻断表格信号，避免
+  触发全文编辑回写；主题切换保留高亮，刷新结束恢复原信号和绘制状态。
+- **字幕文本处理**：编码回退只读一次字节，按 UTF-8 BOM → GBK → Latin-1 解码并
+  保持通用换行；英文断句只检查句点前末词，避免重复扫描整个段落前缀。
+- **服务与媒体清理**：本会话模型加载时已监听但健康检查未就绪，继续等待，不误报端口占用；
+  服务超时使用单调时钟，日志诊断只保留最近 5 条非空行；字幕内嵌临时文件在 finally
+  统一清理，非有限数或非正视频时长不能作为验证通过的依据。
 
 ## 配置与安全
 

@@ -191,6 +191,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                 # 返回翻译文本
                 client.translate_blocks.return_value = [f"{b.text}（中文）" for b in blocks]
             client.get_cache_size.return_value = 5
+            mocks["client"] = client
             return client
 
         mocks["TranslationClient"].side_effect = mock_client_side_effect
@@ -203,6 +204,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "subtitle_app.translator",
             TranslationClient=mocks["TranslationClient"],
             embed_subtitles_to_video=mocks["embed_subtitles_to_video"],
+            ensure_running=mocks["ensure_running"],
         ):
             from subtitle_app.translator import translate_only
             translate_only(
@@ -211,10 +213,24 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
         return posts, mocks
 
+    def test_chinese_conversion_skips_model_and_writes_once(self):
+        """无需翻译时，不启动模型，简体转换完成后只写一次临时字幕。"""
+        from subtitle_app.srt_utils import write_srt
+        with patch("subtitle_app.translator.write_srt", wraps=write_srt) as writer, \
+                patch("subtitle_app.translator.to_simplified", return_value="汉字"):
+            posts, mocks = self._run(srt_texts=["漢字"], detected_lang="zh",
+                                     is_chinese_source=True)
+        mocks["ensure_running"].assert_not_called()
+        mocks["client"].translate_blocks.assert_not_called()
+        self.assertEqual(writer.call_count, 1)
+        output = next(p["path"] for p in posts if p["type"] == "output_path")
+        self.assertIn("汉字", Path(output).read_text(encoding="utf-8"))
+
     def test_translate_output_modes(self):
         """输出模式：双语（原文+译文）/仅翻译（只译文）/中文源繁简转换"""
         # 双语模式：文本 + 中文翻译
         posts, mocks = self._run(srt_texts=["Hello", "World"])
+        mocks["ensure_running"].assert_called_once()
         previews = [p for p in posts if p["type"] == "preview"]
         self.assertGreater(len(previews), 0)
         lines = previews[0]["message"].split("\n")

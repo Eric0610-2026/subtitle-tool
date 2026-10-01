@@ -776,10 +776,12 @@ class ExtractDialog(QDialog):
             self, "选择视频文件", start, f"视频文件 ({exts})")
         if not paths:
             return
+        existing = set(self._files)
         for p in paths:
             pp = Path(p)
-            if pp not in self._files:
+            if pp not in existing:
                 self._files.append(pp)
+                existing.add(pp)
         self._refresh_table()
 
     def _remove_selected(self):

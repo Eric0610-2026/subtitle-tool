@@ -234,17 +234,20 @@ SRT_BLOCK_RE = re.compile(
 
 
 def _read_text_auto(path: Path) -> str:
-    """按编码顺序尝试读取文本文件：utf-8-sig → gbk → latin-1 → 替换字符兜底。
+    """读取一次文件，按 utf-8-sig → gbk → latin-1 顺序尝试解码。
 
     Windows 常见的中文 SRT 是 GBK/ANSI 编码，只按 UTF-8 读会抛
     UnicodeDecodeError 导致整批翻译中止；latin-1 永不失败，保证总有内容可解析。
     """
+    data = path.read_bytes()
     for enc in ("utf-8-sig", "gbk", "latin-1"):
         try:
-            return path.read_text(encoding=enc)
+            text = data.decode(enc)
+            break
         except UnicodeDecodeError:
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    # 与 Path.read_text 的通用换行行为一致，预览也会直接使用此函数。
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def parse_srt(path: Path) -> List[SubtitleBlock]:
@@ -426,8 +429,8 @@ def _split_english_sentences(text: str) -> List[str]:
     while i < len(text):
         ch = text[i]
         current += ch
-        if ch in ".!?" and (ch != "." or _is_sentence_end(text, i)):
-            if i + 1 >= len(text) or text[i + 1].isspace():
+        if ch in ".!?" and (i + 1 >= len(text) or text[i + 1].isspace()):
+            if ch != "." or _is_sentence_end(text, i):
                 result.append(current.strip())
                 current = ""
         i += 1
@@ -439,8 +442,14 @@ def _split_english_sentences(text: str) -> List[str]:
 def _is_sentence_end(text: str, pos: int) -> bool:
     if text[pos] != ".":
         return True
-    before = text[:pos].strip()
-    raw_word = re.split(r"[\s,;:]+", before)[-1].strip("()[]{}「」『』【】\"'")
+    # 仅检查句点前的末词，避免每句重新复制、分割整个段落前缀。
+    end = pos
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    start = end
+    while start > 0 and not (text[start - 1].isspace() or text[start - 1] in ",;:"):
+        start -= 1
+    raw_word = text[start:end].strip("()[]{}「」『』【】\"'")
     last_word = raw_word.lower()
     if last_word in _ABBREVIATIONS:
         return False

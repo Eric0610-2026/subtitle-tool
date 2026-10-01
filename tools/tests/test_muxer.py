@@ -60,6 +60,43 @@ class TestSanitizeSrtForMux(unittest.TestCase):
             self.assertEqual(cleaned[0].end, 2.0)
 
 
+class TestEmbedTemporaryCleanup(unittest.TestCase):
+    def test_temporary_files_removed_on_success_fallback_timeout_and_error(self):
+        from subtitle_app import muxer
+
+        for mode in ("success", "fallback", "timeout", "error", "failure"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video, srt, sanitized, remux = [root / name for name in (
+                    "movie.ts", "movie.srt", "sanitized.srt", "remux.tmp.mkv")]
+                for path in (video, srt, sanitized, remux):
+                    path.write_bytes(b"source")
+                calls = []
+
+                def run(cmd, *args):
+                    calls.append(cmd)
+                    if mode == "error":
+                        raise RuntimeError("ffmpeg failed")
+                    if mode == "failure" or (mode == "fallback" and len(calls) == 1):
+                        return MagicMock(returncode=1), "", "failed"
+                    Path(cmd[-1]).write_bytes(b"output" * 1024)
+                    if mode == "timeout":
+                        return None
+                    return MagicMock(returncode=0), "", ""
+
+                with patch.object(muxer, "_sanitize_srt_for_mux", return_value=sanitized), \
+                        patch.object(muxer, "_remux_ts_to_mkv", return_value=remux), \
+                        patch.object(muxer, "_run_ffmpeg", side_effect=run), \
+                        patch.object(muxer, "_verify_duration", return_value=(True, "ok")):
+                    output, trusted = muxer.embed_subtitles_to_video(video, srt, "ffmpeg", lambda e: None)
+                self.assertFalse(sanitized.exists())
+                self.assertFalse(remux.exists())
+                self.assertTrue(video.exists())
+                self.assertTrue(srt.exists())
+                self.assertEqual(trusted, mode in ("success", "fallback", "timeout"))
+                self.assertEqual(output is not None, trusted)
+
+
 class TestFindSiblingProbe(unittest.TestCase):
     """_find_sibling_probe"""
 
@@ -122,6 +159,11 @@ class TestProbeDuration(unittest.TestCase):
             # N/A 输出 → None
             mock_run.return_value = MagicMock(returncode=0, stdout="N/A\n")
             self.assertIsNone(_probe_duration(p, "ffprobe.exe"))
+            # 非有限数与非正时长不能成为删除源视频的依据。
+            for value in ("nan", "inf", "-inf", "0", "-1"):
+                with self.subTest(duration=value):
+                    mock_run.return_value = MagicMock(returncode=0, stdout=value)
+                    self.assertIsNone(_probe_duration(p, "ffprobe.exe"))
             # 不存在文件 → None
             mock_run.reset_mock()
             self.assertIsNone(_probe_duration(Path("nonexistent.mp4"), "ffprobe.exe"))

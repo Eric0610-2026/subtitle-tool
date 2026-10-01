@@ -460,6 +460,35 @@ class TestStopAndBreaker(unittest.TestCase):
                                    translation_concurrency=1, stop_check=stop.is_set)
             self.assertLess(len(calls), 5, "停止后不应继续翻译剩余批次")
 
+    def test_stop_during_wait_saves_checkpoint_without_waiting_again(self):
+        """请求仍未结束时，收到停止信号后在下一次轮询立即保存并返回。"""
+        from concurrent.futures import TimeoutError
+        from subtitle_app.translation import TranslationStopped
+        from subtitle_app.srt_utils import load_json
+        with tempfile.TemporaryDirectory() as d:
+            c = self._client(d, batch_size=1)
+            stop = threading.Event()
+            future = MagicMock()
+
+            def wait_for_result(timeout):
+                stop.set()
+                raise TimeoutError()
+
+            future.result.side_effect = wait_for_result
+            executor = MagicMock()
+            executor.submit.return_value = future
+            state_path = Path(d) / "state.json"
+            with patch("subtitle_app.translation._executor_scope") as scope:
+                scope.return_value.__enter__.return_value = executor
+                with self.assertRaises(TranslationStopped):
+                    c.translate_blocks(self._blocks(1), "en", True,
+                                       state_path=state_path, stop_check=stop.is_set)
+            future.result.assert_called_once_with(timeout=15)
+            future.cancel.assert_called_once()
+            state = load_json(state_path, {})
+            self.assertEqual(state["target_lang"], "zh")
+            self.assertEqual(state["originals"], {"0": "T1"})
+
     def test_empty_batches_trip_breaker(self):
         """连续多批 0 有效译文（全部拒译）→ 空批熔断中止，不再逐句补翻"""
         with tempfile.TemporaryDirectory() as d:

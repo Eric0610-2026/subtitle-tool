@@ -237,15 +237,11 @@ class TranslationClient:
             para_of_block.append(current_para)
 
         # Step 1: 展开为句子
-        block_sents: List[Tuple[int, List[str]]] = []
-        for bidx, block in enumerate(blocks):
-            sents = split_sentences(block.text)
-            block_sents.append((bidx, sents))
         flat: List[Tuple[int, int, str]] = []
         gsid_to_para: List[int] = []
-        for bidx, sents in block_sents:
+        for bidx, block in enumerate(blocks):
             para = para_of_block[bidx]
-            for sent in sents:
+            for sent in split_sentences(block.text):
                 flat.append((len(flat), bidx, sent))
                 gsid_to_para.append(para)
         if not flat:
@@ -387,12 +383,12 @@ class TranslationClient:
             completed_count = 0
             consecutive_empty = 0
             for future, batch_id in batch_futures:
-                if stop_check is not None and stop_check():
-                    self._abort_translation(batch_futures, state_path,
-                                            sent_originals, sent_trans)
-                    raise TranslationStopped()
                 # 轮询等待，每隔 15s 发送心跳防止 UI 假死
                 while True:
+                    if stop_check is not None and stop_check():
+                        self._abort_translation(batch_futures, state_path,
+                                                sent_originals, sent_trans)
+                        raise TranslationStopped()
                     try:
                         applied_count = future.result(timeout=15)
                         break
