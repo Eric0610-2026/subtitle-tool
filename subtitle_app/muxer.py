@@ -99,7 +99,7 @@ def _verify_duration(video_path: Path, mkv_path: Path,
                      ffmpeg_bin: str) -> Tuple[bool, str]:
     """验证输出 MKV 时长，返回 (passed, detail_message)。
 
-    passed=True 表示时长验证通过（ratio>=0.95，短源放宽至 0.8），可以安全删除原文件。
+    passed=True 表示双向时长差在严格容器容差内。
     passed=False 表示时长异常或无法验证，严禁删除原文件。
     """
     ffprobe = _find_sibling_probe(ffmpeg_bin)
@@ -113,19 +113,12 @@ def _verify_duration(video_path: Path, mkv_path: Path,
             f"（源={'✓' if src_dur else '✗'} 输出={'✓' if out_dur else '✗'}）"
         )
     ratio = out_dur / src_dur
-    if src_dur < 10:
-        # 短源同样要验证（否则残缺输出会被判"可信"导致原文件被删），
-        # 但短视频容器时间戳相对偏差大，阈值从 0.95 放宽到 0.8
-        if ratio < 0.8:
-            return False, (
-                f"源视频较短（{src_dur:.1f}s），输出仅 {out_dur:.1f}s "
-                f"({ratio*100:.0f}%)，疑似不完整"
-            )
-        return True, f"短视频时长验证通过：{out_dur:.1f}s/{src_dur:.1f}s ({ratio*100:.0f}%)"
-    if ratio < 0.95:
+    # 最低 250ms 用于容器舍入；长视频最多容忍 1s，避免比例阈值放行数分钟截断。
+    tolerance = max(0.25, min(1.0, src_dur * 0.001))
+    if abs(out_dur - src_dur) > tolerance:
         return False, (
-            f"输出时长 {out_dur:.1f}s 仅为源 {src_dur:.1f}s "
-            f"的 {ratio*100:.0f}%，可能存在时间戳不连续"
+            f"输出时长 {out_dur:.1f}s，源 {src_dur:.1f}s "
+            f"({ratio*100:.0f}%)，偏差超过 {tolerance:.2f}s，保留原文件"
         )
     return True, f"时长验证通过：{out_dur:.1f}s/{src_dur:.1f}s ({ratio*100:.0f}%)"
 
@@ -185,21 +178,13 @@ def _remux_ts_to_mkv(ffmpeg_bin: str, ts_path: Path, post: Callable,
                          register_proc, unregister_proc)
 
     if result is None:
-        if mkv_temp.exists() and mkv_temp.stat().st_size > _MKV_MIN_SIZE:
-            ffprobe = _find_sibling_probe(ffmpeg_bin)
-            dur = _probe_duration(mkv_temp, ffprobe)
-            if dur and dur > 10:
-                post({"type": "log",
-                      "message": f"重封装完成（超时但已生成）：ffprobe 报告 {dur:.0f}s（实际数据可能更完整）",
-                      "level": "INFO"})
-                return mkv_temp
         if mkv_temp.exists():
             mkv_temp.unlink(missing_ok=True)
         return None
 
     proc, _, stderr = result
 
-    if proc.returncode == 0 or (mkv_temp.exists() and mkv_temp.stat().st_size > _MKV_MIN_SIZE):
+    if proc.returncode == 0 and mkv_temp.exists() and mkv_temp.stat().st_size > _MKV_MIN_SIZE:
         ffprobe = _find_sibling_probe(ffmpeg_bin)
         fixed_dur = _probe_duration(mkv_temp, ffprobe)
         src_dur = _probe_duration(ts_path, ffprobe)
@@ -268,7 +253,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
     1. 净化 SRT 时间戳
     2. 若源为 .ts，先修复性重封装为临时 .mkv（解决时间戳全 0/不连续）
     3. 执行 ffmpeg 软内嵌（在修复后的 .mkv 或原始文件上）
-    4. 若 ffmpeg 返回非零但 MKV 已生成且有效，仍视为成功
+    4. 超时/非零返回即使已有输出，也不允许删除源文件
     5. 若 MKV 无效或无输出，尝试降级命令重试
     6. 时长验证并返回可信度
     """
@@ -299,6 +284,10 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
         mkv_path = video_path.with_suffix(".mkv")
         if mkv_path.exists():
             mkv_path = video_path.parent / f"{video_path.stem}_subbed.mkv"
+            number = 1
+            while mkv_path.exists():
+                mkv_path = video_path.parent / f"{video_path.stem}_subbed_{number}.mkv"
+                number += 1
 
         cmd = _build_embed_cmd(ffmpeg_bin, actual_video, srt_for_mux, mkv_path)
         cmd_str = " ".join(str(a) for a in cmd)
@@ -310,7 +299,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
         if result is None:
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
                 return _verify_and_return(video_path, mkv_path, ffmpeg_bin, post,
-                                          "内嵌超时但 MKV 已生成", "WARNING")
+                                          "内嵌超时但 MKV 已生成，保留原文件", "WARNING", process_ok=False)
             return None, False
 
         proc, stdout, stderr = result
@@ -325,7 +314,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
         # ffmpeg 返回非零但 MKV 已有效生成 → 容忍
         if mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
             return _verify_and_return(video_path, mkv_path, ffmpeg_bin, post,
-                                      f"MKV 文件已有效生成（{mkv_path.stat().st_size / 1024:.0f}KiB），仍视为成功")
+                                      "ffmpeg 异常退出，已生成的 MKV 仅供检查，保留原文件", "WARNING", process_ok=False)
 
         # ── 降级重试：加 -fflags +genpts ──
         post({"type": "log", "message": "尝试降级命令重试（+genpts）...", "level": "INFO"})
@@ -342,7 +331,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
         if result2 is None:
             if mkv_path and mkv_path.exists() and mkv_path.stat().st_size > _MKV_MIN_SIZE:
                 return _verify_and_return(video_path, mkv_path, ffmpeg_bin, post,
-                                          "降级重试超时但 MKV 已生成", "WARNING")
+                                          "降级重试超时但 MKV 已生成，保留原文件", "WARNING", process_ok=False)
             return None, False
 
         proc2, _, stderr2 = result2
@@ -350,7 +339,7 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
             if proc2.returncode != 0:
                 _log_ffmpeg_error(post, " ".join(str(a) for a in fallback_cmd), proc2, stderr2)
             return _verify_and_return(video_path, mkv_path, ffmpeg_bin, post,
-                                      f"降级命令内嵌完成：{mkv_path.name}")
+                                      f"降级命令内嵌完成：{mkv_path.name}", process_ok=proc2.returncode == 0)
 
         # 两轮均失败且无有效输出 → 清理
         _log_ffmpeg_error(post, " ".join(str(a) for a in fallback_cmd), proc2, stderr2)
@@ -365,9 +354,14 @@ def embed_subtitles_to_video(video_path: Path, srt_path: Path, ffmpeg_bin: str, 
     return None, False
 
 
-def _verify_and_return(video_path, mkv_path, ffmpeg_bin, post, log_msg, level="INFO"):
+def _verify_and_return(video_path, mkv_path, ffmpeg_bin, post, log_msg, level="INFO", process_ok=True):
     """验证时长 + 记录结果 + 返回（临时文件由调用方统一清理）"""
-    dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
+    if not mkv_path.exists() or mkv_path.stat().st_size <= _MKV_MIN_SIZE:
+        return None, False
+    if process_ok:
+        dur_ok, dur_msg = _verify_duration(video_path, mkv_path, ffmpeg_bin)
+    else:
+        dur_ok, dur_msg = False, "ffmpeg 未正常完成，严禁删除原文件"
     post({"type": "log", "message": log_msg, "level": level})
     post({"type": "log", "message": dur_msg, "level": "INFO" if dur_ok else "WARNING"})
     return mkv_path, dur_ok

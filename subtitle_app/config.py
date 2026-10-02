@@ -55,6 +55,8 @@ class Config:
             raise RuntimeError(f"配置文件无权限读取 ({self._path}): {e}")
         except OSError as e:
             raise RuntimeError(f"配置文件读取失败 ({self._path}): {e}")
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"配置根节点必须是 JSON 对象 ({self._path})")
         if (self._path != _FALLBACK_PATH and _FALLBACK_PATH.exists()
                 and isinstance(raw, dict)):
             try:

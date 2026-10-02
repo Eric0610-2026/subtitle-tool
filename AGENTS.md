@@ -13,7 +13,7 @@ AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心
 ## 测试
 
 ```powershell
-python -m unittest discover -s tools/tests      # 全部（187 例）
+python -m unittest discover -s tools/tests      # 全部（188 例）
 python -m unittest tools.tests.test_translator   # 单文件
 python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 单用例
 ```
@@ -22,6 +22,7 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
 - 13 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
   test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service /
   test_dialogs / test_tray / test_handoff / test_subtitle_app / test_bug_regressions
+- 真实翻译编排测试必须把 `translator._BACKUP_DIR` patch 到临时目录，禁止触碰生产备份。
 - 改完必须跑全量：`python -m unittest discover -s tools/tests`
 
 ## 模块清单（subtitle_app/）
@@ -85,7 +86,10 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
   replace 冲突做短暂重试。
   续翻状态包含 `target_lang`，只恢复目标语言一致的状态；旧状态无此字段时重新翻译。
+  返回原文不算完成；旧断点/缓存中的原文占位也重新翻译。
 - **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验。
+  先按非负起始时间稳定排序再净化、重编号；保留乱序块的合法时间与文本对应关系，
+  相同起点保持原顺序，不再把早期字幕强行挪到前一块的起点。
 - **嵌入前暂停**：`translator.py` 中 `PauseResponse`（event + action + modified_text）。
 - **事件契约**：`done` 事件可带 `stopped: True`（用户停止，UI 不再谎报"全部完成"）；
   失败按文件粒度处理（`log` ERROR + 跳过继续），全部失败才发 `error`，部分失败发 `done` 带失败数。
@@ -93,20 +97,31 @@ python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 
   文件级并发下文件序号≠完成数，禁止再用 idx 当累计值）。
 - **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突，大小写不敏感）→ 报错中止；
   `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
+  已有字幕与续翻候选共用 `is_source_subtitle_stem`：匹配不区分大小写，
+  只检查媒体名后面的后缀是否含 bak/backup/translated/partial，避免误排除片名本身含这些词的字幕。
 - **下载器联动**：`qt_app` 通过 `QTcpServer` 只监听回环地址；收到媒体路径后仅接受现存的支持格式，加入视频队列、自动跳过重复/已处理项并激活现有窗口，绝不自动开始处理。
 - **托盘常驻与单实例**：`qt_app.main` 在构建窗口前用按应用目录命名的 `QLockFile` 抢占实例，并用 `QLocalServer` 接收再次启动的唤醒请求；再次运行快捷方式仅恢复原窗口并退出新进程。可用时创建 `QSystemTrayIcon`，普通 `closeEvent` 仅保存窗口状态并隐藏，不设 `_closing` 或停止 worker；单击图标恢复，右键菜单可打开或彻底退出。退出时若有运行中任务先确认，再走原关闭清理。隐藏时嵌入确认事件排队并发通知，恢复窗口后再显示对话框；系统通知区域不可用时正常关闭。
-- **配置钳位**：`checkpoint_interval`/`batch_size` 读取处 `max(1, int(...) or 默认)`，杜绝 0 值崩溃。
+- **配置钳位**：`checkpoint_interval` 非正数/非法值回退 30，合法正数保持（包括 1）；
+  `batch_size` 至少为 1，杜绝 0 值崩溃。
 - **启动降级**：实例锁成功但唤醒通道监听失败时保留锁继续运行，记录 WARNING；此时再次启动无法唤醒窗口。
 - **设置持久化**：`translation.translation_only` 与 `translation.send_all` 默认均为 false，永久保存后重启读取。
 - **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
   增量维护预览块列表，只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
   复用表格单元格，每次刷新统一计算主题色；渲染和高亮样式更新阻断表格信号，避免
   触发全文编辑回写；主题切换保留高亮，刷新结束恢复原信号和绘制状态。
-- **字幕文本处理**：编码回退只读一次字节，按 UTF-8 BOM → GBK → Latin-1 解码并
-  保持通用换行；英文断句只检查句点前末词，避免重复扫描整个段落前缀。
+- **字幕文本处理**：只读一次字节，优先识别 Unicode BOM 及无 BOM UTF-16，
+  再按 UTF-8 BOM → GBK → Latin-1 回退并保持通用换行。解析/预览/编辑分页
+  统一按「可选编号 + 时间轴」识别边界，保留正文内空行；异常小时字段报 ValueError，
+  非空文件解析为空有告警，翻译入口拒绝空区块。英文断句只检查句点前末词。
 - **服务与媒体清理**：本会话模型加载时已监听但健康检查未就绪，继续等待，不误报端口占用；
   服务超时使用单调时钟，日志诊断只保留最近 5 条非空行；字幕内嵌临时文件在 finally
   统一清理，非有限数或非正视频时长不能作为验证通过的依据。
+  内嵌 ffmpeg 超时/非零退出、TS 重封装异常输出不得成为删除源文件的依据；时长
+  双向偏差不得超过 `max(0.25, min(1.0, 源秒数 * 0.001))` 秒。已有 MKV 输出
+  按编号避让；原文/译文备份独占创建并递增解决同秒冲突。
+- **转写进度与配置**：真实媒体时长来自 ffprobe（缺失时回退 Whisper info.duration），
+  ffmpeg 最后进度刻度只供日志。配置根节点必须为对象；主题颜色按 QColor 规范化，
+  无效类型/颜色回退对应主题默认值，旧浅色头部兼容判断也走规范化结果。
 
 ## 配置与安全
 

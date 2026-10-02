@@ -16,7 +16,7 @@ from typing import Callable, List, Optional, Tuple
 from .srt_utils import (
     VIDEO_EXTS, AUDIO_EXTS, SUB_EXTS, safe_stem,
     find_existing_subtitle, find_tool,
-    IGNORE_FILE,
+    IGNORE_FILE, is_source_subtitle_stem,
 )
 from .transcriber import Transcriber
 from .translation import TranslationStopped
@@ -28,12 +28,9 @@ logger = logging.getLogger(__name__)
 def _is_resume_srt_candidate(f2: Path, stem: str, final_srt: Path) -> bool:
     """断点续翻的源字幕候选：与视频同 stem（或带语言后缀），
     排除备份/译文/断点文件与最终输出本身，避免拿别的视频的字幕续翻"""
-    f_stem = f2.stem
-    if "bak" in f_stem or "translated" in f_stem or "partial" in f_stem:
-        return False
     if f2.resolve() == final_srt.resolve():
         return False
-    return f_stem == stem or f_stem.startswith(stem + ".")
+    return is_source_subtitle_stem(f2.stem, stem)
 
 
 class SubtitleWorker:

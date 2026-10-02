@@ -418,11 +418,13 @@ class TestCheckpointIntervalClamp(unittest.TestCase):
 
     def test_zero_negative_and_invalid_clamped(self):
         from subtitle_app.transcriber import _safe_checkpoint_interval
-        self.assertEqual(_safe_checkpoint_interval(0), 1)
-        self.assertEqual(_safe_checkpoint_interval(-5), 1)
+        self.assertEqual(_safe_checkpoint_interval(0), 30)
+        self.assertEqual(_safe_checkpoint_interval(-5), 30)
+        self.assertEqual(_safe_checkpoint_interval(1), 1)
         self.assertEqual(_safe_checkpoint_interval(30), 30)
         self.assertEqual(_safe_checkpoint_interval(None), 30)
         self.assertEqual(_safe_checkpoint_interval("abc"), 30)
+        self.assertEqual(_safe_checkpoint_interval(float("inf")), 30)
 
 
 if __name__ == "__main__":

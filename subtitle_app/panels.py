@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
 )
 
-from .srt_utils import _read_text_auto
+from .srt_utils import _read_text_auto, split_srt_blocks, SRT_TIMING_LINE_RE
 from .widgets import LogEntry
 
 logger = logging.getLogger(__name__)
@@ -239,13 +239,15 @@ class PreviewPanel(QFrame):
         rows = []
         for block_idx, block in enumerate(blocks):
             lines = block.splitlines()
-            if len(lines) < 3:
+            timing_index = 0 if lines and SRT_TIMING_LINE_RE.match(lines[0]) else 1
+            content_start = timing_index + 1
+            if len(lines) <= content_start or not SRT_TIMING_LINE_RE.match(lines[timing_index]):
                 continue
-            timeline = lines[1].strip()
-            text_lines = [line.strip() for line in lines[2:] if line.strip()]
-            if not text_lines:
+            timeline = lines[timing_index].strip()
+            text_lines = lines[content_start:]
+            if not any(line.strip() for line in text_lines):
                 continue
-            original = text_lines[0]
+            original = text_lines[0].strip()
             translated = "\n".join(text_lines[1:]) or "—"
             # 全文块索引随单元格存入 UserRole：编辑回写按它定位源块。
             # 渲染会跳过无效块（行数不足/无文本），表格行号 ≠ 块序号，
@@ -380,7 +382,7 @@ class PreviewPanel(QFrame):
         self._render_timer.stop()
         self._scroll_on_render = False
         self._raw_text = text
-        self._preview_blocks = [b.strip() for b in text.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        self._preview_blocks = split_srt_blocks(text)
         self.setReadOnly(True)
         self._render_structured_preview()
 
@@ -403,9 +405,7 @@ class PreviewPanel(QFrame):
         # _raw_text 保留全文（内存开销可忽略，编辑/保存需要完整内容）；
         # 渲染使用增量维护的块列表，避免每次刷新都重新切分全文。
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
-        self._preview_blocks.extend(
-            b.strip() for b in text.replace("\r\n", "\n").split("\n\n") if b.strip()
-        )
+        self._preview_blocks.extend(split_srt_blocks(text))
         self._scroll_on_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
@@ -484,26 +484,28 @@ class PreviewPanel(QFrame):
         if not isinstance(block_idx, int) or block_idx >= len(blocks):
             return
         lines = blocks[block_idx].splitlines()
+        timing_index = 0 if lines and SRT_TIMING_LINE_RE.match(lines[0]) else 1
+        content_start = timing_index + 1
         if col == 1:
             # 时间轴
-            if len(lines) < 2:
+            if len(lines) <= timing_index:
                 return
-            lines[1] = item.text().strip()
+            lines[timing_index] = item.text().strip()
         else:
-            text_lines = [l.strip() for l in lines[2:] if l.strip()]
+            text_lines = lines[content_start:]
             if not text_lines:
                 return
             if col == 2:
                 # 原文（保持第 1 行语义；译文原样保留）
                 text_lines[0] = item.text()
-                lines = lines[:2] + text_lines
+                lines = lines[:content_start] + text_lines
             else:
                 # 译文（可多行；清空或 “—” 视为无译文）
                 new_trans = item.text()
                 if new_trans.strip() in ("", "—"):
-                    lines = lines[:2] + [text_lines[0]]
+                    lines = lines[:content_start] + [text_lines[0]]
                 else:
-                    lines = lines[:2] + [text_lines[0]] + new_trans.split("\n")
+                    lines = lines[:content_start] + [text_lines[0]] + new_trans.split("\n")
         blocks[block_idx] = "\n".join(lines)
         body = "\n\n".join(blocks)
         # 保留原始文本首尾空白，避免重建丢失 SRT 结尾换行等格式
@@ -548,7 +550,7 @@ class EditDialog(QDialog):
     def __init__(self, full_text: str, parent=None, save_cb=None):
         super().__init__(parent)
         self._full_text = full_text
-        self._blocks = [b.strip() for b in full_text.split("\n\n") if b.strip()]
+        self._blocks = split_srt_blocks(full_text)
         self._page_size = 10
         self._current_page = 0
         self._total_pages = 0
@@ -669,7 +671,7 @@ class EditDialog(QDialog):
         self._save_edit_buffer()
         merged = self.get_merged_text()
         self._full_text = merged
-        self._blocks = [b.strip() for b in merged.split("\n\n") if b.strip()]
+        self._blocks = split_srt_blocks(merged)
         self._page_edits.clear()
         self._page_size = 0 if text == "全部" else int(text)
         self._current_page = 0
@@ -752,7 +754,7 @@ class EditDialog(QDialog):
         from .srt_utils import shift_srt_timestamps
         merged = shift_srt_timestamps(self.get_merged_text(), offset)
         self._full_text = merged
-        self._blocks = [b.strip() for b in merged.split("\n\n") if b.strip()]
+        self._blocks = split_srt_blocks(merged)
         self._page_edits.clear()
         self._current_page = 0
         self._rebuild_pages()

@@ -262,6 +262,7 @@ class TranslationClient:
                 if (
                     isinstance(zh_done, str)
                     and zh_done.strip()
+                    and zh_done.strip() != sent_originals.get(gsid_str)
                     and saved_originals.get(gsid_str) == sent_originals.get(gsid_str)
                 ):
                     sent_trans[gsid] = zh_done.strip()
@@ -272,7 +273,7 @@ class TranslationClient:
                 continue
             key = sentence_cache_key(sent, self.model, is_bilingual, self.target_lang)
             cached = self.cache.get(key)
-            if isinstance(cached, str) and cached.strip():
+            if isinstance(cached, str) and cached.strip() and cached.strip() != sent:
                 sent_trans[gsid] = cached.strip()
                 with self._cache_lock:
                     if key in self.cache:
@@ -280,7 +281,7 @@ class TranslationClient:
                         self.cache[key] = self.cache.pop(key)
             else:
                 # 空缓存 / 无效缓存：重新翻译
-                if key in self.cache and not (isinstance(cached, str) and cached.strip()):
+                if key in self.cache:
                     with self._cache_lock:
                         self.cache.pop(key, None)
                 sent_trans[gsid] = ""
@@ -483,12 +484,8 @@ class TranslationClient:
                         for gsid in gsids:
                             sent_trans[gsid] = zh
                         got_translation = True
-                    elif zh:
-                        # 与原文相同也写入，避免反复补翻同一句；双语组装层会处理
-                        for gsid in gsids:
-                            sent_trans[gsid] = zh
                     else:
-                        logger.warning("单条补翻仍无结果: %r", orig[:80])
+                        logger.warning("单条补翻仍无有效译文: %r", orig[:80])
                 except Exception as e:
                     logger.warning("单条补翻失败 %r: %s", orig[:80], e)
                 # 熔断统计：异常/无译文/译文=原文（拒译）都算无进展，

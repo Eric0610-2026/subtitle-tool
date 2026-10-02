@@ -93,8 +93,8 @@ class TestEmbedTemporaryCleanup(unittest.TestCase):
                 self.assertFalse(remux.exists())
                 self.assertTrue(video.exists())
                 self.assertTrue(srt.exists())
-                self.assertEqual(trusted, mode in ("success", "fallback", "timeout"))
-                self.assertEqual(output is not None, trusted)
+                self.assertEqual(trusted, mode in ("success", "fallback"))
+                self.assertEqual(output is not None, mode in ("success", "fallback", "timeout"))
 
 
 class TestFindSiblingProbe(unittest.TestCase):
@@ -189,11 +189,11 @@ class TestVerifyDuration(unittest.TestCase):
     def test_verify_duration_cases(self):
         """时长验证各分支：通过/偏低/短视频跳过/无 ffprobe/缺时长"""
         from subtitle_app.muxer import _verify_duration
-        # 通过（98% >= 95%）
+        # 98% 会丢失 2s：旧比例阈值允许通过，新规则必须保留源文件。
         self.mock_probe.side_effect = [100.0, 98.0]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
-        self.assertTrue(passed)
+        self.assertFalse(passed)
         self.assertIn("98%", msg)
         # 偏低（50% < 95%）
         self.mock_probe.side_effect = [100.0, 50.0]
@@ -212,11 +212,11 @@ class TestVerifyDuration(unittest.TestCase):
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
         self.assertFalse(passed)
-        # 短源轻度偏差（8s → 7.5s，>80%）放宽通过
+        # 短源丢失半秒也必须保留源文件。
         self.mock_probe.side_effect = [8.0, 7.5]
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),
                                        "ffmpeg.exe")
-        self.assertTrue(passed)
+        self.assertFalse(passed)
         # 无 ffprobe → 失败
         self.mock_sibling.return_value = None
         passed, msg = _verify_duration(Path("test.mp4"), Path("test.mkv"),

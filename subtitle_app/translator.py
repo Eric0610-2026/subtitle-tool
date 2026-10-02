@@ -41,6 +41,29 @@ _BACKUP_DIR = Path(__file__).resolve().parent.parent / "logs" / "srt_backup"
 _progress_file_lock = threading.Lock()
 
 
+def _copy_unique_backup(source: Path, backup_dir: Path, name: str) -> Path:
+    """独占创建备份目标；同秒冲突继续递增，绝不覆盖已有副本。"""
+    target = backup_dir / name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    number = 0
+    while True:
+        try:
+            destination = target.open("xb")
+            break
+        except FileExistsError:
+            number += 1
+            suffix = f"_{timestamp}" + (f"_{number}" if number > 1 else "")
+            target = backup_dir / f"{Path(name).stem}{suffix}{Path(name).suffix}"
+    try:
+        with destination, source.open("rb") as original:
+            shutil.copyfileobj(original, destination)
+        shutil.copystat(source, target)
+    except OSError:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def _record_progress(work_dir, item: Path) -> None:
     """记录已处理文件到 cache/.subtitle_ignore.json（加锁，防并行覆盖丢条目）"""
     with _progress_file_lock:
@@ -135,6 +158,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     post({"type": "log", "message": f"解析字幕: {source_srt.name}", "level": "INFO"})
     blocks = parse_srt(source_srt)
     sanitize_blocks(blocks)  # 过滤空文本条目
+    if not blocks:
+        raise ValueError(f"字幕没有有效区块，请检查格式或编码: {source_srt}")
 
     if is_stopped and is_stopped():
         return
@@ -284,13 +309,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
     if source_srt and source_srt.exists():
         backup_dir = _BACKUP_DIR
         backup_dir.mkdir(parents=True, exist_ok=True)
-        bak_dest = backup_dir / source_srt.name
-        if bak_dest.exists():
-            stem = source_srt.stem
-            suffix = source_srt.suffix
-            bak_dest = backup_dir / f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
         try:
-            shutil.copy2(str(source_srt), str(bak_dest))
+            bak_dest = _copy_unique_backup(source_srt, backup_dir, f"{safe_stem(source_srt.name)}{source_srt.suffix}")
             post({"type": "log", "message": f"原文字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份原文字幕失败: %s", e)
@@ -303,11 +323,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         backup_dir.mkdir(parents=True, exist_ok=True)
         # 用有意义的文件名区分原文和译文：视频名.translated.srt
         bak_name = f"{item_stem}.translated.srt"
-        bak_dest = backup_dir / bak_name
-        if bak_dest.exists():
-            bak_dest = backup_dir / f"{item_stem}.translated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
         try:
-            shutil.copy2(str(translated_srt), str(bak_dest))
+            bak_dest = _copy_unique_backup(translated_srt, backup_dir, bak_name)
             post({"type": "log", "message": f"翻译字幕已备份至 logs/srt_backup/{bak_dest.name}", "level": "INFO"})
         except OSError as e:
             logger.warning("备份翻译字幕失败: %s", e)

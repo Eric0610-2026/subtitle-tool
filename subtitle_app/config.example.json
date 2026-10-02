@@ -86,7 +86,7 @@
 
   "theme": {
     "light": {
-      "bg": "#f4f5f7", "card": "#ffffff", "header": "#1a1a2e",
+      "bg": "#f4f5f7", "card": "#ffffff", "header": "#eef2ff",
       "accent": "#6366f1", "text": "#0f172a", "text_sec": "#475569",
       "text_muted": "#94a3b8", "border": "#e2e8f0", "success": "#22c55e",
       "danger": "#ef4444"

@@ -10,6 +10,15 @@ from unittest.mock import MagicMock, patch
 from subtitle_app.srt_utils import SubtitleBlock
 
 
+def setUpModule():
+    # 所有真实 translate_only 调用均隔离生产备份（包括单文件运行）。
+    directory = tempfile.TemporaryDirectory(prefix="subtitle_test_backup_")
+    unittest.addModuleCleanup(directory.cleanup)
+    backup_patch = patch("subtitle_app.translator._BACKUP_DIR", Path(directory.name))
+    backup_patch.start()
+    unittest.addModuleCleanup(backup_patch.stop)
+
+
 def _make_block(index=1, start=1.0, end=3.0, text="Hello world"):
     return SubtitleBlock(index=index, start=start, end=end, text=text)
 

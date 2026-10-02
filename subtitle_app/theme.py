@@ -20,11 +20,41 @@ from .config import cfg
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_COLORS = {
+    "light": dict(bg="#f4f5f7", card="#ffffff", header="#eef2ff", accent="#6366f1",
+                  text="#0f172a", text_sec="#475569", text_muted="#94a3b8",
+                  border="#e2e8f0", success="#22c55e", danger="#ef4444"),
+    "dark": dict(bg="#0b0d14", card="#16182a", header="#06070c", accent="#818cf8",
+                 text="#e2e8f0", text_sec="#94a3b8", text_muted="#64748b",
+                 border="#2a2b45", success="#22c55e", danger="#ef4444"),
+}
+
+
+def _normalize_colors(values, is_dark):
+    defaults = _DEFAULT_COLORS["dark" if is_dark else "light"]
+    values = values if isinstance(values, dict) else {}
+    colors = {}
+    for key, default in defaults.items():
+        value = values.get(key, default)
+        color = QColor(value.strip()) if isinstance(value, str) else QColor()
+        if not color.isValid():
+            logger.warning("主题颜色 %s=%r 无效，使用默认值 %s", key, value, default)
+            color = QColor(default)
+        colors[key] = color.name(QColor.NameFormat.HexRgb if color.alpha() == 255 else QColor.NameFormat.HexArgb)
+    # 兼容旧配置：浅色主题以前也使用深色头部默认值。
+    if not is_dark and colors["header"] == "#1a1a2e":
+        colors["header"] = defaults["header"]
+    return colors
+
+
 def load_theme_colors():
     """从 config.json 读取浅色/深色配色字典，返回 (light, dark)。"""
-    light = {k: v for k, v in cfg.theme.light.__dict__.items()}
-    dark = {k: v for k, v in cfg.theme.dark.__dict__.items()}
-    return light, dark
+    configured = getattr(cfg, "theme", None)
+    colors = []
+    for name, is_dark in (("light", False), ("dark", True)):
+        value = getattr(configured, name, None)
+        colors.append(_normalize_colors(vars(value) if hasattr(value, "__dict__") else value, is_dark))
+    return colors[0], colors[1]
 
 
 _CHECK_PNG_CACHE = None
@@ -119,7 +149,7 @@ def make_sun_icon(size: int = 20) -> QIcon:
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#fbbf24")  # 琥珀黄，深色 header 上醒目
+    color = QColor("#b45309")  # 浅色头部使用深琥珀色，保证图标对比度
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(color)
     c = size / 2
@@ -168,16 +198,17 @@ def detect_system_dark() -> bool:
 
 
 def _mix_hex(c1: str, c2: str, t: float) -> str:
-    """线性混合两个 #rrggbb 颜色，t=0 返回 c1，t=1 返回 c2（用于渐变中间色）"""
-    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    """按 Qt 颜色格式混合 RGB 分量（用于渐变中间色）。"""
+    first, second = QColor(c1), QColor(c2)
+    r1, g1, b1 = first.red(), first.green(), first.blue()
+    r2, g2, b2 = second.red(), second.green(), second.blue()
     r, g, b = (round(a + (b_ - a) * t) for a, b_ in ((r1, r2), (g1, g2), (b1, b2)))
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def build_qss(colors: dict, is_dark: bool) -> str:
     """根据配色与明暗模式生成全局 QSS 样式表"""
-    c = colors
+    c = _normalize_colors(colors, is_dark)
     check_png = checkmark_png()
     border_radius = "border-radius:10px;"
     panel_radius = "border-radius:14px;"
@@ -187,8 +218,15 @@ def build_qss(colors: dict, is_dark: bool) -> str:
     surface_alt = "#20243a" if is_dark else "#f8fafc"
     theme_key = "dark" if is_dark else "light"
     arrow = _arrow_png(theme_key, c['text_muted'])
-    # 头部渐变中间色：让右侧过渡更柔和，避免 accent 在标题区形成生硬色块
-    header_mid = _mix_hex(c['header'], c['accent'], 0.45)
+    # 浅色头部的整个渐变保持浅色，文字和徽标同步使用对应主题颜色。
+    header_end = c['accent'] if is_dark else _mix_hex(c['header'], c['accent'], 0.12)
+    header_mid = _mix_hex(c['header'], header_end, 0.45)
+    header_text = "white" if is_dark else c['text']
+    header_border = "rgba(255,255,255,0.12)" if is_dark else c['border']
+    badge_text = "rgba(255,255,255,0.78)" if is_dark else c['accent']
+    badge_bg = "rgba(255,255,255,0.12)" if is_dark else _mix_hex(c['header'], c['accent'], 0.08)
+    badge_border = "rgba(255,255,255,0.16)" if is_dark else _mix_hex(c['header'], c['accent'], 0.18)
+    header_meta = "rgba(255,255,255,0.68)" if is_dark else c['text_sec']
     spin_up = _spin_arrow_png(theme_key, c['text_sec'], "up")
     spin_down = _spin_arrow_png(theme_key, c['text_sec'], "down")
     return f"""
@@ -197,18 +235,18 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QFrame#header {{
             background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                 stop:0 {c['header']}, stop:0.55 {c['header']},
-                stop:0.85 {header_mid}, stop:1 {c['accent']});
+                stop:0.85 {header_mid}, stop:1 {header_end});
             border: none;
-            border-bottom: 1px solid rgba(255,255,255,0.12);
+            border-bottom: 1px solid {header_border};
         }}
-        QLabel#appTitle {{ color:white; font-size:17px; font-weight:700; letter-spacing:0.2px; }}
+        QLabel#appTitle {{ color:{header_text}; font-size:17px; font-weight:700; letter-spacing:0.2px; }}
         QLabel#headerBadge {{
-            color:rgba(255,255,255,0.78); background:rgba(255,255,255,0.12);
-            border:1px solid rgba(255,255,255,0.16); border-radius:8px;
+            color:{badge_text}; background:{badge_bg};
+            border:1px solid {badge_border}; border-radius:8px;
             min-height:15px; max-height:15px; padding:2px 7px;
             font-size:9px; font-weight:700; letter-spacing:0.7px;
         }}
-        QLabel#headerMeta {{ color:rgba(255,255,255,0.68); font-size:11px; }}
+        QLabel#headerMeta {{ color:{header_meta}; font-size:11px; }}
         QToolTip {{
             background: {c['card']}; color: {c['text']};
             border: 1px solid {c['accent']}; border-radius: 4px;

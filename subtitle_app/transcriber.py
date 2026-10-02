@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 def _safe_checkpoint_interval(value) -> int:
     """钳位断点写入间隔：0/负数/非法值会导致 `% 0` 崩溃，统一回退到 30"""
     try:
-        return max(1, int(value))
-    except (TypeError, ValueError):
+        interval = int(value)
+        return interval if interval > 0 else 30
+    except (TypeError, ValueError, OverflowError):
         return 30
 
 # 延迟导入 faster_whisper（C 扩展加载 ~3s），避免拖慢应用启动
@@ -327,9 +328,8 @@ class Transcriber:
                     resume_offset = 0.0
 
             try:
-                duration = 0.0
+                duration = self.get_duration(video, ffprobe) if ffprobe else 0.0
                 if extract_audio and not is_audio:
-                    duration = self.get_duration(video, ffprobe) if ffprobe else 0
                     weights = self._estimate_weights(duration, model_dir)
                     total_w = sum(weights.values())
                     e_end = weights["extract"] / total_w * 100
@@ -347,9 +347,8 @@ class Transcriber:
                     if ffmpeg:
                         # 用 ffprobe 探测真实时长做进度基准；探测失败退回 300s 估计值
                         #（旧实现固定按 300s 算，长音频进度条几乎不动、短音频直接满格）
-                        probe = self.get_duration(video, ffprobe) if ffprobe else 0.0
-                        duration = self.extract_audio_with_progress(
-                            video, ffmpeg, probe if probe > 0 else 300.0, audio_path,
+                        self.extract_audio_with_progress(
+                            video, ffmpeg, duration if duration > 0 else 300.0, audio_path,
                             make_post_mapper(post, 0, 15))
                     else:
                         audio_path = video
@@ -451,6 +450,8 @@ class Transcriber:
                     language=transcribe_lang,
                     initial_prompt=init_prompt,
                     word_timestamps=use_word_timestamps)
+                if duration <= 0:
+                    duration = getattr(info, "duration", 0.0) or 0.0
                 detected_lang = info.language
                 if language == "auto" and reuse_lang and self._cached_auto_lang is None:
                     self._cached_auto_lang = detected_lang

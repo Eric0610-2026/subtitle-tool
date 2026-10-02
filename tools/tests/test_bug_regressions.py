@@ -18,6 +18,14 @@ from subtitle_app.srt_utils import SubtitleBlock, has_chinese, load_json, save_j
 from subtitle_app.translator import translate_only
 
 
+def setUpModule():
+    directory = tempfile.TemporaryDirectory(prefix="subtitle_test_backup_")
+    unittest.addModuleCleanup(directory.cleanup)
+    backup_patch = patch("subtitle_app.translator._BACKUP_DIR", Path(directory.name))
+    backup_patch.start()
+    unittest.addModuleCleanup(backup_patch.stop)
+
+
 class TestWindowRegressions(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

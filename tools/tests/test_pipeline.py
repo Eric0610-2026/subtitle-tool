@@ -200,6 +200,22 @@ class TestTranscribeStage(unittest.TestCase):
             self.assertIsNone(result)
 
     @patch("subtitle_app.pipeline.find_tool")
+    def test_resume_ignores_generated_files_before_real_source(self, mock_find_tool):
+        """排序靠前的大写备份/断点/译文不能抢占续翻源文件。"""
+        mock_find_tool.side_effect = ["ffmpeg", "ffprobe"]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            item = root / "test.mp4"
+            item.touch()
+            (root / "test.translate_state.json").write_text('{"done": {}}', encoding="utf-8")
+            for name in ("test.BAK.srt", "test.BACKUP.srt", "test.PARTIAL.srt", "test.TRANSLATED.srt", "test.backup.srt", "test.en.srt"):
+                (root / name).write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
+            with patch.object(self.w.transcriber, "transcribe_video") as transcribe:
+                result = self.w._transcribe_stage(item, 1, 1, {**self.base_opts, "skip_completed": True})
+            self.assertEqual(result["source_srt"], root / "test.en.srt")
+            transcribe.assert_not_called()
+
+    @patch("subtitle_app.pipeline.find_tool")
     def test_transcribe_stage_skip_completed_with_state(self, mock_find_tool):
         """断点续翻：发现 translate_state.json 时读取已有字幕"""
         mock_find_tool.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]

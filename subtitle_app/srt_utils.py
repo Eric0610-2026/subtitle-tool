@@ -115,6 +115,8 @@ def srt_time_to_seconds(t_str: str) -> float:
     m = re.match(r"(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})", t_str.strip())
     if not m:
         return 0.0
+    if len(m.group(1)) > 9:
+        raise ValueError("字幕时间戳小时字段过长")
     h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
     ms_str = m.group(4).ljust(3, '0')[:3]
     ms = int(ms_str)
@@ -226,69 +228,100 @@ class SubtitleBlock:
 # - 字幕文本支持包含单独的 \r（非连续换行）
 # - 使用宽松的行分割策略
 SRT_BLOCK_RE = re.compile(
-    r"(?:(\d+)\s*(?:\r?\n|\r))?"  # 可选序号（支持 \r\n, \n, \r）
-    r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})\s*-->\s*(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})\s*(?:\r?\n|\r)"  # 时间戳
-    r"((?:(?!(?:\r?\n|\r){2}|\d+\s*(?:\r?\n|\r)\d+:\d{1,2}:\d{1,2}[,.]\d{1,3}\s*-->).)*)",  # 文本：到空行或下一时间戳行为止，允许为空
-    re.DOTALL,
+    r"^(?:(\d+)[ \t]*\n)?[ \t]*"
+    r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})[ \t]*-->[ \t]*"
+    r"(\d+:\d{1,2}:\d{1,2}[,.]\d{1,3})[^\n]*(?:\n|$)",
+    re.MULTILINE,
 )
 
 
+def split_srt_blocks(text: str) -> List[str]:
+    """按时间轴识别块边界，保留正文内空行与非字幕前缀。"""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    starts = [match.start() for match in SRT_BLOCK_RE.finditer(text)]
+    if not starts:
+        return [text.strip()] if text.strip() else []
+    if text[:starts[0]].strip():
+        starts.insert(0, 0)
+    return [text[start:end].strip() for start, end in zip(starts, starts[1:] + [len(text)])]
+
+
 def _read_text_auto(path: Path) -> str:
-    """读取一次文件，按 utf-8-sig → gbk → latin-1 顺序尝试解码。
+    """读取一次文件，识别 Unicode BOM/UTF-16 后回退 UTF-8、GBK、Latin-1。
 
     Windows 常见的中文 SRT 是 GBK/ANSI 编码，只按 UTF-8 读会抛
     UnicodeDecodeError 导致整批翻译中止；latin-1 永不失败，保证总有内容可解析。
     """
     data = path.read_bytes()
-    for enc in ("utf-8-sig", "gbk", "latin-1"):
+    unicode_encoding = None
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        unicode_encoding = "utf-32"
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        unicode_encoding = "utf-16"
+    elif data and len(data) % 2 == 0:
+        # SRT 时间轴/序号是 ASCII，无 BOM UTF-16 在固定字节位出现大量 NUL。
+        sample = data[:4096]
+        if sample[1::2].count(0) > len(sample) // 4:
+            unicode_encoding = "utf-16-le"
+        elif sample[::2].count(0) > len(sample) // 4:
+            unicode_encoding = "utf-16-be"
+    encodings = (unicode_encoding,) if unicode_encoding else ("utf-8-sig", "gbk", "latin-1")
+    for enc in encodings:
         try:
             text = data.decode(enc)
             break
         except UnicodeDecodeError:
+            if unicode_encoding:
+                raise ValueError(f"字幕 Unicode 编码损坏: {path}")
             continue
     # 与 Path.read_text 的通用换行行为一致，预览也会直接使用此函数。
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def parse_srt(path: Path) -> List[SubtitleBlock]:
-    return parse_srt_text(_read_text_auto(path))
+    text = _read_text_auto(path)
+    blocks = parse_srt_text(text)
+    if text.strip() and not blocks:
+        logger.warning("非空字幕未解析出有效区块，请检查格式或编码: %s", path)
+    return blocks
 
 
 def parse_srt_text(text: str) -> List[SubtitleBlock]:
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     blocks = []
     idx_counter = 0
-    for m in SRT_BLOCK_RE.finditer(text):
+    matches = list(SRT_BLOCK_RE.finditer(text))
+    for position, m in enumerate(matches):
         idx_counter += 1
         idx = int(m.group(1)) if m.group(1) else idx_counter
         start = srt_time_to_seconds(m.group(2))
         end = srt_time_to_seconds(m.group(3))
-        content = m.group(4).strip()
+        content_end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+        content = text[m.end():content_end].strip()
         blocks.append(SubtitleBlock(index=idx, start=start, end=end, text=content))
     return blocks
 
 
 def sanitize_blocks(blocks: List[SubtitleBlock],
                      min_duration: float = 0.5) -> List[SubtitleBlock]:
-    """就地修正字幕块时间戳，保证 start>=0、start 单调、end>start。
+    """按起始时间稳定排序后净化，保证 start>=0、start 单调、end>start。
 
     同时过滤掉空文本的 block，并重编号。
     这能避免转写结果中偶发的 end<=start / 时间回退导致 SRT 非法、进而 ffmpeg 内嵌失败。"""
-    prev_start = 0.0
     result: List[SubtitleBlock] = []
-    for b in blocks:
+    # 乱序文件仅调整块顺序，不把较早的合法时间强行挪到后面的时间点。
+    # 相同起始时间保持原顺序；排序使用与净化一致的非负起点。
+    for b in sorted(blocks, key=lambda block: max(0.0, block.start)):
         text = b.text.strip()
         if not text:
             continue  # 跳过空文本
         start = max(0.0, b.start)
-        start = max(start, prev_start)
         if result and result[-1].end > start and start > result[-1].start:
             result[-1].end = start
         end = max(start + min_duration, b.end)
         if end <= start:
             end = start + min_duration
         result.append(SubtitleBlock(len(result) + 1, start, end, text))
-        prev_start = start
     blocks.clear()
     blocks.extend(result)
     return blocks
@@ -539,16 +572,23 @@ def to_simplified(text: str) -> str:
 
 # ── 字幕文件查找 ──
 
+def is_source_subtitle_stem(candidate: str, media: str) -> bool:
+    """统一原文字幕匹配：忽略大小写，排除媒体名后面的生成文件标记。"""
+    candidate, media = candidate.lower(), media.lower()
+    if candidate == media:
+        return True
+    if not candidate.startswith(media + "."):
+        return False
+    suffix = candidate[len(media) + 1:]
+    return not any(marker in suffix for marker in ("backup", "bak", "translated", "partial"))
+
+
 def find_existing_subtitle(video: Path) -> Optional[Path]:
     stem = safe_stem(video.name)
     for f in video.parent.iterdir():
-        if f.suffix not in SUB_EXTS:
+        if f.suffix.lower() not in SUB_EXTS:
             continue
-        f_stem = f.stem
-        if "backup" in f_stem.lower() or "translated" in f_stem.lower() or "bak" in f_stem.lower() \
-                or "partial" in f_stem.lower():
-            continue
-        if f_stem == stem or f_stem.startswith(stem + "."):
+        if is_source_subtitle_stem(f.stem, stem):
             return f
     return None
 
