@@ -7,12 +7,12 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import Qt, QObject, Signal, QTimer
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
-    QTextEdit, QListWidget, QListWidgetItem, QPushButton,
+    QTextEdit, QListWidget, QListWidgetItem,
     QFrame, QSizePolicy, QDialog, QComboBox, QSpinBox,
     QDoubleSpinBox, QLineEdit, QMessageBox,
     QAbstractSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QStackedWidget,
+    QStackedWidget, QApplication,
 )
 from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
@@ -20,6 +20,8 @@ from PySide6.QtGui import (
 
 from .srt_utils import _read_text_auto, split_srt_blocks, SRT_TIMING_LINE_RE
 from .widgets import LogEntry
+from .icons import action_button, icon_data_url
+from .theme import load_theme_colors, _mix_hex
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +60,11 @@ def _make_dialog_buttons(dialog: QDialog) -> QHBoxLayout:
     """创建确定/取消按钮行"""
     row = QHBoxLayout()
     row.addStretch()
-    ok_btn = QPushButton("确定")
+    ok_btn = action_button("确定")
+    ok_btn.setObjectName("confirmBtn")
     ok_btn.clicked.connect(dialog.accept)
     row.addWidget(ok_btn)
-    cancel_btn = QPushButton("取消")
+    cancel_btn = action_button("取消")
     cancel_btn.clicked.connect(dialog.reject)
     row.addWidget(cancel_btn)
     return row
@@ -184,15 +187,22 @@ class PreviewPanel(QFrame):
     def _palette_colors(self) -> dict:
         """根据当前主题返回表格配色（跟随应用明暗主题）"""
         dark = self.palette().color(QPalette.Base).lightness() < 128
-        if dark:
-            return {
-                "index": "#64748b", "time": "#94a3b8",
-                "text": "#e2e8f0", "translation": "#a5b4fc",
-                "highlight_bg": "#fde68a", "highlight_fg": "#1e293b",
-            }
+        owner = self
+        colors = None
+        while owner is not None:
+            candidate = getattr(owner, "colors", None)
+            if isinstance(candidate, dict):
+                colors = candidate
+                break
+            owner = owner.parentWidget()
+        if colors is None:
+            light, dark_colors = load_theme_colors()
+            colors = dark_colors if dark else light
         return {
-            "index": "#94a3b8", "time": "#64748b",
-            "text": "#0f172a", "translation": "#6d28d9",
+            "index": _mix_hex(colors["text_sec"], colors["card"], 0.20),
+            "time": colors["text_sec"], "text": colors["text"],
+            "translation": _mix_hex(colors["accent"], colors["text"], 0.20),
+            "empty": colors["text_muted"],
             "highlight_bg": "#fde68a", "highlight_fg": "#1e293b",
         }
 
@@ -208,12 +218,16 @@ class PreviewPanel(QFrame):
             item.setForeground(QBrush(QColor(c["time"])))
             item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         elif kind == "text":
-            item.setFont(QFont("Consolas", 9))
+            font = QFont(QApplication.font())
+            font.setPointSize(9)
+            item.setFont(font)
             item.setForeground(QBrush(QColor(c["text"])))
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         else:  # translation
-            item.setFont(QFont("Consolas", 9))
-            item.setForeground(QBrush(QColor(c["translation"])))
+            font = QFont(QApplication.font())
+            font.setPointSize(9)
+            item.setFont(font)
+            item.setForeground(QBrush(QColor(c["empty"] if item.text() == "—" else c["translation"])))
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
     def refresh_theme(self):
@@ -295,7 +309,7 @@ class PreviewPanel(QFrame):
         title = QLabel("字幕预览")
         title.setObjectName("panelTitle")
         tb.addWidget(title)
-        self._edit_btn = QPushButton("✏ 编辑")
+        self._edit_btn = action_button("✏ 编辑")
         self._edit_btn.clicked.connect(self._open_edit_dialog)
         tb.addWidget(self._edit_btn)
         tb.addStretch()
@@ -328,7 +342,7 @@ class PreviewPanel(QFrame):
 
         self._empty_label = QLabel(
             "<div style='text-align:center;'>"
-            "<span style='font-size:32px;'>🎬</span>"
+            f"<img src='{icon_data_url('video', '#64748b')}' width='32' height='32'>"
             "<br><br><b>暂无字幕</b>"
             "<br><br>添加或拖入 .srt 文件后，字幕会显示在这里"
             "</div>"
@@ -583,7 +597,7 @@ class EditDialog(QDialog):
         self._page_input.valueChanged.connect(self._go_to_page)
         nav.addWidget(self._page_input)
 
-        self._prev_btn = QPushButton("◀")
+        self._prev_btn = action_button("◀", accessible_name="上一页")
         self._prev_btn.setFixedWidth(32)
         self._prev_btn.clicked.connect(self._prev_page)
         nav.addWidget(self._prev_btn)
@@ -591,7 +605,7 @@ class EditDialog(QDialog):
         self._page_label = QLabel("0/0")
         nav.addWidget(self._page_label)
 
-        self._next_btn = QPushButton("▶")
+        self._next_btn = action_button("▶", icon="chevron-right", accessible_name="下一页")
         self._next_btn.setFixedWidth(32)
         self._next_btn.clicked.connect(self._next_page)
         nav.addWidget(self._next_btn)
@@ -599,20 +613,20 @@ class EditDialog(QDialog):
         nav.addStretch()
 
         self._dirty_label = QLabel("")
-        self._dirty_label.setStyleSheet("color:#ef4444; font-size:11px;")
+        self._dirty_label.setObjectName("dialogWarning")
         nav.addWidget(self._dirty_label)
 
         layout.addLayout(nav)
 
         action_row = QHBoxLayout()
-        self._find_btn = QPushButton("🔍 查找")
+        self._find_btn = action_button("🔍 查找")
         self._find_btn.clicked.connect(self._find_in_editor)
         action_row.addWidget(self._find_btn)
-        self._save_all_btn = QPushButton("💾 保存")
+        self._save_all_btn = action_button("💾 保存")
         self._save_all_btn.setObjectName("startBtn")
         self._save_all_btn.clicked.connect(self._save_all_and_exit)
         action_row.addWidget(self._save_all_btn)
-        self._offset_btn = QPushButton("⏱ 偏移")
+        self._offset_btn = action_button("⏱ 偏移")
         self._offset_btn.setToolTip("批量调整字幕时间戳（±秒）")
         self._offset_btn.clicked.connect(self._offset_time)
         action_row.addWidget(self._offset_btn)
@@ -625,7 +639,7 @@ class EditDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self._close_btn = QPushButton("取消")
+        self._close_btn = action_button("取消")
         self._close_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._close_btn)
         layout.addLayout(btn_row)

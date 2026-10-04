@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
-    QLineEdit, QComboBox, QCheckBox, QPushButton, QListWidget,
+    QLineEdit, QComboBox, QCheckBox, QListWidget,
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
     QAbstractItemView, QTabWidget, QWidget, QFrame, QTextEdit,
 )
@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
+from .icons import action_button
 from .config import cfg
 from .local_service import service_url_prefix
 from .widgets import attach_popup_fade
@@ -23,17 +24,19 @@ from .translation import (
     LANG_NAMES, clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot,
 )
 
-_SCROLLBAR_STYLE = """
-    QScrollBar:vertical { width:8px; background:transparent; border:none; }
-    QScrollBar::handle:vertical { background:#c0c4cc; border-radius:4px; min-height:24px; }
-    QScrollBar::handle:vertical:hover { background:#909399; }
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; border:none; }
-    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:none; }
-    QScrollBar:horizontal { height:8px; background:transparent; border:none; }
-    QScrollBar::handle:horizontal { background:#c0c4cc; border-radius:4px; min-width:24px; }
-    QScrollBar::handle:horizontal:hover { background:#909399; }
-    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; border:none; }
-    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:none; }
+# 仅保留既有控件尺寸；颜色、圆角和状态统一从 theme.py 继承。
+_COMPACT_SCROLLBAR_METRICS = """
+    QScrollBar:vertical { width:8px; }
+    QScrollBar:horizontal { height:8px; }
+    QScrollBar::handle:vertical { min-height:24px; }
+    QScrollBar::handle:horizontal { min-width:24px; }
+"""
+
+_COMPACT_DIALOG_STYLE = """
+    QListWidget { font-size:12px; }
+    QListWidget::item { padding:4px 8px; }
+    QPushButton#startBtn { padding:8px 20px; font-size:13px; }
+    QPushButton#accentBtn, QPushButton#dangerBtn { padding:5px 13px; }
 """
 
 
@@ -42,10 +45,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent, values: dict, history_cb=None, cache_cb=None):
         super().__init__(parent)
-        self.setStyleSheet(_SCROLLBAR_STYLE + """
-            QCheckBox { background: transparent; spacing: 7px; }
-            QCheckBox::indicator { width: 16px; height: 16px; }
-        """)
+        self.setStyleSheet(_COMPACT_SCROLLBAR_METRICS)
         self.setWindowTitle("更多设置")
         self.setMinimumWidth(520)
         self._history_cb = history_cb
@@ -54,14 +54,14 @@ class SettingsDialog(QDialog):
         layout.setSpacing(16)
 
         # ── 语音识别 ──
-        sg1 = QGroupBox("🎙 语音识别")
+        sg1 = QGroupBox("语音识别")
         g1 = QGridLayout(sg1)
         g1.setVerticalSpacing(8)
         r = 0
         g1.addWidget(QLabel("模型目录"), r, 0)
         self.model_dir = QLineEdit(values.get("model_dir", ""))
         g1.addWidget(self.model_dir, r, 1)
-        browse_btn = QPushButton("浏览...")
+        browse_btn = action_button("浏览...")
         browse_btn.clicked.connect(lambda: self.model_dir.setText(
             QFileDialog.getExistingDirectory(self, "选择模型目录", self.model_dir.text())))
         g1.addWidget(browse_btn, r, 2)
@@ -90,9 +90,9 @@ class SettingsDialog(QDialog):
         # ── 默认视频目录（用于「📌 默认」按钮）──
         g1.addWidget(QLabel("默认视频目录"), r, 0)
         self.default_dir = QLineEdit(values.get("default_video_dir", ""))
-        self.default_dir.setPlaceholderText("可留空；用于「📌 默认」按钮")
+        self.default_dir.setPlaceholderText("可留空；用于「默认」按钮")
         g1.addWidget(self.default_dir, r, 1)
-        dir_browse_btn = QPushButton("浏览...")
+        dir_browse_btn = action_button("浏览...")
         dir_browse_btn.clicked.connect(lambda: self.default_dir.setText(
             QFileDialog.getExistingDirectory(self, "选择默认视频目录", self.default_dir.text())))
         g1.addWidget(dir_browse_btn, r, 2)
@@ -107,12 +107,12 @@ class SettingsDialog(QDialog):
         layout.addWidget(sg1)
 
         # ── AI 翻译（本地 Hy-MT2）──
-        sg2 = QGroupBox("🌍 AI 翻译（本地 Hy-MT2）")
+        sg2 = QGroupBox("AI 翻译（本地 Hy-MT2）")
         g2 = QGridLayout(sg2)
         g2.setVerticalSpacing(8)
         r = 0
         mode_hint = QLabel(f"使用本地 Hy-MT2 翻译服务 {service_url_prefix()}（自动启动，无需配置 API）")
-        mode_hint.setStyleSheet("color:#22c55e; font-size:11px;")
+        mode_hint.setObjectName("dialogHint")
         mode_hint.setWordWrap(True)
         g2.addWidget(mode_hint, r, 0, 1, 3)
         r += 1
@@ -165,18 +165,18 @@ class SettingsDialog(QDialog):
 
         # ── 数据管理（历史记录 / 翻译缓存）──
         if self._history_cb or self._cache_cb:
-            sg3 = QGroupBox("🗂 数据管理")
+            sg3 = QGroupBox("数据管理")
             g3 = QHBoxLayout(sg3)
             g3.setContentsMargins(8, 6, 8, 6)
             g3.setSpacing(8)
             if self._history_cb:
-                history_btn = QPushButton("📋 处理历史…")
+                history_btn = action_button("📋 处理历史…")
                 history_btn.setObjectName("bottomBtn")
                 history_btn.setToolTip("查看已处理/已忽略文件记录；删除记录可让该文件重新被「重试」处理")
                 history_btn.clicked.connect(lambda: self._history_cb())
                 g3.addWidget(history_btn)
             if self._cache_cb:
-                cache_btn = QPushButton("🗑 翻译缓存…")
+                cache_btn = action_button("🗑 翻译缓存…")
                 cache_btn.setObjectName("bottomBtn")
                 cache_btn.setToolTip("查看/逐条删除/清空句子级翻译缓存（已翻译句子复用，一般无需清理）")
                 cache_btn.clicked.connect(lambda: self._cache_cb())
@@ -187,12 +187,12 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        cancel_btn = QPushButton("取消")
+        cancel_btn = action_button("取消")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
-        session_btn = QPushButton("💾 本次有效")
+        session_btn = action_button("💾 本次有效")
         btn_row.addWidget(session_btn)
-        permanent_btn = QPushButton("💾 永久保存（下次默认）")
+        permanent_btn = action_button("💾 永久保存（下次默认）")
         permanent_btn.setToolTip("本次设置立即用于之后启动的任务；重启后会从 config.json 读取为默认值")
         permanent_btn.setObjectName("startBtn")
         btn_row.addWidget(permanent_btn)
@@ -212,10 +212,6 @@ class SettingsDialog(QDialog):
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
         self.batch_size.setEnabled(not checked)
-        if checked:
-            self.batch_size.setStyleSheet("color:#94a3b8;")
-        else:
-            self.batch_size.setStyleSheet("")
 
     def _batch_size_value(self):
         """批大小保存规则：等于 config 默认值时存 None（跟随配置），
@@ -254,7 +250,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
         box.exec()
         return
     dlg = QDialog(parent)
-    dlg.setStyleSheet(_SCROLLBAR_STYLE)
+    dlg.setStyleSheet(_COMPACT_SCROLLBAR_METRICS)
     dlg.setWindowTitle(f"处理历史 ({len(done)} 已完成, {len(ignored)} 已忽略)")
     dlg.resize(600, 400)
     layout = QVBoxLayout(dlg)
@@ -280,8 +276,8 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
         item.setData(Qt.UserRole, p)
         done_list.addItem(item)
     done_layout.addWidget(done_list, 1)
-    del_done_btn = QPushButton("🗑 删除选中")
-    del_done_btn.setObjectName("stopBtn")
+    del_done_btn = action_button("🗑 删除选中")
+    del_done_btn.setObjectName("dangerBtn")
     done_layout.addWidget(del_done_btn)
     tabs.addTab(done_widget, f"已完成 ({len(done)})")
 
@@ -298,7 +294,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
         item.setData(Qt.UserRole, p)
         ignore_list.addItem(item)
     ignore_layout.addWidget(ignore_list, 1)
-    unignore_btn = QPushButton("↩ 恢复选中")
+    unignore_btn = action_button("↩ 恢复选中")
     unignore_btn.setObjectName("accentBtn")
     ignore_layout.addWidget(unignore_btn)
     tabs.addTab(ignore_widget, f"已忽略 ({len(ignored)})")
@@ -306,7 +302,7 @@ def show_history_dialog(parent, work_dir: str, log_callback) -> None:
     # ── 底部关闭按钮 ──
     btn_row = QHBoxLayout()
     btn_row.setSpacing(4)
-    close_btn = QPushButton("关闭")
+    close_btn = action_button("关闭")
     close_btn.clicked.connect(dlg.accept)
     btn_row.addStretch()
     btn_row.addWidget(close_btn)
@@ -366,14 +362,15 @@ def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
     cache = shared_cache_snapshot(path)
     size = path.stat().st_size if path.exists() else 0
     dlg = QDialog(parent)
-    dlg.setStyleSheet(_SCROLLBAR_STYLE)
+    dlg.setStyleSheet(_COMPACT_SCROLLBAR_METRICS)
     dlg.setWindowTitle("翻译缓存管理")
     dlg.resize(480, 400)
     layout = QVBoxLayout(dlg)
     info = QLabel(f"缓存条目：{len(cache)} 条　　缓存大小：{size/1024:.1f} KB")
+    info.setObjectName("dialogMeta")
     layout.addWidget(info)
     hint = QLabel("选中条目后点击「删除选中」可逐条移除；「清空缓存」则全部清除")
-    hint.setStyleSheet("color:#64748b; font-size:11px;")
+    hint.setObjectName("dialogHint")
     layout.addWidget(hint)
     list_widget = QListWidget()
     list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -384,14 +381,14 @@ def show_cache_dialog(parent, work_dir: str, log_callback) -> None:
         cache_keys.append(k)
     layout.addWidget(list_widget, 1)
     btn_row = QHBoxLayout()
-    del_btn = QPushButton("🗑 删除选中")
-    del_btn.setObjectName("stopBtn")
+    del_btn = action_button("🗑 删除选中")
+    del_btn.setObjectName("dangerBtn")
     btn_row.addWidget(del_btn)
-    clear_btn = QPushButton("🗑 清空缓存")
-    clear_btn.setObjectName("stopBtn")
+    clear_btn = action_button("🗑 清空缓存")
+    clear_btn.setObjectName("dangerBtn")
     btn_row.addWidget(clear_btn)
     btn_row.addStretch()
-    close_btn = QPushButton("关闭")
+    close_btn = action_button("关闭")
     close_btn.clicked.connect(dlg.accept)
     btn_row.addWidget(close_btn)
     layout.addLayout(btn_row)
@@ -489,7 +486,7 @@ class EmbedDialog(QDialog):
 
     def __init__(self, parent, default_dir: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("📦 嵌入字幕")
+        self.setWindowTitle("嵌入字幕")
         self.setMinimumSize(620, 400)
         self.resize(680, 460)
         self._default_dir = default_dir
@@ -502,13 +499,13 @@ class EmbedDialog(QDialog):
         layout.setSpacing(8)
 
         # ── 标题 ──
-        title = QLabel("📦 嵌入字幕 — 将字幕嵌入视频文件为 MKV")
-        title.setStyleSheet("font-size:14px; font-weight:600;")
+        title = QLabel("嵌入字幕 — 将字幕嵌入视频文件为 MKV")
+        title.setObjectName("dialogTitle")
         layout.addWidget(title)
 
         # ── 嵌入列表 ──
         list_label = QLabel("嵌入任务列表：")
-        list_label.setStyleSheet("font-weight:600;")
+        list_label.setObjectName("dialogSection")
         layout.addWidget(list_label)
 
         self.table = QListWidget()
@@ -518,13 +515,14 @@ class EmbedDialog(QDialog):
 
         # ── 分隔线 ──
         sep = QFrame()
+        sep.setObjectName("dialogSeparator")
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
         layout.addWidget(sep)
 
         # ── 添加新任务 ──
         add_label = QLabel("添加新任务：")
-        add_label.setStyleSheet("font-weight:600;")
+        add_label.setObjectName("dialogSection")
         layout.addWidget(add_label)
 
         # 视频行
@@ -533,7 +531,7 @@ class EmbedDialog(QDialog):
         self.video_path = QLineEdit()
         self.video_path.setPlaceholderText("选择视频文件...")
         video_row.addWidget(self.video_path, 1)
-        video_btn = QPushButton("📂 浏览")
+        video_btn = action_button("📂 浏览")
         video_btn.clicked.connect(self._browse_video)
         video_row.addWidget(video_btn)
         layout.addLayout(video_row)
@@ -544,26 +542,27 @@ class EmbedDialog(QDialog):
         self.srt_path = QLineEdit()
         self.srt_path.setPlaceholderText("选择字幕文件...")
         srt_row.addWidget(self.srt_path, 1)
-        srt_btn = QPushButton("📂 浏览")
+        srt_btn = action_button("📂 浏览")
         srt_btn.clicked.connect(self._browse_srt)
         srt_row.addWidget(srt_btn)
         layout.addLayout(srt_row)
 
         # 操作按钮行
         btn_row = QHBoxLayout()
-        add_pair_btn = QPushButton("➕ 添加任务")
+        add_pair_btn = action_button("➕ 添加任务")
         add_pair_btn.clicked.connect(self._add_pair)
         add_pair_btn.setObjectName("accentBtn")
         btn_row.addWidget(add_pair_btn)
         btn_row.addStretch()
-        self.clear_btn = QPushButton("🗑 清空列表")
+        self.clear_btn = action_button("🗑 清空列表")
         self.clear_btn.clicked.connect(self._clear_list)
-        self.clear_btn.setObjectName("stopBtn")
+        self.clear_btn.setObjectName("dangerBtn")
         btn_row.addWidget(self.clear_btn)
         layout.addLayout(btn_row)
 
         # ── 分隔线 ──
         sep2 = QFrame()
+        sep2.setObjectName("dialogSeparator")
         sep2.setFrameShape(QFrame.HLine)
         sep2.setFrameShadow(QFrame.Sunken)
         layout.addWidget(sep2)
@@ -571,16 +570,16 @@ class EmbedDialog(QDialog):
         # ── 底部按钮 ──
         bottom_row = QHBoxLayout()
         self.count_label = QLabel("共 0 个任务")
-        self.count_label.setStyleSheet("color:#64748b;")
+        self.count_label.setObjectName("dialogMeta")
         bottom_row.addWidget(self.count_label)
         bottom_row.addStretch()
-        self.start_btn = QPushButton("▶ 开始嵌入")
+        self.start_btn = action_button("▶ 开始嵌入")
         self.start_btn.setObjectName("startBtn")
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._start_embed)
         self.start_btn.setFixedHeight(36)
         bottom_row.addWidget(self.start_btn)
-        close_btn = QPushButton("✕ 关闭")
+        close_btn = action_button("✕ 关闭")
         close_btn.clicked.connect(self.reject)
         close_btn.setFixedHeight(36)
         bottom_row.addWidget(close_btn)
@@ -673,26 +672,8 @@ class EmbedDialog(QDialog):
         return self._pairs.copy()
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QListWidget { font-size:12px; }
-            QListWidget::item { padding:4px 8px; }
-            QPushButton#startBtn {
-                background:#22c55e; color:white; border:none;
-                border-radius:6px; padding:8px 20px; font-weight:bold; font-size:13px;
-            }
-            QPushButton#startBtn:hover { background:#16a34a; }
-            QPushButton#startBtn:disabled { background:#94a3b8; }
-            QPushButton#accentBtn {
-                background:#6366f1; color:white; border:none;
-                border-radius:4px; padding:6px 14px;
-            }
-            QPushButton#accentBtn:hover { background:#4f46e5; }
-            QPushButton#stopBtn {
-                background:#ef4444; color:white; border:none;
-                border-radius:4px; padding:6px 14px;
-            }
-            QPushButton#stopBtn:hover { background:#dc2626; }
-            QLineEdit { padding:4px 6px; border:1px solid #e2e8f0; border-radius:4px; }
+        self.setStyleSheet(_COMPACT_DIALOG_STYLE + """
+            QLineEdit { padding:4px 6px; }
         """)
 
 
@@ -701,7 +682,7 @@ class ExtractDialog(QDialog):
 
     def __init__(self, parent, default_dir: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("📤 提取字幕")
+        self.setWindowTitle("提取字幕")
         self.setMinimumSize(620, 420)
         self.resize(680, 480)
         self._default_dir = default_dir
@@ -713,12 +694,12 @@ class ExtractDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        title = QLabel("📤 提取字幕 — 从视频文件提取第一个字幕流为 SRT")
-        title.setStyleSheet("font-size:14px; font-weight:600;")
+        title = QLabel("提取字幕 — 从视频文件提取第一个字幕流为 SRT")
+        title.setObjectName("dialogTitle")
         layout.addWidget(title)
 
         list_label = QLabel("待提取文件列表：")
-        list_label.setStyleSheet("font-weight:600;")
+        list_label.setObjectName("dialogSection")
         layout.addWidget(list_label)
 
         self.table = QListWidget()
@@ -729,20 +710,20 @@ class ExtractDialog(QDialog):
 
         # ── 添加/移除按钮 ──
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("➕ 添加文件")
+        add_btn = action_button("➕ 添加文件")
         add_btn.clicked.connect(self._browse_files)
         add_btn.setObjectName("accentBtn")
         btn_row.addWidget(add_btn)
-        remove_btn = QPushButton("🗑 移除选中")
+        remove_btn = action_button("🗑 移除选中")
         remove_btn.clicked.connect(self._remove_selected)
-        remove_btn.setObjectName("stopBtn")
+        remove_btn.setObjectName("dangerBtn")
         btn_row.addWidget(remove_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
         hint = QLabel("提示：仅提取第一个（默认）字幕流；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#64748b; font-size:11px;")
+        hint.setObjectName("dialogHint")
         layout.addWidget(hint)
 
         # ── 转换选项（默认勾选：提取后转 MP4，便于播放器兼容）──
@@ -753,16 +734,16 @@ class ExtractDialog(QDialog):
         # ── 底部按钮 ──
         bottom_row = QHBoxLayout()
         self.count_label = QLabel("共 0 个文件")
-        self.count_label.setStyleSheet("color:#64748b;")
+        self.count_label.setObjectName("dialogMeta")
         bottom_row.addWidget(self.count_label)
         bottom_row.addStretch()
-        self.start_btn = QPushButton("▶ 开始提取")
+        self.start_btn = action_button("▶ 开始提取")
         self.start_btn.setObjectName("startBtn")
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self.accept)
         self.start_btn.setFixedHeight(36)
         bottom_row.addWidget(self.start_btn)
-        close_btn = QPushButton("✕ 关闭")
+        close_btn = action_button("✕ 关闭")
         close_btn.clicked.connect(self.reject)
         close_btn.setFixedHeight(36)
         bottom_row.addWidget(close_btn)
@@ -811,26 +792,7 @@ class ExtractDialog(QDialog):
         return self.convert_cb.isChecked()
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QListWidget { font-size:12px; }
-            QListWidget::item { padding:4px 8px; }
-            QPushButton#startBtn {
-                background:#22c55e; color:white; border:none;
-                border-radius:6px; padding:8px 20px; font-weight:bold; font-size:13px;
-            }
-            QPushButton#startBtn:hover { background:#16a34a; }
-            QPushButton#startBtn:disabled { background:#94a3b8; }
-            QPushButton#accentBtn {
-                background:#6366f1; color:white; border:none;
-                border-radius:4px; padding:6px 14px;
-            }
-            QPushButton#accentBtn:hover { background:#4f46e5; }
-            QPushButton#stopBtn {
-                background:#ef4444; color:white; border:none;
-                border-radius:4px; padding:6px 14px;
-            }
-            QPushButton#stopBtn:hover { background:#dc2626; }
-        """)
+        self.setStyleSheet(_COMPACT_DIALOG_STYLE)
 
 
 def show_embed_confirm_dialog(parent, e) -> None:
@@ -853,7 +815,7 @@ def show_embed_confirm_dialog(parent, e) -> None:
     layout = QVBoxLayout(dialog)
 
     info_label = QLabel(
-        f"📄 <b>{file_name}</b> — 翻译完成，请确认字幕内容后点击「嵌入」或「跳过」"
+        f"<b>{file_name}</b> — 翻译完成，请确认字幕内容后点击「嵌入」或「跳过」"
     )
     info_label.setWordWrap(True)
     layout.addWidget(info_label)
@@ -866,12 +828,12 @@ def show_embed_confirm_dialog(parent, e) -> None:
     btn_layout = QHBoxLayout()
     btn_layout.addStretch()
 
-    skip_btn = QPushButton("⏭ 跳过嵌入（仅保留外挂 SRT）")
+    skip_btn = action_button("⏭ 跳过嵌入（仅保留外挂 SRT）")
     skip_btn.setToolTip("不嵌入字幕，仅保留独立的 SRT 文件")
     skip_btn.clicked.connect(lambda: _finish_pause("skip"))
     btn_layout.addWidget(skip_btn)
 
-    embed_btn = QPushButton("✅ 确认嵌入")
+    embed_btn = action_button("✅ 确认嵌入")
     embed_btn.setObjectName("startBtn")
     embed_btn.setToolTip("将当前字幕嵌入 MKV 视频文件")
     embed_btn.setDefault(True)
@@ -893,4 +855,3 @@ def show_embed_confirm_dialog(parent, e) -> None:
     dialog.rejected.connect(lambda: _finish_pause("skip"))
 
     dialog.exec()
-

@@ -1,153 +1,42 @@
-# 项目指南（AGENTS.md）
+# Repository Guidelines
 
-本文件是 AI agent 的项目手册：**放在项目根目录，每次新会话自动加载**，
-AI 无需重新通读代码即可回答架构/测试/惯例问题。修改核心架构后请同步更新本文件。
+## Project Structure & Module Organization
 
-## 入口与运行
+- `subtitle_app/` contains the Python/PySide6 desktop application. `subtitle_app.py` launches `qt_app.py`; `panels.py`, `widgets.py`, and `dialogs.py` implement the interface.
+- `pipeline.py` coordinates transcription (`transcriber.py`), translation (`translation.py`, `translator.py`), and media processing (`muxer.py`). `local_service.py` manages local inference.
+- `tools/tests/` contains unittest suites; `tools/requirements.txt` lists dependencies. `subtitle_app/icon.ico` is the application icon.
+- `models/`, `cache/`, and `logs/` hold local runtime data. See `README.md` and `docs/` for installation and maintenance instructions.
 
-- 入口：`subtitle_app/subtitle_app.py` → `subtitle_app.qt_app.main()`
-- 运行：双击 `字幕工具.lnk` 或 `python subtitle_app/subtitle_app.py`
-- `subtitle_app.py` 首次运行自动 `pip install -r tools/requirements.txt`（超时 300s）；`cache/.deps_installed` 保存依赖清单与解释器路径/版本的指纹，变更时重新安装（旧版空标记也会失效）
-- 仅 Windows：ffmpeg/ffprobe 查找顺序 = 应用目录 → `tools/` → 系统 PATH（`srt_utils.find_tool`）
+## Build, Test, and Development Commands
 
-## 测试
+Run from the repository root in Windows PowerShell:
 
 ```powershell
-python -m unittest discover -s tools/tests      # 全部（188 例）
-python -m unittest tools.tests.test_translator   # 单文件
-python -m unittest tools.tests.test_translator.TestBatchSizePersistenceField  # 单用例
+python -m pip install -r tools/requirements.txt
+python subtitle_app/subtitle_app.py
+python -m unittest discover -s tools/tests
+python -m unittest tools.tests.test_translator
+git diff --check
 ```
 
-- 框架：`unittest`（无 pytest）；无需网络或模型，API 调用用 `unittest.mock`
-- 13 个测试文件（`tools/tests/`）：test_srt_utils / test_translation / test_translator /
-  test_transcriber / test_pipeline / test_muxer / test_widgets / test_local_service /
-  test_dialogs / test_tray / test_handoff / test_subtitle_app / test_bug_regressions
-- 真实翻译编排测试必须把 `translator._BACKUP_DIR` patch 到临时目录，禁止触碰生产备份。
-- 改完必须跑全量：`python -m unittest discover -s tools/tests`
+These install dependencies, launch the application, run all tests or one suite, and check whitespace errors. No separate build step is required. First launch may install dependencies; actual media processing requires the tools and models described in README.
 
-## 模块清单（subtitle_app/）
+## Coding Style & Naming Conventions
 
-| 模块 | 职责 |
-|---|---|
-| `subtitle_app.py` | 入口：自动装依赖后启动 Qt |
-| `qt_app.py` | Qt 主窗口 UI、事件分发、设置保存（含 `_batch_size_save_field`） |
-| `panels.py` | 进度/预览/日志面板 + `SignalBridge`（Qt Signal 跨线程回传事件） |
-| `widgets.py` | `DropListWidget`（拖放列表）、`LogEntry`、`SCAN_VIDEO_EXTS` |
-| `dialogs.py` | 设置、历史、缓存、嵌入对话框 |
-| `theme.py` | 明暗主题配色、QSS |
-| `notifier.py` | winotify → PowerShell 系统通知（白名单防注入） |
-| `transcriber.py` | ffmpeg 提取音频 + faster-whisper 转写、断点 `.partial.srt` |
-| `translation.py` | 翻译客户端：句子级缓存、批处理、递归降级、停止与熔断 |
-| `translator.py` | 翻译阶段编排：翻译→组装双语→落盘→MKV 内嵌→备份 |
-| `pipeline.py` | 两阶段流水线编排（转写→翻译 顺序）、停止管理 |
-| `srt_utils.py` | SRT 解析/写入、断句、繁简转换、`OverallProgress` |
-| `muxer.py` | MKV 软内嵌、从视频提取内嵌字幕、转 MP4（ffprobe 探测 + ffmpeg，时长验证后删除原文件；MP4 源带内嵌字幕时去字幕重封装替换原文件） |
-| `local_service.py` | 本地 Hy-MT2 llama-server 自动拉起/探测/退出清理（端口 `_PORT=8188`，不用 8080 是因为它常被 Hyper-V/WSL 动态预留；`service_url_prefix()` 供各模块识别"本地服务 URL"；启动日志落盘 `cache/.llama-server.log`，启动失败时读日志尾部给出真实原因，如端口被 Windows 预留时提示 netsh 修复命令） |
-| `config.py` | 读取 config.json → `SimpleNamespace` 单例 `cfg` |
-| `handoff.py` | 仅监听 `127.0.0.1:49732` 的下载器导入协议，校验请求格式 |
+Use four-space indentation, predominantly double-quoted strings, and existing type-annotation conventions. Use `snake_case` for functions/modules and `PascalCase` for classes. Follow surrounding imports and use `logging.getLogger(__name__)`. Keep module responsibilities focused; avoid unnecessary abstractions. No repository-wide formatter or linter configuration is prescribed.
 
-## 架构要点
+## Testing Guidelines
 
-```
-媒体文件 → pipeline._transcribe_stage → {video}.{lang}.srt
-         → pipeline._translate_stage → translator.translate_only → muxer 或外挂 SRT
-```
+Use standard-library `unittest`, `test_*.py` files, and `test_*` methods. Add regression coverage for behavioral fixes and run the full suite after every change. No numerical coverage threshold is defined.
 
-- **两阶段调度**（`pipeline._run_staged`，`_process_one` 已删除）：
-  阶段 1 全部转写（仅驻留 Whisper）→ `release_model()` 释放显存 →
-  阶段 2 顺序翻译+自动内嵌（仅驻留 llama-server）。
-  翻译走本地 llama-server（`--parallel 1`），文件级/批次级均为串行：
-  多路并发只会排队超时，模型各只加载一次；`pause_before_embed` 逐文件生效。
-- **跨线程回传**：worker 线程 post 事件 dict → `SignalBridge`（Qt Signal，队列连接）→
-  主线程 `_handle_event` 按类型分发（`_event_handlers` 只构建一次）。
-- **翻译**：`translation.py` 批量调本地 API；
-  进程级共享缓存 `_shared_cache` + 全局锁防并发写盘覆盖（缓存对话框删除/清空必须
-  走 `remove_shared_cache_entries`/`clear_shared_cache` 同步内存，否则条目复活）；
-  缓存淘汰按 LRU（命中即触碰，`MAX_CACHE_ENTRIES` 超额裁掉一半最久未用）；
-  句子级去重。
-  缓存键使用 v2 格式并包含目标语言，旧键保留但不再命中；缓存对话框在首次翻译前也会
-  按路径加载共享缓存，删除条目与写盘在同一锁内完成。
-  段落上下文用「future 链」实现：worker 内等本段前一批完成再带 `（上文）…` 提交，
-  段内严格有序（`para_gate`/`para_context`，默认批次并发 1）。
-  **停止与熔断**：`translate_blocks(stop_check=...)` 检测用户停止抛 `TranslationStopped`
-  （translator 静默返回，不算失败）；网络类错误抛 `ApiUnavailableError` 不拆批；
-  连续 `MAX_EMPTY_BATCHES`(3) 空批判定 API 不可用中止本文件；补翻连续 20 句无进展放弃；
-  异常/停止时 `_abort_translation` 落盘断点并取消未开始的批次。
-  生成按原文长度设置 128–2048 token 上限，并启用轻度重复惩罚；截断或异常重复响应
-  不作为译文接受，走已有拆批/单句兜底。JSON 容错只替换字符串外的中文逗号/冒号，
-  保留译文标点；停止后禁止在途请求继续发起拆批或重试（已发出的请求自然结束）。
-  等待批次结果时每轮检查停止信号，最多等待当前一轮 15 秒；仅有待翻译字幕时才
-  确保本地模型服务启动，纯中文转换/已有中文译文处理不要求模型服务。
-- **任务配置快照**：`qt_app._build_opts` 将设置对话框中可修改的任务参数（含批大小、
-  备份份数）解析为具体值；`SubtitleWorker.start` 随即复制并冻结该 dict。后台阶段不得
-  回读 `cfg` 覆盖这些值，设置改动只影响下一次启动的任务。
-- **断点续转/续翻**：`.partial.srt`（每 30 段）+ `*.translate_state.json`；
-  翻译状态在首批、每 5 批、末批及主动停止/批次异常时写盘，以降低长字幕反复序列化的开销；
-  `cache/.subtitle_ignore.json` 记录已完成文件；`save_json` 对 Windows 并发
-  replace 冲突做短暂重试。
-  续翻状态包含 `target_lang`，只恢复目标语言一致的状态；旧状态无此字段时重新翻译。
-  返回原文不算完成；旧断点/缓存中的原文占位也重新翻译。
-- **数据净化**：转写后 `sanitize_blocks()` + 内嵌前 `_sanitize_srt_for_mux()` 双重校验。
-  先按非负起始时间稳定排序再净化、重编号；保留乱序块的合法时间与文本对应关系，
-  相同起点保持原顺序，不再把早期字幕强行挪到前一块的起点。
-- **嵌入前暂停**：`translator.py` 中 `PauseResponse`（event + action + modified_text）。
-- **事件契约**：`done` 事件可带 `stopped: True`（用户停止，UI 不再谎报"全部完成"）；
-  失败按文件粒度处理（`log` ERROR + 跳过继续），全部失败才发 `error`，部分失败发 `done` 带失败数。
-  `counter` 事件由 pipeline 维护真实完成计数（`_bump_counter`/`_post_counter`，
-  文件级并发下文件序号≠完成数，禁止再用 idx 当累计值）。
-- **输入防御**：`_run` 开头检测同目录同名不同格式媒体文件（同 stem 冲突，大小写不敏感）→ 报错中止；
-  `find_existing_subtitle` 忽略 `.partial.srt`；断点续翻按 stem 前缀匹配，防止串用别的视频的状态文件。
-  已有字幕与续翻候选共用 `is_source_subtitle_stem`：匹配不区分大小写，
-  只检查媒体名后面的后缀是否含 bak/backup/translated/partial，避免误排除片名本身含这些词的字幕。
-- **下载器联动**：`qt_app` 通过 `QTcpServer` 只监听回环地址；收到媒体路径后仅接受现存的支持格式，加入视频队列、自动跳过重复/已处理项并激活现有窗口，绝不自动开始处理。
-- **托盘常驻与单实例**：`qt_app.main` 在构建窗口前用按应用目录命名的 `QLockFile` 抢占实例，并用 `QLocalServer` 接收再次启动的唤醒请求；再次运行快捷方式仅恢复原窗口并退出新进程。可用时创建 `QSystemTrayIcon`，普通 `closeEvent` 仅保存窗口状态并隐藏，不设 `_closing` 或停止 worker；单击图标恢复，右键菜单可打开或彻底退出。退出时若有运行中任务先确认，再走原关闭清理。隐藏时嵌入确认事件排队并发通知，恢复窗口后再显示对话框；系统通知区域不可用时正常关闭。
-- **配置钳位**：`checkpoint_interval` 非正数/非法值回退 30，合法正数保持（包括 1）；
-  `batch_size` 至少为 1，杜绝 0 值崩溃。
-- **启动降级**：实例锁成功但唤醒通道监听失败时保留锁继续运行，记录 WARNING；此时再次启动无法唤醒窗口。
-- **设置持久化**：`translation.translation_only` 与 `translation.send_all` 默认均为 false，永久保存后重启读取。
-- **预览渲染**：`PreviewPanel` 实时追加 200ms 合并渲染（QTimer 单次触发），
-  增量维护预览块列表，只渲染最近 300 块（`_visible_block_slice`，块索引带偏移映射回 `_raw_text` 全文供编辑回写）。
-  复用表格单元格，每次刷新统一计算主题色；渲染和高亮样式更新阻断表格信号，避免
-  触发全文编辑回写；主题切换保留高亮，刷新结束恢复原信号和绘制状态。
-- **字幕文本处理**：只读一次字节，优先识别 Unicode BOM 及无 BOM UTF-16，
-  再按 UTF-8 BOM → GBK → Latin-1 回退并保持通用换行。解析/预览/编辑分页
-  统一按「可选编号 + 时间轴」识别边界，保留正文内空行；异常小时字段报 ValueError，
-  非空文件解析为空有告警，翻译入口拒绝空区块。英文断句只检查句点前末词。
-- **服务与媒体清理**：本会话模型加载时已监听但健康检查未就绪，继续等待，不误报端口占用；
-  服务超时使用单调时钟，日志诊断只保留最近 5 条非空行；字幕内嵌临时文件在 finally
-  统一清理，非有限数或非正视频时长不能作为验证通过的依据。
-  内嵌 ffmpeg 超时/非零退出、TS 重封装异常输出不得成为删除源文件的依据；时长
-  双向偏差不得超过 `max(0.25, min(1.0, 源秒数 * 0.001))` 秒。已有 MKV 输出
-  按编号避让；原文/译文备份独占创建并递增解决同秒冲突。
-- **转写进度与配置**：真实媒体时长来自 ffprobe（缺失时回退 Whisper info.duration），
-  ffmpeg 最后进度刻度只供日志。配置根节点必须为对象；主题颜色按 QColor 规范化，
-  无效类型/颜色回退对应主题默认值，旧浅色头部兼容判断也走规范化结果。
+Mock network requests, model loading, service startup, and media subprocesses. Isolate configuration, caches, and outputs in temporary directories; patch `translator._BACKUP_DIR` for translation orchestration tests. Never use production backups or user media. Inspect rendered output for UI changes.
 
-## 配置与安全
+## Commit & Pull Request Guidelines
 
-- 配置在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）；改模板应改 example
-- 模型路径统一由 `qt_app._resolve_model_dir` 按项目根目录解析，不依赖启动工作目录；永久保存时项目内模型路径写为相对路径，项目外模型保留绝对路径。迁移后应更新 Windows 快捷方式的参数、工作目录和图标路径。
-- **配置生效规则**：点击「本次有效」会更新当前会话，之后新启动的任务使用该设置；点击
-  「永久保存（下次默认）」还会写入 `config.json`，供下次启动作为默认值。正在运行的任务
-  永不改变；直接编辑 `config.json` 后请重启应用。
-- **翻译为纯本地方案，不存在联网 API 能力**：翻译端点由
-  `local_service.translation_endpoint()` 单点定义（`127.0.0.1:8188`），
-  `TranslationClient` 不接受地址/密钥参数，配置中也没有 `api_url`/`api_key` 字段。
-  **禁止**重新引入可配置的外部 API 地址、密钥字段、preset 方案或厂商兼容分支
-- `.gitignore`：config.json、`*config.json`、models/、tools/ffmpeg*.exe、cache/、logs/、.zcode/、.reasonix/、reasonix.toml
-- 提交前自查：`git grep -nE "api_key|api_url|preset|sk-[A-Za-z0-9_-]{20,}"` 应无命中
+History favors short imperative subjects such as “Fix subtitle parsing” or “Improve subtitle processing”; `docs:` also appears. Keep commits focused. PRs should explain the problem, resulting behavior, validation, and limitations. Link relevant issues and include screenshots for visible UI changes.
 
-## 代码惯例
+## Configuration & Collaboration
 
-- 文件头 `#!/usr/bin/env python3` + `# -*- coding: utf-8 -*-`；`logger = logging.getLogger(__name__)`
-- 类型标注用 `typing.List/Dict/Optional`（少数文件用 PEP 585/604 原生泛型）
-- 字符串双引号主导、4 空格缩进；避免引入新抽象，各模块职责单一
+Keep personal `config.json`, models, caches, and logs out of commits. Maintain defaults in `subtitle_app/config.example.json`. Translation must remain local through `local_service.translation_endpoint()`; do not introduce external endpoints or credentials.
 
-## 给 AI agent 的提示（省 token）
-
-- 本文件已含架构全貌，**优先读它**；细节用 `grep`/`code_index`/LSP 精准定位，**不要整读大文件**
-  （qt_app.py / dialogs.py / panels.py 均 30KB+）
-- 探索型问题（"X 如何工作""找所有 Y"）用 **explore 子代理**：它隔离读取，只回蒸馏结论
-- Windows + PowerShell 环境：路径用 `\`，多命令用 `;` 连接
-- 改完跑全量测试；测试新增放 `tools/tests/test_*.py`
-- 核心改动（新增模块/改数据流/改配置结构）后更新本文件与 README
+Confirm new features and unclear requirements with the user. Preserve existing changes, synchronize affected documentation, and recommend a next step after modifications. Do not commit, push, or publish without authorization.

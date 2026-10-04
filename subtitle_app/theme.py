@@ -6,16 +6,16 @@
 从 qt_app.py 抽取，保持行为完全一致，仅移动代码位置。
 """
 import logging
-import math
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF, QPoint
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import (
     QPixmap, QPainter, QPen, QPolygon, QPainterPath, QIcon, QColor,
 )
 
 from .config import cfg
+from .icons import make_icon
 
 logger = logging.getLogger(__name__)
 
@@ -144,43 +144,13 @@ def checkmark_png() -> str:
 
 
 def make_sun_icon(size: int = 20) -> QIcon:
-    """绘制太阳图标（浅色模式指示），避免 emoji 渲染不清"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#b45309")  # 浅色头部使用深琥珀色，保证图标对比度
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(color)
-    c = size / 2
-    p.drawEllipse(QRectF(c - 3, c - 3, 6, 6))  # 中心圆
-    pen = QPen(color, 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    for i in range(8):
-        ang = i * math.pi / 4
-        p.drawLine(c + 4.6 * math.cos(ang), c + 4.6 * math.sin(ang),
-                   c + 6.9 * math.cos(ang), c + 6.9 * math.sin(ang))
-    p.end()
-    return QIcon(pm)
+    """与操作按钮使用同一套可缩放线性图标。"""
+    return make_icon("sun", color="#b45309")
 
 
 def make_moon_icon(size: int = 20) -> QIcon:
-    """绘制月亮图标（深色模式指示），避免 emoji 渲染不清"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#fbbf24")
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(color)
-    body = QPainterPath()
-    body.addEllipse(QRectF(2.5, 2.5, 12, 12))
-    hole = QPainterPath()
-    hole.addEllipse(QRectF(7.5, 0.5, 12, 12))
-    p.drawPath(body.subtracted(hole))  # 月牙
-    p.end()
-    return QIcon(pm)
+    """与操作按钮使用同一套可缩放线性图标。"""
+    return make_icon("moon", color="#fbbf24")
 
 
 def detect_system_dark() -> bool:
@@ -229,9 +199,25 @@ def build_qss(colors: dict, is_dark: bool) -> str:
     header_meta = "rgba(255,255,255,0.68)" if is_dark else c['text_sec']
     spin_up = _spin_arrow_png(theme_key, c['text_sec'], "up")
     spin_down = _spin_arrow_png(theme_key, c['text_sec'], "down")
+    primary_bg = _mix_hex(c['accent'], "#000000", 0.22) if is_dark else c['accent']
+    primary_hover = _mix_hex(primary_bg, "#000000", 0.12)
+    secondary_bg = _mix_hex(c['card'], c['accent'], 0.10)
+    secondary_border = _mix_hex(c['border'], c['accent'], 0.25)
+    danger_hover = _mix_hex(c['danger'], "#000000", 0.12)
+    dialog_scroll_handle = _mix_hex(c['border'], c['text_muted'], 0.30)
+    preview_alt = _mix_hex(c['card'], c['text'], 0.035 if is_dark else 0.018)
+    preview_header = _mix_hex(c['card'], c['accent'], 0.065)
+    preview_hover = _mix_hex(c['card'], c['accent'], 0.08)
+    preview_selected = _mix_hex(c['card'], c['accent'], 0.20 if is_dark else 0.16)
+    log_neutral = _mix_hex(c['card'], c['text_sec'], 0.12)
+    log_warning_bg = _mix_hex(c['card'], "#d97706", 0.18 if is_dark else 0.10)
+    log_warning_fg = "#fbbf24" if is_dark else "#92400e"
+    log_error_bg = _mix_hex(c['card'], c['danger'], 0.18 if is_dark else 0.09)
+    log_error_fg = _mix_hex(c['danger'], c['text'], 0.40 if is_dark else 0.20)
+    log_separator = _mix_hex(c['card'], c['border'], 0.65)
     return f"""
         QMainWindow {{ background: {c['bg']}; }}
-        QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; }}
+        QWidget {{ background: {c['bg']}; color: {c['text']}; font-size: 13px; font-weight:400; }}
         QFrame#header {{
             background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                 stop:0 {c['header']}, stop:0.55 {c['header']},
@@ -244,13 +230,37 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             color:{badge_text}; background:{badge_bg};
             border:1px solid {badge_border}; border-radius:8px;
             min-height:15px; max-height:15px; padding:2px 7px;
-            font-size:9px; font-weight:700; letter-spacing:0.7px;
+            font-size:9px; font-weight:600; letter-spacing:0.7px;
         }}
         QLabel#headerMeta {{ color:{header_meta}; font-size:11px; }}
         QToolTip {{
             background: {c['card']}; color: {c['text']};
             border: 1px solid {c['accent']}; border-radius: 4px;
             padding: 5px 8px; font-size: 12px;
+        }}
+        QDialog QLabel#dialogTitle {{ font-size:14px; font-weight:600; }}
+        QDialog QLabel#dialogSection {{ font-weight:600; }}
+        QDialog QLabel#dialogHint {{ color:{c['text_sec']}; font-size:11px; }}
+        QDialog QLabel#dialogMeta {{ color:{c['text_sec']}; }}
+        QDialog QLabel#dialogWarning {{ color:{c['danger']}; font-size:11px; }}
+        QDialog QFrame#dialogSeparator {{
+            background:transparent; border:none; border-top:1px solid {c['border']};
+            min-height:2px; max-height:2px;
+        }}
+        QDialog QLineEdit, QDialog QTextEdit {{ placeholder-text-color:{c['text_muted']}; }}
+        QDialog QListWidget {{ alternate-background-color:{alt_bg}; outline:0; }}
+        QDialog QListWidget:focus {{ border-color:{secondary_border}; }}
+        QDialog QListWidget::item:hover {{ background:{hover_bg}; }}
+        QDialog QListWidget::item:selected {{ background:{sel_bg}; color:{c['text']}; }}
+        QDialog QScrollBar:vertical, QDialog QScrollBar:horizontal {{ background:transparent; }}
+        QDialog QScrollBar::handle:vertical {{
+            background:{dialog_scroll_handle}; border-radius:4px;
+        }}
+        QDialog QScrollBar::handle:horizontal {{
+            background:{dialog_scroll_handle}; border-radius:4px;
+        }}
+        QDialog QScrollBar::handle:vertical:hover, QDialog QScrollBar::handle:horizontal:hover {{
+            background:{c['text_muted']};
         }}
         QMenu {{
             background: {c['card']}; color: {c['text']};
@@ -263,18 +273,19 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QTableWidget#subtitlePreview {{
             background: transparent; color: {c['text']};
             border: none; gridline-color: transparent;
-            alternate-background-color: {alt_bg};
-            selection-background-color: {sel_bg}; selection-color: {c['text']};
+            alternate-background-color: {preview_alt};
+            selection-background-color: {preview_selected}; selection-color: {c['text']};
             outline: 0;
         }}
-        QTableWidget#subtitlePreview::item:hover {{ background: {hover_bg}; }}
-        QTableWidget#subtitlePreview::item:selected {{ background: {sel_bg}; color: {c['text']}; }}
+        QTableWidget#subtitlePreview::item:hover {{ background: {preview_hover}; }}
+        QTableWidget#subtitlePreview::item:selected {{ background: {preview_selected}; color: {c['text']}; }}
         QHeaderView {{ background: transparent; border: none; }}
         QHeaderView::section {{
             background: {c['bg']}; color: {c['text_sec']};
             border: none; border-bottom: 1px solid {c['border']};
             padding: 5px 8px; font-size: 11px; font-weight: 600;
         }}
+        QTableWidget#subtitlePreview QHeaderView::section {{ background:{preview_header}; }}
         QTableCornerButton::section {{ background: transparent; border: none; }}
         QFrame#card {{ background: {c['card']}; {panel_radius} border:1px solid {c['border']}; }}
         QFrame#filePanel, QFrame#previewPanel, QFrame#logPanel {{
@@ -289,7 +300,7 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             background:{c['card']}; border-top:1px solid {c['border']};
         }}
         QLabel#panelTitle {{
-            color:{c['text']}; font-size:13px; font-weight:700; padding:2px 0;
+            color:{c['text']}; font-size:13px; font-weight:600; padding:2px 0;
         }}
         QGroupBox {{
             background: {c['card']}; {border_radius}
@@ -358,21 +369,32 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QPushButton {{
             background:{c['card']}; color:{c['text']};
             border:1px solid {c['border']}; {border_radius}
-            padding:8px 14px; font-weight:600;
+            padding:8px 14px; font-weight:400;
         }}
         QPushButton:hover {{ background:{c['border']}; border-color:{c['accent']}; }}
         QPushButton:pressed {{ padding-top:8px; padding-bottom:6px; }}
         QPushButton:disabled {{ color:{c['text_muted']}; border-color:{c['border']}; background:{c['bg']}; }}
         QPushButton:focus {{ border-color:{c['accent']}; }}
-        QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:600; }}
-        QPushButton#startBtn {{ background:{c['success']}; color:white; border:none; border-radius:10px; font-weight:bold; padding:11px 24px; font-size:13px; }}
-        QPushButton#startBtn:hover {{ background:#16a34a; }}
-        QPushButton#startBtn:disabled {{ background:{c['text_muted']}; }}
-        QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; border-radius:10px; font-weight:bold; padding:11px 24px; font-size:13px; }}
-        QPushButton#stopBtn:hover {{ background:#dc2626; }}
-        QPushButton#stopBtn:disabled {{ background:{c['text_muted']}; }}
-        QPushButton#accentBtn {{ background:{c['accent']}; color:white; border:none; border-radius:10px; padding:9px 16px; font-weight:700; }}
-        QPushButton#accentBtn:hover {{ background:#4f46e5; }}
+        QPushButton#bottomBtn {{ padding:9px 15px; font-size:13px; font-weight:400; }}
+        QPushButton#startBtn {{ background:{primary_bg}; color:white; border:none; border-radius:10px; font-weight:600; padding:11px 24px; font-size:13px; }}
+        QPushButton#startBtn:hover {{ background:{primary_hover}; }}
+        QPushButton#startBtn:disabled {{ background:{c['bg']}; color:{c['text_muted']}; }}
+        QDialog QPushButton#confirmBtn {{
+            background:{primary_bg}; color:white; border-color:{primary_bg}; font-weight:600;
+        }}
+        QDialog QPushButton#confirmBtn:hover {{ background:{primary_hover}; border-color:{primary_hover}; }}
+        QDialog QPushButton#confirmBtn:disabled {{
+            background:{c['bg']}; color:{c['text_muted']}; border-color:{c['border']};
+        }}
+        QPushButton#stopBtn {{ background:{c['danger']}; color:white; border:none; border-radius:10px; font-weight:600; padding:11px 24px; font-size:13px; }}
+        QPushButton#stopBtn:hover {{ background:{danger_hover}; }}
+        QPushButton#stopBtn:disabled {{ background:{c['bg']}; color:{c['text_muted']}; }}
+        QPushButton#accentBtn {{ background:{secondary_bg}; color:{c['accent']}; border:1px solid {secondary_border}; border-radius:10px; padding:8px 15px; font-weight:400; }}
+        QPushButton#accentBtn:hover {{ background:{hover_bg}; border-color:{c['accent']}; }}
+        QPushButton#accentBtn:disabled {{ background:{c['bg']}; color:{c['text_muted']}; border-color:{c['border']}; }}
+        QPushButton#dangerBtn {{ color:{c['danger']}; }}
+        QPushButton#dangerBtn:hover {{ border-color:{c['danger']}; }}
+        QPushButton#dangerBtn:disabled {{ color:{c['text_muted']}; }}
         QPushButton#actionBtn {{ padding:6px 11px; font-size:12px; }}
         QProgressBar {{
             background:{c['border']}; border:none; {border_radius}
@@ -390,8 +412,8 @@ def build_qss(colors: dict, is_dark: bool) -> str:
             border-top-left-radius:8px; border-top-right-radius:8px;
         }}
         QTabBar::tab:hover {{ color:{c['accent']}; }}
-        QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:700; }}
-        QCheckBox {{ spacing:7px; font-weight:600; color:{c['text_sec']}; background:transparent; }}
+        QTabBar::tab:selected {{ background:{c['card']}; color:{c['accent']}; border-color:{c['border']}; font-weight:600; }}
+        QCheckBox {{ spacing:7px; font-weight:400; color:{c['text_sec']}; background:transparent; }}
         QCheckBox::indicator {{
             width:16px; height:16px;
             background:{c['card']}; border:1px solid {c['text_muted']};
@@ -421,7 +443,23 @@ def build_qss(colors: dict, is_dark: bool) -> str:
         QSplitter::handle:vertical {{ height:5px; }}
         QLabel {{ background:transparent; }}
         QListWidget#logList {{ background:{c['card']}; border:none; }}
-        QListWidget#logList::item {{ padding:0; border-bottom:1px solid {c['border']}; }}
+        QListWidget#logList::item {{ padding:0; border-bottom:1px solid {log_separator}; }}
+        QWidget#logEntry {{ background:transparent; }}
+        QLabel#logBadge {{
+            color:{c['text_sec']}; background:{log_neutral}; border-radius:4px;
+            font-size:10px; font-weight:600; padding:1px 2px;
+        }}
+        QLabel#logBadge[logLevel="DEBUG"] {{ color:{c['text_muted']}; }}
+        QLabel#logBadge[logLevel="WARNING"] {{ background:{log_warning_bg}; color:{log_warning_fg}; }}
+        QLabel#logBadge[logLevel="ERROR"] {{ background:{log_error_bg}; color:{log_error_fg}; }}
+        QLabel#logTimestamp {{ color:{c['text_sec']}; font-size:11px; }}
+        QLabel#logMessage {{ color:{c['text']}; }}
+        QLabel#logTrace {{ color:{log_error_fg}; }}
+        QPushButton#logAction {{
+            background:transparent; border:1px solid transparent; border-radius:4px;
+            padding:0; font-size:11px;
+        }}
+        QPushButton#logAction:hover {{ background:{preview_hover}; border-color:{c['border']}; }}
         QListWidget::item:hover {{ background:{c['bg']}; }}
         QListWidget::item:selected {{ background:{c['accent']}; color:white; }}
         QListWidget[dragOver="true"] {{

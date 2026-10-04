@@ -5,8 +5,17 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/Platform-Windows-blue" alt="Platform">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
 </p>
+
+## 文档导航
+
+- [完整使用说明书](docs/使用说明书.md)：操作、设置、输出文件与故障排查。
+- [开发与维护](docs/开发与维护.md)：测试、修改约定与交付检查。
+- [前端美化变更说明](docs/前端美化变更说明-2026-10-04.md)：五项视觉调整、页面覆盖、效果截图与验证范围。
+- [AGENTS.md](AGENTS.md)：模块职责、架构约束与 AI 协作要求。
+- [更新日志](CHANGELOG.md)：历史版本和未发布的文档维护。
+
+依赖和模型准备完成后，转写与翻译在本机运行；首次启动或依赖环境变化时，入口可能联网安装依赖。
 
 ---
 
@@ -31,7 +40,7 @@
 
 - **操作系统**：Windows 10/11
 - **Python**：3.10+（[下载地址](https://www.python.org/downloads/windows/)，安装时务必勾选 **Add Python to PATH**）
-- **GPU**（强烈推荐）：NVIDIA 显卡 + [CUDA 12.x](https://developer.nvidia.com/cuda-downloads) + [cuDNN](https://developer.nvidia.com/cudnn)；纯 CPU 可用但转写速度慢约 10 倍
+- **GPU**（强烈推荐）：NVIDIA 显卡 + [CUDA 12.x](https://developer.nvidia.com/cuda-downloads) + [cuDNN](https://developer.nvidia.com/cudnn)；转写可用纯 CPU，速度取决于硬件、模型和音频长度
 - **Visual C++ Redistributable**：[下载链接](https://aka.ms/vs/17/release/vc_redist.x64.exe)（PySide6 必需，缺少则启动闪退）
 
 ---
@@ -87,7 +96,9 @@ Git 仓库**不包含** llama.cpp 可执行文件和 Hy-MT2 模型。将 Windows
 ### 6️⃣ 配置并启动
 
 ```powershell
-Copy-Item subtitle_app/config.example.json subtitle_app/config.json
+if (-not (Test-Path subtitle_app/config.json)) {
+    Copy-Item subtitle_app/config.example.json subtitle_app/config.json
+}
 .\.venv\Scripts\python.exe subtitle_app/subtitle_app.py
 ```
 
@@ -130,6 +141,8 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 |------|------|
 | `视频名.srt` | 未内嵌成功或跳过内嵌时保留的外挂字幕（纯译文、双语或原文，取决于设置） |
 | `视频名.mkv` | 视频内嵌成功时的输出；输入为 MKV 时通常命名为 `视频名_subbed.mkv` |
+| `视频名.语言代码.srt` | 转写阶段产生的原文字幕；后续内嵌成功时可能被清理 |
+| `视频名.partial.srt` | 转写断点，不能当作完整字幕；转写成功后清理 |
 | `*.translate_state.json` | 断点续翻状态文件（处理完成后自动清理） |
 
 翻译状态在首批、每 5 批及末批保存；主动停止或批次异常时也会保存。程序意外退出后，批量翻译最多可能重做最近 4 批；单条补翻可能重做尚未保存的部分。
@@ -196,15 +209,17 @@ Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 │   ├── ffmpeg.exe / ffprobe.exe   # 音视频处理（可选：可改用系统 PATH 版）
 │   ├── requirements.txt           # Python 依赖清单
 │   └── tests/                     # unittest 测试（test_*.py）
-├── models/                        # Whisper 语音模型文件
-│   └── faster-whisper-large-v3-turbo/
-├── cache/                         # 运行时缓存（可自动清理）
+├── models/                        # 本地模型（不随 Git 分发）
+│   ├── faster-whisper-large-v3-turbo/
+│   └── hy-mt2/                    # GGUF 翻译模型
+├── cache/                         # 翻译缓存、完成记录与服务日志
 │   ├── .subtitle_translation_cache.json
 │   └── .subtitle_ignore.json
 ├── logs/                          # 运行日志 + SRT 备份
 │   └── subtitle_tool.log
 ├── docs/
-│   └── 使用说明书.md
+│   ├── 使用说明书.md
+│   └── 开发与维护.md
 └── README.md                      # 本文档
 ```
 
@@ -222,8 +237,8 @@ python -m unittest tools.tests.test_muxer -v
 python -m unittest tools.tests.test_widgets -v
 ```
 
-目前共 188 项测试，模型与媒体处理调用使用模拟对象，无需加载真实模型；翻译编排测试的备份目录隔离在临时目录中。
-本次代码结构与性能审查记录见 [效率审查记录](docs/efficiency-review-2026-10-01.md)。
+测试数量以实际运行输出为准，模型与媒体处理调用使用模拟对象，无需加载真实模型；翻译编排测试的备份目录隔离在临时目录中。
+2026-10-01 的代码结构与性能审查记录见 [效率审查记录](docs/efficiency-review-2026-10-01.md)。
 
 ---
 

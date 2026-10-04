@@ -17,7 +17,7 @@ from PySide6.QtCore import Qt, QTimer, QEvent, QSize, QLockFile
 from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QCheckBox, QPushButton, QListWidgetItem,
+    QLineEdit, QCheckBox, QListWidgetItem,
     QLabel, QTabWidget, QSplitter,
     QFrame, QFileDialog, QMessageBox,
     QMenu, QDialog, QGridLayout, QSystemTrayIcon,
@@ -31,6 +31,7 @@ from .srt_utils import (
     OverallProgress, find_tool, IGNORE_FILE,
     _read_text_auto, shift_srt_timestamps,
 )
+from .icons import action_button, make_icon
 from .config import cfg
 from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
 from .muxer import embed_subtitles_to_video, extract_embedded_subtitle, convert_to_mp4
@@ -82,7 +83,7 @@ def _batch_size_save_field(values: dict) -> Optional[tuple]:
 class SubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🎬 本地字幕生成工具")
+        self.setWindowTitle("本地字幕生成工具")
         # 任务栏 / Alt-Tab 图标（应用随系统主题没有原生图标时尤其明显）
         _icon_path = Path(__file__).resolve().parent / "icon.ico"
         if _icon_path.exists():
@@ -299,7 +300,7 @@ class SubtitleApp(QMainWindow):
         save_json(self._settings_path, s)
 
     def _make_btn(self, text, cb=None, object_name=None, tooltip=None, stylesheet=None, fixed_size=None):
-        b = QPushButton(text)
+        b = action_button(text)
         if cb:
             b.clicked.connect(cb)
         if object_name:
@@ -329,7 +330,7 @@ class SubtitleApp(QMainWindow):
         ver.setObjectName("headerMeta")
         hl.addWidget(ver)
         hl.addSpacing(8)
-        self.theme_btn = QPushButton()
+        self.theme_btn = action_button()
         self.theme_btn.setFixedSize(32, 28)
         self.theme_btn.setIcon(make_moon_icon() if self.dark_mode else make_sun_icon())
         self.theme_btn.setIconSize(QSize(18, 18))
@@ -426,7 +427,7 @@ class SubtitleApp(QMainWindow):
         pr.addWidget(self._make_btn("📂 浏览", self._choose_video_dir))
         pr.addWidget(self._make_btn("📌 默认", self._set_default_video_dir))
         pr.addSpacing(12)
-        self.trans_cb = QCheckBox("🌍 开启 AI 翻译")
+        self.trans_cb = QCheckBox("开启 AI 翻译")
         self.trans_cb.setChecked(True)
         pr.addWidget(self.trans_cb)
         pr.addWidget(self._make_btn("⚙ 更多设置", self._open_settings, object_name="accentBtn"))
@@ -464,12 +465,10 @@ class SubtitleApp(QMainWindow):
         ar.addWidget(self.stop_btn)
         # 重试（断点续翻）紧挨停止：处理期间与开始按钮一并禁用
         self.retry_btn = self._make_btn(
-            "🔄 重试", self._retry, object_name="bottomBtn",
-            stylesheet=f"QPushButton {{ background:{self.colors['accent']}; color:white; border:none; }} "
-                       "QPushButton:hover { background:#4f46e5; }")
+            "🔄 重试", self._retry, object_name="bottomBtn")
         ar.addWidget(self.retry_btn)
         # ── 当前模型状态（信息展示：Whisper 转写模型 / 本地 Hy-MT2 翻译模型） ──
-        self.model_status = QLabel("🧠 当前模型：…")
+        self.model_status = QLabel("当前模型：…")
         self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
         ar.addWidget(self.model_status)
         self.load_model_btn = self._make_btn(
@@ -679,7 +678,9 @@ class SubtitleApp(QMainWindow):
                 continue
             jobs.append(p)
             existing.add(resolved)
-            item = QListWidgetItem(fmt_job_display(p))
+            item = QListWidgetItem(fmt_job_display(p).split("  ", 1)[1])
+            item.setIcon(make_icon("audio" if p.suffix.lower() in AUDIO_EXTS
+                                   else "video" if is_video else "file", lb))
             item.setData(Qt.UserRole, str(p))
             lb.addItem(item)
             if self._is_ignored(p):
@@ -971,10 +972,10 @@ class SubtitleApp(QMainWindow):
             parts.append("本地模型 Hy-MT2")
 
         if parts:
-            self.model_status.setText("🧠 当前加载：" + " · ".join(parts))
+            self.model_status.setText("当前加载：" + " · ".join(parts))
             self.model_status.setStyleSheet("color:#22c55e; font-size:11px; padding:0 4px;")
         else:
-            self.model_status.setText("🧠 当前加载：—")
+            self.model_status.setText("当前加载：—")
             self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
 
     def _retry(self):

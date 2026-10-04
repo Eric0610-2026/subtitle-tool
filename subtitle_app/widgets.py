@@ -10,9 +10,10 @@ from PySide6.QtCore import Qt, Signal, QEvent, QObject, QPropertyAnimation, QEas
 from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent, QColor, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import (
     QListWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QApplication, QAbstractItemView, QStyledItemDelegate,
+    QLabel, QApplication, QAbstractItemView, QStyledItemDelegate,
 )
 
+from .icons import action_button, set_button_icon
 from .config import cfg
 from .srt_utils import SUB_EXTS
 
@@ -151,31 +152,23 @@ def attach_popup_fade(combo, colors: dict, duration_ms: int = 180) -> None:
 class LogEntry(QWidget):
     """单条日志：级别色块 + 消息 + 可选可折叠 traceback"""
 
-    _LEVEL_STYLE = {
-        "DEBUG":   ("#64748b", "#475569"),
-        "INFO":    ("#94a3b8", "#334155"),
-        "WARNING": ("#fbbf24", "#b45309"),
-        "ERROR":   ("#ef4444", "#b91c1c"),
-    }
-
     def __init__(self, message, level="INFO", trace=None, parent=None):
         super().__init__(parent)
+        self.setObjectName("logEntry")
         level = (level or "INFO").upper()
         self.level = level
         self.message = message  # 完整消息（含时间戳前缀），导出/复制用
         self.trace = trace
-        tag_bg, tag_fg = self._LEVEL_STYLE.get(level, self._LEVEL_STYLE["INFO"])
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(1)
         top = QHBoxLayout()
         top.setSpacing(8)
         tag = QLabel(level)
+        tag.setObjectName("logBadge")
+        tag.setProperty("logLevel", level)
         tag.setFixedWidth(56)
         tag.setAlignment(Qt.AlignCenter)
-        tag.setStyleSheet(
-            f"color:{tag_fg}; background:{tag_bg}; border-radius:3px; "
-            "font-size:10px; font-weight:600; padding:1px 2px;")
         top.addWidget(tag)
         # 展示层把时间戳拆出来弱化，正文优先扫读；message 属性保持完整前缀
         ts = ""
@@ -186,24 +179,25 @@ class LogEntry(QWidget):
             display = rest.lstrip()
         if ts:
             ts_label = QLabel(ts)
+            ts_label.setObjectName("logTimestamp")
             ts_label.setFont(QFont("Consolas", 9))
-            ts_label.setStyleSheet("color:#64748b;")
             top.addWidget(ts_label)
         self.msg_label = QLabel(display)
+        self.msg_label.setObjectName("logMessage")
         self.msg_label.setWordWrap(True)
-        self.msg_label.setFont(QFont("Consolas", 10))
+        self.msg_label.setFont(QApplication.font())
         top.addWidget(self.msg_label, 1)
         if trace:
             self._trace_visible = False
             self._list_item = None
-            self.toggle_btn = QPushButton("▶")
+            self.toggle_btn = action_button(icon="chevron-right", accessible_name="展开详情")
             self.toggle_btn.setFixedSize(24, 20)
-            self.toggle_btn.setStyleSheet("padding:0; font-size:10px;")
+            self.toggle_btn.setObjectName("logAction")
             self.toggle_btn.clicked.connect(self._toggle)
             top.addWidget(self.toggle_btn)
-        self.copy_btn = QPushButton("📋")
+        self.copy_btn = action_button("📋", accessible_name="复制日志")
         self.copy_btn.setFixedSize(24, 20)
-        self.copy_btn.setStyleSheet("padding:0; font-size:11px;")
+        self.copy_btn.setObjectName("logAction")
         self.copy_btn.setToolTip("复制")
         self.copy_btn.clicked.connect(self._copy)
         top.addWidget(self.copy_btn)
@@ -211,8 +205,8 @@ class LogEntry(QWidget):
         layout.addLayout(top)
         if trace:
             self.trace_label = QLabel(trace.rstrip())
+            self.trace_label.setObjectName("logTrace")
             self.trace_label.setFont(QFont("Consolas", 9))
-            self.trace_label.setStyleSheet("color:#ef4444;")
             self.trace_label.setWordWrap(True)
             self.trace_label.setVisible(False)
             layout.addWidget(self.trace_label)
@@ -228,7 +222,8 @@ class LogEntry(QWidget):
     def _toggle(self):
         self._trace_visible = not self._trace_visible
         self.trace_label.setVisible(self._trace_visible)
-        self.toggle_btn.setText("▾" if self._trace_visible else "▶")
+        set_button_icon(self.toggle_btn, "chevron-down" if self._trace_visible else "chevron-right")
+        self.toggle_btn.setAccessibleName("收起详情" if self._trace_visible else "展开详情")
         if self._list_item is not None:
             self._list_item.setSizeHint(self.sizeHint())
 
