@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """托盘隐藏、恢复和退出的窗口交互。"""
 import os
+import time
 import unittest
 import uuid
 from contextlib import ExitStack
@@ -10,6 +11,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
+from PySide6.QtTest import QTest
 
 from subtitle_app.qt_app import SubtitleApp, _claim_single_instance
 
@@ -22,7 +24,7 @@ class TestTrayWindow(unittest.TestCase):
     def setUp(self):
         self.patches = ExitStack()
         for method in (
-            "_start_handoff_server", "_update_model_status", "_restore_window_state",
+            "_start_handoff_server", "_restore_window_state",
             "_save_window_state", "_run_startup_checks", "_setup_tray",
         ):
             self.patches.enter_context(patch.object(SubtitleApp, method))
@@ -32,7 +34,7 @@ class TestTrayWindow(unittest.TestCase):
 
     def tearDown(self):
         self.window._exiting = True
-        with patch.object(self.window.worker, "stop"), patch("subtitle_app.local_service.shutdown_owned"):
+        with patch.object(self.window.worker, "stop"), patch("subtitle_app.local_service.shutdown_service", return_value=(True, "Hy-MT2 已卸下")):
             self.window.close()
         self.patches.close()
 
@@ -55,7 +57,10 @@ class TestTrayWindow(unittest.TestCase):
             self.window.close()
             self.assertFalse(self.window.isVisible())
             self.assertIsNone(_claim_single_instance(Mock(), name))
-            self.app.processEvents()
+            deadline = time.monotonic() + 1.0
+            while not self.window.isVisible() and time.monotonic() < deadline:
+                self.app.processEvents()
+                QTest.qWait(10)
             self.assertTrue(self.window.isVisible())
         finally:
             if server is not None:
@@ -79,13 +84,22 @@ class TestTrayWindow(unittest.TestCase):
         with patch.object(self.window, "_has_active_tasks", return_value=True), patch.object(
             QMessageBox, "question", side_effect=[QMessageBox.No, QMessageBox.Yes]
         ), patch.object(self.window.worker, "stop") as stop, patch(
-            "subtitle_app.local_service.shutdown_owned"
+            "subtitle_app.local_service.shutdown_service", return_value=(True, "Hy-MT2 已卸下")
         ):
             self.window._quit_from_tray()
             self.assertFalse(self.window._closing)
             stop.assert_not_called()
             self.window._quit_from_tray()
             self.assertTrue(self.window._closing)
+            stop.assert_called_once()
+
+    def test_exit_uses_unified_service_cleanup_and_hide_does_not(self):
+        with patch("subtitle_app.local_service.shutdown_service", return_value=(True, "已卸下")) as stop:
+            self.window.close()
+            stop.assert_not_called()
+            self.window._exiting = True
+            with patch.object(self.window.worker, "stop"):
+                self.window.close()
             stop.assert_called_once()
 
 

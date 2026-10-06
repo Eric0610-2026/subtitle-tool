@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, Signal, QEvent, QObject, QPropertyAnimation, QEas
 from PySide6.QtGui import QFont, QDragEnterEvent, QDragMoveEvent, QDropEvent, QColor, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import (
     QListWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QApplication, QAbstractItemView, QStyledItemDelegate,
+    QLabel, QApplication, QAbstractButton, QAbstractItemView, QStyledItemDelegate,
 )
 
 from .icons import action_button, set_button_icon
@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 # 扫描的视频/音频扩展（排除 config.app.scan_skip_exts 中指定的格式）
 SCAN_VIDEO_EXTS = set(cfg.srt.video_exts) - set(cfg.app.scan_skip_exts)
 AUDIO_EXTS = set(getattr(cfg.srt, "audio_exts", []))
+
+
+class _ButtonCursorFilter(QObject):
+    """统一处理现有和动态创建的按钮，包括 Qt 提示框中的按钮。"""
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Polish, QEvent.Show, QEvent.EnabledChange):
+            if isinstance(watched, QAbstractButton):
+                watched.setCursor(Qt.PointingHandCursor if watched.isEnabled() else Qt.ArrowCursor)
+        return False
+
+
+def install_button_cursors(app):
+    """每个 QApplication 只安装一次；按钮禁用时恢复箭头。"""
+    if getattr(app, "_button_cursor_filter", None) is not None:
+        return
+    cursor_filter = _ButtonCursorFilter(app)
+    app._button_cursor_filter = cursor_filter
+    app.installEventFilter(cursor_filter)
+    for widget in app.allWidgets():
+        if isinstance(widget, QAbstractButton):
+            widget.setCursor(Qt.PointingHandCursor if widget.isEnabled() else Qt.ArrowCursor)
+
 
 class DropListWidget(QListWidget):
     """支持拖放添加文件 + 内部拖放排序的列表控件"""

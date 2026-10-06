@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QDialog, QListWidget, QPushButton
+from PySide6.QtWidgets import QApplication, QAbstractButton, QListWidgetItem, QMessageBox, QDialog, QListWidget, QPushButton
 from subtitle_app import qt_app, translation, dialogs
 from subtitle_app.panels import EditDialog
 from subtitle_app.srt_utils import SubtitleBlock, has_chinese, load_json, save_json, sanitize_blocks, sentence_cache_key
@@ -37,7 +37,7 @@ class TestWindowRegressions(unittest.TestCase):
         self.directory = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.root = Path(self.directory)
         self.stack.enter_context(patch.object(qt_app, "APP_DIR", self.root))
-        for method in ("_start_handoff_server", "_update_model_status", "_restore_window_state",
+        for method in ("_start_handoff_server", "_restore_window_state",
                        "_save_window_state", "_run_startup_checks", "_setup_tray"):
             self.stack.enter_context(patch.object(qt_app.SubtitleApp, method))
 
@@ -46,7 +46,7 @@ class TestWindowRegressions(unittest.TestCase):
         window._tray_icon = None
         def close():
             window._exiting = True
-            with patch.object(window.worker, "stop"), patch("subtitle_app.local_service.shutdown_owned"):
+            with patch.object(window.worker, "stop"), patch("subtitle_app.local_service.shutdown_service", return_value=(True, "Hy-MT2 已卸下")):
                 window.close()
         self.addCleanup(close)
         return window
@@ -55,10 +55,44 @@ class TestWindowRegressions(unittest.TestCase):
         save_json(self.root / qt_app.IGNORE_FILE, {"ignored": ["example.mp4"]})
         self.assertEqual(self.make_window()._ignore_set, {"example.mp4"})
 
+    def test_main_and_settings_button_cursors_in_both_themes(self):
+        window = self.make_window()
+        window.show()
+        dialog = dialogs.SettingsDialog(window, {})
+        self.addCleanup(dialog.close)
+        dialog.show()
+        for dark in (False, True):
+            window.dark_mode = dark
+            window.colors = qt_app.DARK if dark else qt_app.LIGHT
+            window._apply_style()
+            self.app.processEvents()
+            self.assertFalse(window.grab().isNull())
+            self.assertFalse(dialog.grab().isNull())
+            buttons = window.findChildren(QAbstractButton)
+            self.assertTrue(buttons)
+            self.assertTrue(dialog.findChildren(QAbstractButton))
+            for button in buttons:
+                expected = Qt.PointingHandCursor if button.isEnabled() else Qt.ArrowCursor
+                self.assertEqual(button.cursor().shape(), expected, button.text())
+
     def test_start_with_legacy_progress(self):
         save_json(self.root / ".subtitle_progress.json", {"done": ["old.mp4"]})
         self.make_window()
         self.assertTrue((self.root / qt_app.IGNORE_FILE).exists())
+
+    def test_progress_keeps_updating_while_preview_is_frozen(self):
+        window = self.make_window()
+        original = "\n\n".join(f"{i}\n00:00:01,000 --> 00:00:02,000\noriginal {i}" for i in range(1, 101))
+        window._handle_preview_append({"message": original})
+        window.preview_panel._flush_live_render()
+        window._handle_preview_live({"message": original.replace("original", "final")})
+        self.assertEqual(window.preview_panel.preview.item(0, 2).text(), "original 1")
+        self.assertIn("final 100", window.preview_panel.get_text())
+        window._handle_progress({"stage": "转写中", "percent": 65, "detail": "650 段"})
+        self.assertEqual(window.progress_panel.stage_bar.value(), 65)
+        window._handle_progress({"stage": "翻译", "percent": 83, "detail": "批次 83/100 完成"})
+        self.assertEqual(window.progress_panel.stage_bar.value(), 83)
+        self.assertEqual(window.progress_panel.stage_detail.text(), "批次 83/100 完成")
 
     def test_listen_failure_retains_lock(self):
         with patch.object(qt_app, "QLockFile") as lock_cls, patch.object(qt_app, "QLocalServer") as server_cls:

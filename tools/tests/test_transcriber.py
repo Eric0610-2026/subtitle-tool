@@ -67,6 +67,16 @@ class TestTranscriberClearCache(unittest.TestCase):
         self.assertEqual(t._model_cache, {})
         self.assertFalse(t.is_loaded())
 
+    def test_loaded_model_name_tracks_cached_path_and_release(self):
+        t = Transcriber()
+        self.assertIsNone(t.loaded_model_name())
+        model_dir = Path("models") / "faster-whisper-large-v3-turbo"
+        with patch("subtitle_app.transcriber._get_whisper_model", return_value=MagicMock()):
+            t.load_whisper_model(model_dir, "cpu", "int8", MagicMock())
+        self.assertEqual(t.loaded_model_name(), model_dir.name)
+        t.release_model()
+        self.assertIsNone(t.loaded_model_name())
+
 
 class TestReadStderrLoop(unittest.TestCase):
     """_read_stderr_loop 辅助方法"""
@@ -329,6 +339,56 @@ class TestTranscribeVideoBasic(unittest.TestCase):
                 saved = parse_srt(Path(d) / "test.partial.srt")
                 self.assertEqual([block.text for block in saved], ["Saved progress."])
                 self.assertEqual(saved[0].end, 1.0)
+
+    def test_live_preview_emits_contiguous_first_100_without_stopping_progress(self):
+        from subtitle_app.srt_utils import parse_srt
+        events = []
+        model = MagicMock()
+        model.transcribe.return_value = (
+            iter(SimpleNamespace(start=float(i), end=i + 0.8, text=f"Sentence {i}.") for i in range(150)),
+            SimpleNamespace(language="en"))
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "test.mp4"
+            video.touch()
+            with patch.object(self.t, "load_whisper_model", return_value=model), \
+                    patch.object(self.t, "get_duration", return_value=150):
+                result, _ = self.t.transcribe_video(video, Path(directory),
+                    {**self.base_opts, "post": events.append, "extract_audio": False, "checkpoint_enabled": False})
+            previews = [e["message"] for e in events if e["type"] == "preview_append"]
+            self.assertEqual(len(previews), 100)
+            self.assertEqual([int(p.splitlines()[0]) for p in previews], list(range(1, 101)))
+            self.assertEqual(len(parse_srt(result)), 150)
+            self.assertTrue(any(e["type"] == "progress" and e.get("stage") == "转写完成"
+                                and e.get("percent") == 100 for e in events))
+
+    def test_resume_seeds_first_100_preview_rows(self):
+        from subtitle_app.srt_utils import write_srt, parse_srt
+        events = []
+        completed = [SubtitleBlock(i + 1, float(i), i + 0.8, f"Saved {i}.") for i in range(120)]
+        model = MagicMock()
+        model.transcribe.return_value = (
+            iter([SimpleNamespace(start=0.0, end=0.8, text="Next sentence.")]), SimpleNamespace(language="en"))
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "test.wav"
+            video.touch()
+            write_srt(Path(directory) / "test.partial.srt", completed, [b.text for b in completed])
+            fake_trim = MagicMock(returncode=0)
+            fake_trim.communicate.return_value = ("", "")
+            def trim(cmd, **kwargs):
+                Path(cmd[-1]).touch()
+                return fake_trim
+            with patch.object(self.t, "load_whisper_model", return_value=model), \
+                    patch.object(self.t, "get_duration", return_value=200), \
+                    patch("subtitle_app.transcriber.subprocess.Popen", side_effect=trim):
+                result, _ = self.t.transcribe_video(video, Path(directory),
+                    {**self.base_opts, "post": events.append, "extract_audio": False,
+                     "_is_audio": True, "checkpoint_enabled": True})
+            initial = [e["message"] for e in events if e["type"] == "preview"][0]
+            self.assertEqual(len(initial.split("\n\n")), 100)
+            self.assertIn("Saved 0.", initial)
+            self.assertNotIn("Saved 100.", initial)
+            self.assertFalse(any(e["type"] == "preview_append" for e in events))
+            self.assertEqual(len(parse_srt(result)), 121)
 
 
 class TestAutoLangReuse(unittest.TestCase):

@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 
 class TestVisibleBlockSlice(unittest.TestCase):
-    """panels._visible_block_slice：预览渲染最多显示最近若干块（_raw_text 保留全文）"""
+    """预览保留最开始的块，完整字幕不受显示上限影响。"""
 
-    def test_slice_keeps_newest_blocks_with_offset(self):
+    def test_slice_keeps_first_blocks_with_zero_offset(self):
         from subtitle_app.panels import _visible_block_slice
         block = lambda i: f"{i}\n00:00:0{i},000 --> 00:00:0{i + 1},000\nseg_{i}"
         blocks = [block(i) for i in range(5)]
@@ -16,10 +16,10 @@ class TestVisibleBlockSlice(unittest.TestCase):
         visible, offset = _visible_block_slice(blocks, max_blocks=10)
         self.assertEqual(visible, blocks)
         self.assertEqual(offset, 0)
-        # 超过上限只渲染最近 max_blocks 块，偏移指向全文中的真实起点
+        # 超过上限固定显示开头，源块索引从 0 开始。
         visible, offset = _visible_block_slice(blocks, max_blocks=2)
-        self.assertEqual(visible, [block(3), block(4)])
-        self.assertEqual(offset, 3)
+        self.assertEqual(visible, [block(0), block(1)])
+        self.assertEqual(offset, 0)
 
 
 class TestPreviewIncrementalRendering(unittest.TestCase):
@@ -80,7 +80,7 @@ class TestPreviewIncrementalRendering(unittest.TestCase):
         self.assertEqual(panel._highlighted_rows, set())
         self.assertEqual(panel.preview.item(0, 2).background().style(), Qt.NoBrush)
 
-    def test_reused_cells_edit_the_correct_block_after_preview_window_moves(self):
+    def test_frozen_cells_edit_the_first_block_without_losing_hidden_tail(self):
         app, panel = self._make_panel()
         from subtitle_app.panels import MAX_LIVE_PREVIEW_BLOCKS
         blocks = [f"{i + 1}\n00:00:01,000 --> 00:00:02,000\nsegment_{i}"
@@ -90,13 +90,88 @@ class TestPreviewIncrementalRendering(unittest.TestCase):
         panel.append(f"{MAX_LIVE_PREVIEW_BLOCKS + 1}\n00:00:02,000 --> 00:00:03,000\nlast")
         panel._flush_live_render()
         self.assertIs(panel.preview.item(0, 2), first_item)
-        self.assertEqual(first_item.text(), "segment_1")
+        self.assertEqual(first_item.text(), "segment_0")
         panel.setReadOnly(False)
         first_item.setText("changed")
         updated = panel.get_text().split("\n\n")
-        self.assertEqual(updated[0], blocks[0])
-        self.assertTrue(updated[1].endswith("changed"))
+        self.assertTrue(updated[0].endswith("changed"))
+        self.assertEqual(updated[1], blocks[1])
         self.assertTrue(updated[-1].endswith("last"))
+
+    @staticmethod
+    def _blocks(count, translated=False):
+        return [f"{i + 1}\n00:00:01,000 --> 00:00:02,000\nsegment_{i}"
+                + (f"\ntranslation_{i}" if translated else "") for i in range(count)]
+
+    def test_live_preview_stops_rendering_after_first_100_rows(self):
+        app, panel = self._make_panel()
+        blocks = self._blocks(5000)
+        panel.append("\n\n".join(blocks[:99]))
+        panel._flush_live_render()
+        self.assertEqual(panel.preview.rowCount(), 99)
+        panel.append(blocks[99])
+        panel._flush_live_render()
+        self.assertEqual(panel.preview.rowCount(), 100)
+        first = panel.preview.item(0, 2)
+        with patch.object(panel, "_render_structured_preview", wraps=panel._render_structured_preview) as render:
+            for block in blocks[100:]:
+                panel.append(block)
+            panel._flush_live_render()
+            self.assertFalse(panel._render_timer.isActive())
+            render.assert_not_called()
+        self.assertIs(panel.preview.item(0, 2), first)
+        self.assertEqual(first.text(), "segment_0")
+        self.assertEqual(panel.preview.item(99, 2).text(), "segment_99")
+        self.assertEqual(len(panel._preview_blocks), 5000)
+        self.assertIn("segment_4999", panel.get_text())
+        panel.clear()
+
+    def test_final_translated_text_is_saved_without_changing_frozen_preview(self):
+        app, panel = self._make_panel()
+        panel.append("\n\n".join(self._blocks(100)))
+        panel._flush_live_render()
+        final = "\n\n".join(self._blocks(5000, translated=True))
+        with patch.object(panel, "_render_structured_preview", wraps=panel._render_structured_preview) as render:
+            panel.set_text(final, preserve_live_preview=True)
+            render.assert_not_called()
+        self.assertEqual(panel.get_text(), final)
+        self.assertEqual(panel.preview.rowCount(), 100)
+        self.assertEqual(panel.preview.item(0, 3).text(), "—")
+        panel.setReadOnly(False)
+        from PySide6.QtWidgets import QAbstractItemView
+        self.assertEqual(panel.preview.editTriggers(), QAbstractItemView.NoEditTriggers)
+        panel.refresh_theme()
+        self.assertEqual(panel.preview.item(0, 3).text(), "—")
+        self.assertEqual(panel.get_text(), final)
+        # 用户主动打开完整字幕/提交编辑时，预览重新读取前 100 行。
+        panel.set_text(final)
+        panel.setReadOnly(False)
+        self.assertEqual(panel.preview.item(0, 3).text(), "translation_0")
+        self.assertNotEqual(panel.preview.editTriggers(), QAbstractItemView.NoEditTriggers)
+        panel.clear()
+
+    def test_clear_restarts_preview_for_the_next_file(self):
+        app, panel = self._make_panel()
+        panel.append("\n\n".join(self._blocks(100)))
+        panel._flush_live_render()
+        panel.clear()
+        panel.append("1\n00:00:01,000 --> 00:00:02,000\nnew file")
+        self.assertTrue(panel._render_timer.isActive())
+        panel._flush_live_render()
+        self.assertEqual(panel.preview.rowCount(), 1)
+        self.assertEqual(panel.preview.item(0, 2).text(), "new file")
+        self.assertNotIn("segment_0", panel.get_text())
+        panel.clear()
+
+    def test_opening_large_srt_displays_first_100_and_preserves_full_text(self):
+        app, panel = self._make_panel()
+        full = "\n\n".join(self._blocks(5000, translated=True))
+        panel.set_text(full)
+        self.assertEqual(panel.preview.rowCount(), 100)
+        self.assertEqual(panel.preview.item(0, 2).text(), "segment_0")
+        self.assertEqual(panel.preview.item(99, 2).text(), "segment_99")
+        self.assertEqual(panel.get_text(), full)
+        panel.clear()
 
     def test_append_then_edit_keeps_full_text_and_source_mapping(self):
         import os

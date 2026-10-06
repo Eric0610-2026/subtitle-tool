@@ -33,9 +33,9 @@ from .srt_utils import (
 )
 from .icons import action_button, make_icon
 from .config import cfg
-from .dialogs import SettingsDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
+from .dialogs import SettingsDialog, ModelManagerDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
 from .muxer import embed_subtitles_to_video, extract_embedded_subtitle, convert_to_mp4
-from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS
+from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS, install_button_cursors
 from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_double_input
 from .theme import load_theme_colors, make_sun_icon, make_moon_icon, detect_system_dark, build_qss
 from .notifier import notify as system_notify
@@ -83,6 +83,7 @@ def _batch_size_save_field(values: dict) -> Optional[tuple]:
 class SubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        install_button_cursors(QApplication.instance())
         self.setWindowTitle("本地字幕生成工具")
         # 任务栏 / Alt-Tab 图标（应用随系统主题没有原生图标时尤其明显）
         _icon_path = Path(__file__).resolve().parent / "icon.ico"
@@ -107,7 +108,12 @@ class SubtitleApp(QMainWindow):
         self._exiting = False  # 仅托盘「彻底退出」进入真正的关闭流程
         self._pending_embed_events = []  # 隐藏期间等待用户处理的嵌入确认
         self._manual_embedding = False  # 后台手动嵌入进行中
-        self._loading_local_model = False  # 后台手动加载本地模型进行中
+        self._loading_local_model = False  # 后台手动加载/卸下模型进行中
+        self._model_manager = None
+        self._local_model_states = {}
+        self._local_model_operation = None
+        self._model_status_checking = False
+        self._model_status_generation = 0
         self._last_output_dir: Optional[Path] = None  # 记录最后输出目录
         self._output_paths: List[str] = []  # 本轮所有输出文件路径
         self._stats: Dict[str, any] = {}  # 处理统计
@@ -140,8 +146,6 @@ class SubtitleApp(QMainWindow):
         self._apply_style()
         self._setup_tray()
         self._start_handoff_server()
-        self._model_status_refreshed = False
-        self._update_model_status()  # 初始化「当前模型」标签
 
         self._add_log_entry("应用就绪")
         self._restore_window_state()
@@ -467,14 +471,9 @@ class SubtitleApp(QMainWindow):
         self.retry_btn = self._make_btn(
             "🔄 重试", self._retry, object_name="bottomBtn")
         ar.addWidget(self.retry_btn)
-        # ── 当前模型状态（信息展示：Whisper 转写模型 / 本地 Hy-MT2 翻译模型） ──
-        self.model_status = QLabel("当前模型：…")
-        self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
-        ar.addWidget(self.model_status)
         self.load_model_btn = self._make_btn(
-            "🚀 加载本地模型", self._load_local_model, object_name="bottomBtn",
-            tooltip="手动启动本地 Hy-MT2 翻译服务（127.0.0.1:8188）。"
-                    "可在开始处理前预热，避免首个任务等待模型加载；也可用于排查本地服务启动问题")
+            "🚀 本地模型管理", self._load_local_model, object_name="bottomBtn",
+            tooltip="查看 Whisper、Hy-MT2 状态，分别加载或卸下本地模型")
         ar.addWidget(self.load_model_btn)
         ar.addWidget(self._make_btn("📦 嵌入字幕", self._manual_embed, object_name="bottomBtn"))
         ar.addWidget(self._make_btn("📤 提取字幕", self._manual_extract, object_name="bottomBtn"))
@@ -523,12 +522,10 @@ class SubtitleApp(QMainWindow):
         if result == 1:
             self.settings_data = dlg.get_values()
             self._add_log_entry("设置已应用（本次运行有效）")
-            self._update_model_status()  # 翻译模型种类可能已变化，刷新标签
         elif result == 2:
             self.settings_data = dlg.get_values()
             self._save_settings_permanently(dlg.get_values())
             self._add_log_entry("设置已保存到 config.json（下次启动作为默认值；本次设置已应用）")
-            self._update_model_status()
 
     def _save_settings_permanently(self, values: dict):
         import json
@@ -888,6 +885,9 @@ class SubtitleApp(QMainWindow):
         }
 
     def _begin_processing(self, jobs, opts, log_msg):
+        if self._loading_local_model:
+            QMessageBox.warning(self, "提示", "本地模型正在加载或卸下，请等待完成")
+            return
         self._start_time = time.time()
         self._stats = {"files": len(jobs)}
         self._output_paths = []
@@ -937,7 +937,6 @@ class SubtitleApp(QMainWindow):
 
     def _reset_progress(self):
         self.progress_panel.reset()
-        self._model_status_refreshed = False
 
     def _stop(self):
         if not (self.worker.thread and self.worker.thread.is_alive()):
@@ -954,29 +953,6 @@ class SubtitleApp(QMainWindow):
             return
         self.worker.stop()
         self._add_log_entry("已请求停止")
-
-    def _update_model_status(self):
-        """更新主页面「当前加载模型」标签：只列出实际已加载/已生效的模型，未加载的不显示"""
-        from .local_service import is_service_running
-        s = self.settings_data
-        parts = []
-
-        # Whisper：仅当已加载才显示
-        if self.worker.transcriber.is_loaded():
-            mdir = Path(_resolve_model_dir(s.get("model_dir", "")))
-            ver = mdir.name if mdir.name and mdir.name not in (".", "/", "\\") else "Whisper"
-            parts.append(f"Whisper {ver}")
-
-        # 本地翻译模型：服务运行中才显示
-        if is_service_running():
-            parts.append("本地模型 Hy-MT2")
-
-        if parts:
-            self.model_status.setText("当前加载：" + " · ".join(parts))
-            self.model_status.setStyleSheet("color:#22c55e; font-size:11px; padding:0 4px;")
-        else:
-            self.model_status.setText("当前加载：—")
-            self.model_status.setStyleSheet(f"color:{self.colors['text_muted']}; font-size:11px; padding:0 4px;")
 
     def _retry(self):
         if self.worker.thread and self.worker.thread.is_alive():
@@ -1010,85 +986,180 @@ class SubtitleApp(QMainWindow):
         except Exception as e:
             self._add_log_entry(f"打开缓存对话框失败: {e}", level="ERROR", trace=traceback.format_exc())
 
-    # ─── 手动加载本地模型 ───
+    # ─── 本地模型管理 ───
 
     def _load_local_model(self):
-        """手动拉起本地 Hy-MT2 翻译服务（llama-server），后台线程执行。
+        """在原按钮位置打开管理弹窗，状态探测与模型操作均在后台执行。"""
+        if self._model_manager is None:
+            self._model_manager = ModelManagerDialog(self)
+            self._model_manager.operation_requested.connect(self._operate_local_model)
+            self._model_manager.refresh_requested.connect(self._refresh_model_manager)
+        self._local_model_states = {}
+        self._render_model_manager()
+        self._model_manager.exec()
 
-        用于在开始处理前预热模型，或排查本地服务启动问题；
-        与翻译阶段的自动拉起共用 ensure_running（幂等，已运行时直接返回）。
-        """
-        if getattr(self, "_loading_local_model", False):
-            QMessageBox.warning(self, "提示", "本地模型正在加载中，请等待完成")
+    def _refresh_model_manager_if_visible(self):
+        if self._model_manager is not None and self._model_manager.isVisible():
+            self._refresh_model_manager()
+
+    def _render_model_manager(self):
+        if self._model_manager is not None:
+            self._model_manager.update_state(
+                self._local_model_states, self._local_model_operation,
+                bool(self.worker.thread and self.worker.thread.is_alive()))
+
+    def _refresh_model_manager(self):
+        self._render_model_manager()
+        if self._model_status_checking or self._loading_local_model or self._closing:
+            return
+        self._model_status_checking = True
+        generation = self._model_status_generation
+
+        def check():
+            from .local_service import is_service_running, is_owned_service_running, is_service_listening
+            try:
+                whisper_name = self.worker.transcriber.loaded_model_name()
+                hy_loaded = is_service_running()
+                hy_owned = is_owned_service_running()
+                states = {
+                    "whisper": {"loaded": whisper_name is not None, "name": whisper_name},
+                    "hy-mt2": {"loaded": hy_loaded, "owned": hy_owned,
+                               "running": hy_loaded or hy_owned or is_service_listening()},
+                }
+                self.signal_bridge.post({"type": "local_model_status", "states": states,
+                                         "generation": generation})
+            except Exception as exc:
+                self.signal_bridge.post({"type": "local_model_status", "states": {},
+                                         "generation": generation, "detail": str(exc)})
+
+        import threading
+        try:
+            threading.Thread(target=check, daemon=True).start()
+        except Exception:
+            self._model_status_checking = False
+            raise
+
+    def _on_local_model_status(self, event):
+        self._model_status_checking = False
+        if event["generation"] != self._model_status_generation or self._loading_local_model:
+            return  # 不使用操作开始前探测到的旧状态。
+        self._local_model_states = event["states"]
+        self._render_model_manager()
+        if event.get("detail") and self._model_manager is not None:
+            self._model_manager.result_label.setText("状态检查失败：" + event["detail"])
+
+    def _operate_local_model(self, model, action):
+        if self._closing or self._loading_local_model:
             return
         if self.worker.thread and self.worker.thread.is_alive():
-            QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再加载本地模型")
+            self._render_model_manager()
             return
-        from .local_service import is_service_running
-        if is_service_running():
-            self._update_model_status()
-            QMessageBox.information(self, "本地模型", "本地翻译服务已在运行，无需重复加载")
+        if model not in ("whisper", "hy-mt2") or action not in ("load", "unload"):
             return
-
         self._loading_local_model = True
-        self.load_model_btn.setEnabled(False)
-        self._add_log_entry("🚀 开始加载本地 Hy-MT2 模型（首次加载通常需 10~60 秒）...")
+        self._local_model_operation = (model, action)
+        self._model_status_generation += 1
+        self.start_btn.setEnabled(False)
+        self.retry_btn.setEnabled(False)
+        self._render_model_manager()
+        name = "Whisper" if model == "whisper" else "Hy-MT2"
+        verb = "加载" if action == "load" else "卸下"
+        message = f"正在{verb} {name}…"
+        self._add_log_entry(message)
+        if self._model_manager is not None:
+            self._model_manager.result_label.setText(message)
+        opts = {"model_dir": _resolve_model_dir(self.settings_data.get("model_dir", "")),
+                "device": cfg.whisper.device, "compute_type": cfg.whisper.compute_type}
         import threading
-        threading.Thread(target=self._load_local_model_worker, daemon=True).start()
+        try:
+            threading.Thread(target=self._load_local_model_worker,
+                             args=(model, action, opts), daemon=True).start()
+        except Exception as exc:
+            self._on_local_model_loaded({"ok": False, "detail": str(exc), "model": model, "action": action})
 
-    def _load_local_model_worker(self) -> None:
-        """后台加载线程：调用 ensure_running 拉起/等待本地服务，结果经信号桥回传。
-
-        异常路径也要保证发送 local_model_loaded 复位按钮状态，避免
-        _loading_local_model 永久锁死加载功能；窗口关闭（_closing）后
-        事件由 _handle_event 统一忽略，daemon 线程随进程退出。
-        """
+    def _load_local_model_worker(self, model="hy-mt2", action="load", opts=None) -> None:
+        """共用任务使用的模型缓存/服务，不在后台访问 Qt 控件。"""
         ok = False
         detail = ""
+        name = "Whisper" if model == "whisper" else "Hy-MT2"
+        verb = "加载" if action == "load" else "卸下"
         try:
-            from .local_service import ensure_running
-            ok, detail, _first = ensure_running(on_progress=lambda sec: self.signal_bridge.post({
-                "type": "log",
-                "message": f"正在加载本地模型… 已等待 {sec}s（首次加载通常 10~60 秒）",
-            }))
-            level = "INFO" if ok else "ERROR"
+            from .local_service import ensure_running, shutdown_owned, shutdown_service
+            if self._closing:
+                return
+            if model == "whisper":
+                if action == "load":
+                    model_dir = Path(opts["model_dir"])
+                    if not opts["model_dir"] or not (model_dir / "model.bin").is_file():
+                        raise RuntimeError(f"未找到本地 Whisper 模型（缺少 model.bin）：{model_dir}")
+                    self.worker.transcriber.load_whisper_model(
+                        model_dir, opts["device"], opts["compute_type"], self.signal_bridge.post)
+                else:
+                    self.worker.transcriber.release_model()
+                ok, detail = True, f"{name} 已{verb}"
+            elif action == "load":
+                ok, detail, _first = ensure_running(
+                    stop_check=lambda: self._closing,
+                    on_progress=lambda sec: self.signal_bridge.post({
+                        "type": "local_model_progress",
+                        "message": f"正在加载 Hy-MT2… 已等待 {sec}s（首次加载通常 10~60 秒）",
+                    }))
+                if ok:
+                    detail = "Hy-MT2 已就绪"
+            else:
+                ok, detail = shutdown_service()
             self.signal_bridge.post({
                 "type": "log",
-                "message": (f"✅ {detail}" if ok else f"❌ 本地模型加载失败：{detail}"),
-                "level": level,
+                "message": detail, "level": "INFO" if ok else "ERROR",
             })
         except Exception as e:
-            logger.error("加载本地模型线程异常: %s\n%s", e, traceback.format_exc())
+            logger.error("本地模型操作异常: %s\n%s", e, traceback.format_exc())
             detail = str(e)
             try:
                 self.signal_bridge.post({
-                    "type": "log", "message": f"❌ 加载本地模型失败: {e}", "level": "ERROR",
+                    "type": "log", "message": f"{name} {verb}失败：{e}", "level": "ERROR",
                 })
             except Exception:
                 pass
         finally:
+            if self._closing:
+                # 模型构造不可中断；构造结束后释放，防止退出途中重新驻留。
+                try:
+                    if model == "whisper":
+                        self.worker.transcriber.release_model()
+                    else:
+                        shutdown_owned()
+                except Exception:
+                    logger.exception("退出期间模型清理失败")
             try:
                 self.signal_bridge.post({
                     "type": "local_model_loaded", "ok": ok, "detail": detail,
+                    "model": model, "action": action,
                 })
             except Exception:
                 pass
 
     def _on_local_model_loaded(self, e):
-        """本地模型加载结束：复位按钮、刷新模型状态，并弹窗提示结果"""
+        """模型操作完成：复位操作状态，在管理弹窗中显示结果。"""
         self._loading_local_model = False
-        self.load_model_btn.setEnabled(True)
-        self._update_model_status()
+        self._local_model_operation = None
         if getattr(self, "_closing", False):
             return
+        running = bool(self.worker.thread and self.worker.thread.is_alive())
+        self.start_btn.setEnabled(not running)
+        self.retry_btn.setEnabled(not running)
+        self._local_model_states = {}
+        self._refresh_model_manager()
+        if self._model_manager is not None:
+            self._model_manager.result_label.setText(
+                e.get("detail") if e.get("ok") else f"操作失败：{e.get('detail') or '未知错误'}")
         if not self.isVisible():
-            system_notify("本地模型", "加载完成" if e.get("ok") else "加载失败，请打开窗口查看日志")
-            return
-        if e.get("ok"):
-            QMessageBox.information(self, "本地模型", "✅ 本地 Hy-MT2 翻译服务已就绪，可以开始处理了")
-        else:
-            QMessageBox.warning(self, "本地模型加载失败",
-                                f"{e.get('detail') or '未知错误'}\n\n详情请查看日志。")
+            system_notify("本地模型管理", e.get("detail") or "操作失败，请打开窗口查看日志")
+
+    def _on_local_model_progress(self, e):
+        self._add_log_entry(e["message"])
+        if self._model_manager is not None:
+            self._model_manager.result_label.setText(e["message"])
 
     # ─── 手动嵌入 ───
 
@@ -1468,10 +1539,6 @@ class SubtitleApp(QMainWindow):
             p.stage_bar.setValue(int(pct))
             p.stage_bar.setFormat(f"翻译 {int(pct)}%")
             p.stage_detail.setText(detail)
-            # 翻译阶段已开始：本地模型可能已加载，刷新「当前模型」标签（不再是 whisper）
-            if not self._model_status_refreshed:
-                self._model_status_refreshed = True
-                self._update_model_status()
         elif stage in ("组织输出", "完成", "跳过"):
             p.stage_bar.setValue(100)
             p.stage_bar.setFormat("100%")
@@ -1526,7 +1593,7 @@ class SubtitleApp(QMainWindow):
         self._add_log_entry(stats_msg)
         notify_body = f"{msg}\n{stats_msg}"
         system_notify("字幕工具", notify_body)
-        self._update_model_status()
+        self._refresh_model_manager_if_visible()
 
     def _handle_error(self, e):
         msg = e.get("message", "错误")
@@ -1536,7 +1603,7 @@ class SubtitleApp(QMainWindow):
         self.stop_btn.setEnabled(False)
         self._reset_progress()
         self.preview_panel.setReadOnly(False)
-        self._update_model_status()
+        self._refresh_model_manager_if_visible()
         if not self.isVisible():
             system_notify("字幕工具处理失败", f"{msg}。请打开窗口查看日志")
 
@@ -1571,10 +1638,12 @@ class SubtitleApp(QMainWindow):
             "preview_append": self._handle_preview_append,
             "done": self._handle_done,
             "error": self._handle_error,
-            "model_loaded": lambda e: self._update_model_status(),
+            "model_loaded": lambda e: self._refresh_model_manager_if_visible(),
             "manual_embed_done": self._on_manual_embed_done,
             "manual_extract_done": self._on_manual_extract_done,
             "local_model_loaded": self._on_local_model_loaded,
+            "local_model_status": self._on_local_model_status,
+            "local_model_progress": self._on_local_model_progress,
         }
 
     def _handle_output_path(self, e):
@@ -1593,7 +1662,7 @@ class SubtitleApp(QMainWindow):
     def _handle_preview_live(self, e):
         # 实时预览内容与之前绑定文件的对应关系已失效，解绑避免保存覆盖旧文件
         self.preview_panel.source_path = None
-        self.preview_panel.set_text(e.get("message", ""))
+        self.preview_panel.set_text(e.get("message", ""), preserve_live_preview=True)
 
     def _handle_preview_append(self, e):
         self.preview_panel.source_path = None
@@ -1632,14 +1701,16 @@ class SubtitleApp(QMainWindow):
         self._closing = True  # 通知后台线程停止发信号（daemon 随进程退出）
         # 先停 worker：终止 ffmpeg 等子进程并置停止标志，避免与下方 release_model 竞争
         self.worker.stop()
-        if self.worker.transcriber.is_loaded():
+        if (self.worker.transcriber.is_loaded()
+                and self._local_model_operation != ("whisper", "load")):
             self.worker.transcriber.release_model()
         try:
-            # 只关本会话拉起的 llama-server；用户手动启动的外部服务不强制杀
-            from .local_service import shutdown_owned
-            shutdown_owned()
-        except Exception:
-            pass
+            from .local_service import shutdown_service
+            ok, detail = shutdown_service()
+            if not ok:
+                self._add_log_entry(detail, "WARNING")
+        except Exception as exc:
+            logger.warning("退出时关闭本地翻译服务失败: %s", exc)
         self._save_window_state()
         if self._tray_icon is not None:
             self._tray_icon.hide()
@@ -1713,6 +1784,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
+    install_button_cursors(app)
     app.setStyle("Fusion")
     app.setApplicationName("本地字幕生成工具")
     # 统一现代中文字体（Windows 默认 UI 字体对中文场景偏旧）；具体控件里的

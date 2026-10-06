@@ -18,6 +18,7 @@ from .config import cfg
 from .srt_utils import (
     make_post_mapper, safe_stem, fmt_duration, seconds_to_srt_time,
     SubtitleBlock, sanitize_blocks, parse_srt, split_sentences,
+    PREVIEW_BLOCK_LIMIT,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,18 +95,24 @@ class Transcriber:
 
     def is_loaded(self) -> bool:
         """检查模型是否已加载到缓存中"""
-        return len(self._model_cache) > 0
+        with self._cache_lock:
+            return bool(self._model_cache)
+
+    def loaded_model_name(self) -> Optional[str]:
+        """返回实际驻留模型的目录名，不受后续设置变更影响。"""
+        with self._cache_lock:
+            if not self._model_cache:
+                return None
+            model_key = next(iter(self._model_cache))
+            model_dir = model_key.rsplit("|", 2)[0]
+            return Path(model_dir).name or "Whisper"
 
     def release_model(self) -> None:
         """手动卸载模型，释放显存。供 UI 手工卸载按钮和 app 退出时调用。"""
-        self._cached_auto_lang = None
-        for key in list(self._model_cache.keys()):
-            try:
-                _, _, model = self._model_cache[key]
-                del model
-            except (KeyError, AttributeError):
-                pass
-        self._model_cache.clear()
+        with _model_load_lock, self._cache_lock:
+            self._cached_auto_lang = None
+            self._model_cache.clear()
+        gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
@@ -467,6 +474,9 @@ class Transcriber:
                 source_srt = output_dir / f"{safe_stem(video.name)}.{detected_lang}.srt"
                 # ── 从断点 segments 开始累积 ──
                 blocks: List[SubtitleBlock] = list(completed_blocks)
+                if completed_blocks:
+                    t_post({"type": "preview", "message": "\n\n".join(
+                        f"{b.index}\n{b.timing}\n{b.text}" for b in completed_blocks[:PREVIEW_BLOCK_LIMIT])})
                 prev_end = resume_offset
                 for seg in segments:
                     if self.stop_check and self.stop_check():
@@ -497,7 +507,7 @@ class Transcriber:
                     t_post({"type": "progress", "percent": min(pct_inner, 100), "stage": "转写中",
                             "detail": f"{len(blocks)} 段 | {time_info} | {detected_lang}",
                             "generated": idx, "total": total})
-                    if len(blocks) <= 8 or len(blocks) % 10 == 0:
+                    if len(blocks) <= PREVIEW_BLOCK_LIMIT:
                         # 标准 SRT 块结构（序号/时间/文本），供预览表格解析
                         time_range = f"{seconds_to_srt_time(seg_start)} --> {seconds_to_srt_time(seg_end)}"
                         t_post({"type": "preview_append",

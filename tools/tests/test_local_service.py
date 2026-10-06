@@ -17,7 +17,7 @@ class _FakeProc:
         self.returncode = None
 
     def poll(self):
-        return None  # 一直存活，除非被 terminate
+        return self.returncode
 
     def terminate(self):
         self.returncode = 0
@@ -62,8 +62,7 @@ class ShutdownOwnedTest(unittest.TestCase):
         p.terminate = lambda: got.append(1) or setattr(p, "returncode", 0)
         local_service._owned_proc = p
         local_service._started_by_us = True
-        # poll() 恒返回 None 会触发 taskkill 兜底分支；patch 掉避免真实执行
-        # （中文系统 taskkill 输出 GBK，text=True 按 UTF-8 解码会抛 UnicodeDecodeError）
+        # 所有服务关闭调用均模拟，不能结束用户已有进程。
         with patch("subtitle_app.local_service.subprocess.run"):
             local_service.shutdown_owned()
         self.assertTrue(got)
@@ -73,15 +72,40 @@ class ShutdownOwnedTest(unittest.TestCase):
             def terminate(self):
                 pass  # 假装 terminate 无效，poll 永远返回 None
 
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise TimeoutError("still running")
+
         fake = _StubbornProc()
         local_service._owned_proc = fake
-        with patch("subtitle_app.local_service.subprocess.run") as mrun:
-            local_service.shutdown_owned()
+        with patch("subtitle_app.local_service.subprocess.run",
+                   side_effect=lambda *a, **k: setattr(fake, "returncode", 0)) as mrun:
+            self.assertTrue(local_service.shutdown_owned())
         taskkill_calls = [c for c in mrun.call_args_list
                           if c.args and c.args[0] and c.args[0][0] == "taskkill"]
         self.assertEqual(len(taskkill_calls), 1)
         self.assertIn(str(fake.pid), taskkill_calls[0].args[0])
         self.assertIsNone(local_service._owned_proc)
+
+    def test_shutdown_failure_keeps_owned_handle_for_retry(self):
+        from unittest.mock import Mock
+        fake = Mock(pid=12345)
+        fake.poll.return_value = None
+        fake.wait.side_effect = TimeoutError("still running")
+        local_service._owned_proc = fake
+        local_service._started_by_us = True
+        with patch("subtitle_app.local_service.subprocess.run"):
+            self.assertFalse(local_service.shutdown_owned())
+        self.assertIs(local_service._owned_proc, fake)
+        self.assertTrue(local_service.is_owned_service_running())
+        fake.poll.return_value = 0
+        self.assertTrue(local_service.shutdown_owned())
+        self.assertIsNone(local_service._owned_proc)
+
+    def test_shutdown_never_terminates_external_service(self):
+        with patch("subtitle_app.local_service.subprocess.run") as run:
+            self.assertTrue(local_service.shutdown_owned())
+            run.assert_not_called()
 
 
 class LocalServiceTest(unittest.TestCase):

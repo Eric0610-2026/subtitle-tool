@@ -18,28 +18,21 @@ from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
 )
 
-from .srt_utils import _read_text_auto, split_srt_blocks, SRT_TIMING_LINE_RE
+from .srt_utils import _read_text_auto, split_srt_blocks, SRT_TIMING_LINE_RE, PREVIEW_BLOCK_LIMIT
 from .widgets import LogEntry
 from .icons import action_button, icon_data_url
 from .theme import load_theme_colors, _mix_hex
 
 logger = logging.getLogger(__name__)
 
-# 实时/终版预览最多渲染这么多块：长视频块数可达数千，全量渲染表格会冻结 UI。
-# 只显示最近若干块；_raw_text 始终保留全文供编辑与保存。
-MAX_LIVE_PREVIEW_BLOCKS = 300
+# 只显示最开始的 100 块；实时填满后冻结，全文仍保留供编辑与保存。
+MAX_LIVE_PREVIEW_BLOCKS = PREVIEW_BLOCK_LIMIT
 
 
 def _visible_block_slice(blocks: List[str],
                          max_blocks: int = MAX_LIVE_PREVIEW_BLOCKS) -> Tuple[List[str], int]:
-    """返回渲染可见的块（最近 max_blocks 块）与其在全文中的起始偏移。
-
-    偏移用于把表格行映射回 _raw_text 的真实块索引（编辑回写按它定位）。
-    """
-    if len(blocks) > max_blocks:
-        offset = len(blocks) - max_blocks
-        return blocks[offset:], offset
-    return blocks, 0
+    """返回全文最开始的 max_blocks 块，源块索引从 0 开始。"""
+    return blocks[:max_blocks], 0
 
 
 def _silent_text_input(parent, title: str, label: str) -> tuple:
@@ -180,6 +173,8 @@ class PreviewPanel(QFrame):
         self._save_cb = None
         self._raw_text = ""
         self._preview_blocks: List[str] = []
+        self._frozen_preview_blocks: Optional[List[str]] = None
+        self._preview_stale = False
         self._updating = False
         self._highlighted_rows: set = set()
         self._build_ui()
@@ -247,9 +242,10 @@ class PreviewPanel(QFrame):
         """将 SRT 文本渲染为紧凑表格：序号 / 时间轴 / 原文 / 译文。
 
         原始文本始终保留在 _raw_text 中，供编辑与保存使用；表格只负责展示
-        （最多渲染最近 MAX_LIVE_PREVIEW_BLOCKS 块）。
+        （最多渲染最开始的 MAX_LIVE_PREVIEW_BLOCKS 块）。
         """
-        blocks, offset = _visible_block_slice(self._preview_blocks)
+        display_blocks = self._frozen_preview_blocks if self._frozen_preview_blocks is not None else self._preview_blocks
+        blocks, offset = _visible_block_slice(display_blocks)
         rows = []
         for block_idx, block in enumerate(blocks):
             lines = block.splitlines()
@@ -306,7 +302,8 @@ class PreviewPanel(QFrame):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(4)
         tb = QHBoxLayout()
-        title = QLabel("字幕预览")
+        title = QLabel("字幕预览 · 前 100 行")
+        title.setToolTip("处理时只显示连续的前 100 行，填满后停止自动刷新；编辑按钮可查看完整字幕。")
         title.setObjectName("panelTitle")
         tb.addWidget(title)
         self._edit_btn = action_button("✏ 编辑")
@@ -392,19 +389,29 @@ class PreviewPanel(QFrame):
     def connect_toolbar(self, save_cb):
         self._save_cb = save_cb
 
-    def set_text(self, text: str):
+    def set_text(self, text: str, preserve_live_preview: bool = False):
         self._render_timer.stop()
         self._scroll_on_render = False
         self._raw_text = text
         self._preview_blocks = split_srt_blocks(text)
+        if preserve_live_preview and self._frozen_preview_blocks is not None:
+            self._preview_stale = self._preview_blocks[:MAX_LIVE_PREVIEW_BLOCKS] != self._frozen_preview_blocks
+            self.setReadOnly(True)
+            return  # 后台终版/译文更新只保存全文，不重绘已经冻结的预览。
+        self._frozen_preview_blocks = None
+        self._preview_stale = False
         self.setReadOnly(True)
         self._render_structured_preview()
+        if preserve_live_preview and len(self._preview_blocks) >= MAX_LIVE_PREVIEW_BLOCKS:
+            self._frozen_preview_blocks = self._preview_blocks[:MAX_LIVE_PREVIEW_BLOCKS]
 
     def clear(self):
         self._render_timer.stop()
         self._scroll_on_render = False
         self._raw_text = ""
         self._preview_blocks.clear()
+        self._frozen_preview_blocks = None
+        self._preview_stale = False
         self._source_path = None
         self._highlighted_rows.clear()
         self._updating = True
@@ -420,13 +427,20 @@ class PreviewPanel(QFrame):
         # 渲染使用增量维护的块列表，避免每次刷新都重新切分全文。
         self._raw_text = f"{self._raw_text}\n\n{text}".strip()
         self._preview_blocks.extend(split_srt_blocks(text))
+        if self._frozen_preview_blocks is not None:
+            return
         self._scroll_on_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
 
     def _flush_live_render(self):
-        """节流定时器回调：合并渲染期间到达的多次追加，一次性重建表格"""
+        """填满前 100 行后冻结，后续追加不启动定时器或渲染表格。"""
+        self._render_timer.stop()
+        if self._frozen_preview_blocks is not None:
+            return
         self._render_structured_preview()
+        if len(self._preview_blocks) >= MAX_LIVE_PREVIEW_BLOCKS:
+            self._frozen_preview_blocks = self._preview_blocks[:MAX_LIVE_PREVIEW_BLOCKS]
         if self._scroll_on_render:
             self._scroll_on_render = False
             self.preview.scrollToBottom()
@@ -436,7 +450,7 @@ class PreviewPanel(QFrame):
 
     def setReadOnly(self, readonly: bool):
         """控制表格是否允许直接编辑（完成后放开，供微调译文/时间轴）"""
-        if readonly:
+        if readonly or self._preview_stale:
             self.preview.setEditTriggers(QAbstractItemView.NoEditTriggers)
         else:
             self.preview.setEditTriggers(
@@ -485,7 +499,7 @@ class PreviewPanel(QFrame):
 
     def _on_item_changed(self, item: QTableWidgetItem):
         """用户直接在表格里改时间轴/原文/译文后，同步回 _raw_text（保存走 get_text）"""
-        if getattr(self, "_updating", False):
+        if getattr(self, "_updating", False) or self._preview_stale:
             return
         if not self._raw_text.strip():
             return
@@ -527,6 +541,8 @@ class PreviewPanel(QFrame):
         trailing = self._raw_text[len(self._raw_text.rstrip()):]
         self._raw_text = leading + body + trailing
         self._preview_blocks = blocks
+        if self._frozen_preview_blocks is not None and block_idx < len(self._frozen_preview_blocks):
+            self._frozen_preview_blocks[block_idx] = blocks[block_idx]
 
     def _open_edit_dialog(self):
         content = self.get_text().strip()

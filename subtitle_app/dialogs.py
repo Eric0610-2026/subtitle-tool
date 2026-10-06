@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QLabel, QSpinBox, QFileDialog, QMessageBox,
     QAbstractItemView, QTabWidget, QWidget, QFrame, QTextEdit,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 
 from .srt_utils import load_json, save_json, IGNORE_FILE
@@ -38,6 +38,95 @@ _COMPACT_DIALOG_STYLE = """
     QPushButton#startBtn { padding:8px 20px; font-size:13px; }
     QPushButton#accentBtn, QPushButton#dangerBtn { padding:5px 13px; }
 """
+
+
+class ModelManagerDialog(QDialog):
+    """本地模型状态与操作入口；加载、释放和服务探测由主窗口后台执行。"""
+
+    operation_requested = Signal(str, str)
+    refresh_requested = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("本地模型管理")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        hint = QLabel("加载可提前预热；卸下释放模型占用，模型文件会保留。\n"
+                      "处理任务运行时不能手动加载或卸下模型。")
+        hint.setObjectName("dialogHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.status_labels = {}
+        self.buttons = {}
+        for model, title in (("whisper", "Whisper · 语音识别"), ("hy-mt2", "Hy-MT2 · 本地翻译")):
+            group = QGroupBox(title)
+            row = QHBoxLayout(group)
+            status = QLabel("正在检查状态…")
+            status.setTextFormat(Qt.PlainText)
+            status.setWordWrap(True)
+            row.addWidget(status, 1)
+            self.status_labels[model] = status
+            for action, text in (("load", "加载"), ("unload", "卸下")):
+                button = action_button(text)
+                button.setObjectName("accentBtn" if action == "load" else "dangerBtn")
+                button.setEnabled(False)
+                button.clicked.connect(
+                    lambda checked=False, m=model, a=action: self.operation_requested.emit(m, a))
+                row.addWidget(button)
+                self.buttons[model, action] = button
+            layout.addWidget(group)
+        self.result_label = QLabel("")
+        self.result_label.setWordWrap(True)
+        self.result_label.setTextFormat(Qt.PlainText)
+        self.result_label.setObjectName("dialogHint")
+        layout.addWidget(self.result_label)
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_button = action_button("关闭")
+        close_button.clicked.connect(self.reject)
+        close_row.addWidget(close_button)
+        layout.addLayout(close_row)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(2000)
+        self._refresh_timer.timeout.connect(self.refresh_requested.emit)
+
+    def update_state(self, states, busy=None, task_running=False):
+        for model, label in self.status_labels.items():
+            state = states.get(model)
+            loaded = state and state["loaded"]
+            owned = state and state.get("owned", True)
+            running = state and state.get("running", loaded or (model == "hy-mt2" and owned))
+            if busy and busy[0] == model:
+                label.setText("加载中…" if busy[1] == "load" else "卸下中…")
+            elif state is None:
+                label.setText("正在检查状态…")
+            elif model == "hy-mt2" and owned:
+                label.setText("已加载（本应用启动）" if loaded else "服务未就绪（本应用启动）")
+            elif loaded:
+                label.setText("已加载（外部启动）" if model == "hy-mt2" else "已加载")
+            elif model == "hy-mt2" and running:
+                label.setText("服务未就绪（来源待核实）")
+            else:
+                label.setText("未加载")
+            if loaded and state.get("name"):
+                label.setText(label.text() + "\n模型：" + state["name"])
+            available = state is not None and not busy and not task_running
+            self.buttons[model, "load"].setEnabled(bool(available and not loaded and (not running or owned)))
+            self.buttons[model, "unload"].setEnabled(bool(available and running))
+        if task_running:
+            self.result_label.setText("主任务正在处理中，请等待结束或停止后再操作。")
+        elif self.result_label.text() == "主任务正在处理中，请等待结束或停止后再操作。":
+            self.result_label.clear()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_timer.start()
+        self.refresh_requested.emit()
+
+    def hideEvent(self, event):
+        self._refresh_timer.stop()
+        super().hideEvent(event)
 
 
 class SettingsDialog(QDialog):

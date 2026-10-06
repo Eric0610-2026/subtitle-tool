@@ -11,6 +11,13 @@ from subtitle_app.pipeline import SubtitleWorker
 from subtitle_app.config import cfg
 
 
+def setUpModule():
+    # 所有调度测试隔离用户正在运行的服务，单个测试可再覆盖返回值。
+    cleanup = patch("subtitle_app.local_service.shutdown_service", return_value=(True, "Hy-MT2 已卸下"))
+    cleanup.start()
+    unittest.addModuleCleanup(cleanup.stop)
+
+
 class TestSubtitleWorkerInit(unittest.TestCase):
     """SubtitleWorker 基本构造"""
 
@@ -604,13 +611,11 @@ class TestRun(unittest.TestCase):
             [Path("/d/a.mp4"), Path("/d/a.srt")]), [])
 
     @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.local_service.is_service_running")
-    @patch("subtitle_app.local_service.shutdown_owned")
-    def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_running, mock_translate):
-        """阶段批量：转写后释放 Whisper 显存；本地翻译清理本会话 llama；
+    @patch("subtitle_app.local_service.shutdown_service", return_value=(True, "Hy-MT2 已卸下"))
+    def test_run_staged_releases_whisper_and_forces_auto_embed(self, mock_shutdown, mock_translate):
+        """阶段批量：转写后释放 Whisper 显存；转写前清理本地 Hy-MT2；
         阶段 2 顺序执行，pause_before_embed 逐文件生效；
-        检测到外部服务在跑时发 WARNING 提示"""
-        mock_running.return_value = False
+        服务关闭失败时发 WARNING 提示"""
         mock_translate.return_value = None
 
         self.w._transcribe_stage = lambda item, idx, total, opts: {
@@ -630,17 +635,17 @@ class TestRun(unittest.TestCase):
 
         # 阶段切换释放 Whisper 显存
         self.assertTrue(releases, "进入翻译阶段前应释放 Whisper 显存")
-        # 转写阶段前应停掉本会话拉起的翻译服务
+        # 转写阶段前应关闭本机翻译服务（含已核实的外部服务）
         mock_shutdown.assert_called_once()
         # 阶段 2 顺序执行：translate_stage 逐文件调用且 pause_before_embed 保留
         self.assertTrue(mock_translate.call_count >= 2)
         for call in mock_translate.call_args_list:
             self.assertTrue(call[0][1]["pause_before_embed"],
                             "顺序执行时应保留逐文件预览暂停")
-        # 阶段 1 前检测到外部 llama-server 在跑时应发 WARNING 提示（不强制杀）
+        # 无法关闭服务时继续转写，但明确提示资源尚未释放。
         self.post.reset_mock()
         mock_shutdown.reset_mock()
-        mock_running.return_value = True   # 外部服务在跑
+        mock_shutdown.return_value = (False, "权限不足，服务仍在运行")
         mock_translate.reset_mock()
         with tempfile.TemporaryDirectory() as d:
             srt = Path(d) / "a.mp4"
@@ -648,7 +653,13 @@ class TestRun(unittest.TestCase):
             self.w._run([srt], opts)
         warns = [c[0][0] for c in self.post.call_args_list
                  if c[0][0].get("level") == "WARNING"]
-        self.assertTrue(warns, "外部翻译服务在跑时应发出 WARNING 提示")
+        self.assertTrue(warns, "服务关闭失败时应发出 WARNING 提示")
+        self.assertIn("权限不足", warns[0]["message"])
+
+    def test_transcribe_preparation_closes_service_without_translation(self):
+        with patch("subtitle_app.local_service.shutdown_service", return_value=(True, "已卸下")) as stop:
+            self.w._prepare_transcribe_phase({"translate_enabled": False}, self.post)
+        stop.assert_called_once()
 
     @patch("subtitle_app.pipeline.translate_stage")
     @patch("subtitle_app.pipeline.find_tool")

@@ -9,8 +9,8 @@ start-local-model.bat。启动参数与 start-local-model.bat 保持一致。
 
 关键点：
 - 幂等：同一进程内只有第一个调用者负责拉起服务，其余并发调用等待就绪即返回。
-- 生命周期：只在翻译阶段才拉起（ensure_running）；应用退出时 shutdown_owned 仅关闭本会话
-  拉起的服务，避免影响用户手动启动的其他 llama-server。
+- 生命周期：翻译时按需启动；手动卸下、转写前及应用退出通过 shutdown_service
+  关闭本会话服务或经身份核实的外部 Hy-MT2 服务。
 - 失败可诊断：llama-server 的 stdout/stderr 落盘 cache/.llama-server.log，
   进程异常退出时读取日志尾部附在错误信息里（如端口被 Windows 预留导致 bind 失败）。
 """
@@ -151,15 +151,18 @@ def _startup_diagnosis() -> str:
 
 
 def ensure_running(timeout: float = _READY_TIMEOUT,
-                   on_progress=None) -> Tuple[bool, str, bool]:
+                   on_progress=None, stop_check=None) -> Tuple[bool, str, bool]:
     """确保本地翻译服务可用，返回 (ok, 说明, 是否本进程首次拉起)。
 
     幂等：服务已就绪时立即返回；否则有且仅有一个调用者拉起进程，
     其余调用者与它一同等待就绪。等待期间若提供 on_progress(秒) 回调，
     会定期回调以便 UI 反馈进度（避免看起来像卡死）。
     调用不阻塞 UI（应在 worker 线程调用）。
+    stop_check 用于手动加载时的退出取消；实际拉起者负责清理尚未就绪的服务。
     """
     global _owned_proc, _started_by_us, _ready_announced
+    if stop_check and stop_check():
+        return False, "已取消加载", False
     if _probe():
         return True, "本地服务已运行", False
 
@@ -178,6 +181,8 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
     launcher = False
     crashed = False
     with _lock:
+        if stop_check and stop_check():
+            return False, "已取消加载", False
         # 自愈：服务就绪后进程又退出（崩溃/被杀）时，此前的拉起者早已返回，
         # 若不重置状态，后续调用会永远判"已启动过"而不重新拉起。
         if _started_by_us and _owned_proc is not None and _owned_proc.poll() is not None:
@@ -207,6 +212,10 @@ def ensure_running(timeout: float = _READY_TIMEOUT,
     deadline = start_time + timeout
     last_err = f"服务未在预期时间内就绪（首次加载模型通常需 10~60 秒，当前上限 {timeout:.0f} 秒）"
     while time.monotonic() < deadline:
+        if stop_check and stop_check():
+            if launcher:
+                shutdown_owned()
+            return False, "已取消加载", False
         if _probe():
             with _lock:
                 first = not _ready_announced
@@ -254,21 +263,51 @@ def is_service_running() -> bool:
     return _probe()
 
 
-def shutdown_owned() -> None:
-    """关闭本会话拉起的 llama-server；terminate 无效时 taskkill 兜底，避免残留"""
-    global _owned_proc, _started_by_us
-    proc = _owned_proc
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            pass
-        if proc.poll() is None:  # terminate 未生效（如进程挂起）→ 强杀
+def is_service_listening() -> bool:
+    """翻译端口是否仍有服务，包括尚未加载就绪的进程。"""
+    return _port_listening(timeout=0.2)
+
+
+def is_owned_service_running() -> bool:
+    """是否仍有本会话启动的服务进程（包括尚未就绪的进程）。"""
+    with _lock:
+        return _owned_proc is not None and _owned_proc.poll() is None
+
+
+def shutdown_owned() -> bool:
+    """关闭本会话服务，失败保留句柄并返回 False；没有本会话服务时返回 True。"""
+    global _owned_proc, _started_by_us, _ready_announced
+    with _lock:
+        proc = _owned_proc
+        if proc is not None and proc.poll() is None:
             try:
-                subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)],
-                               capture_output=True, text=True, timeout=3)
+                proc.terminate()
+                proc.wait(timeout=3)
             except Exception as e:
-                logger.warning("强制结束 llama-server %s 失败: %s", proc.pid, e)
-    _owned_proc = None
-    _started_by_us = False
+                logger.warning("结束 llama-server %s 失败: %s", proc.pid, e)
+            if proc.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)],
+                                   capture_output=True, timeout=3)
+                    proc.wait(timeout=3)
+                except Exception as e:
+                    logger.warning("强制结束 llama-server %s 失败: %s", proc.pid, e)
+            if proc.poll() is None:
+                return False  # 保留句柄供下次重试，不能把仍占用显存的进程显示为已卸下。
+        _owned_proc = None
+        _started_by_us = False
+        _ready_announced = False
+        return True
+
+
+def shutdown_service() -> Tuple[bool, str]:
+    """统一卸下本地 Hy-MT2，包括从其它入口启动且身份可确认的服务。"""
+    if not shutdown_owned():
+        return False, "Hy-MT2 服务进程仍在运行，请查看日志并重试卸下"
+    if not _port_listening(timeout=0.2):
+        return True, "Hy-MT2 已卸下"
+    from .windows_service import stop_external_service
+    ok, detail = stop_external_service(_HOST, _PORT, _SERVER, _MODELS_DIR)
+    if not ok:
+        logger.warning("%s", detail)
+    return ok, detail

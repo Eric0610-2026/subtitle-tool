@@ -309,23 +309,16 @@ class SubtitleWorker:
         return False
 
     def _prepare_transcribe_phase(self, opts: dict, post: Callable) -> None:
-        """进入转写阶段前的 GPU 清理：停掉本会话拉起的翻译服务；外部服务只提示不强制杀。
-
-        门控用「本次是否请求翻译」——翻译端点已硬绑本机 llama-server，
-        不再通过地址字符串判断。
-        """
-        if not opts.get("translate_enabled", True):
-            return
+        """确需转写时关闭本地 Hy-MT2，包括经身份核实的外部服务，为 Whisper 腾显存。"""
         try:
-            from .local_service import is_service_running, shutdown_owned
-            shutdown_owned()   # 停掉上次翻译遗留的本会话 llama-server，为 Whisper 腾显存
-            if is_service_running():
-                post({"type": "log",
-                      "message": "检测到本地翻译服务仍在运行（非本会话启动）。转写将占用大量显存，"
-                                 "若提示显存不足请先手动关闭该服务；翻译阶段会自动复用，无需重启",
+            from .local_service import shutdown_service
+            ok, detail = shutdown_service()
+            if not ok:
+                post({"type": "log", "message": "转写前关闭 Hy-MT2 失败：" + detail,
                       "level": "WARNING"})
         except Exception as e:
             logger.warning("转写前清理本地翻译服务失败: %s", e)
+            post({"type": "log", "message": f"转写前关闭 Hy-MT2 失败：{e}", "level": "WARNING"})
 
     def _transcribe_stage(self, item: Path, idx: int, total: int, opts: dict) -> Optional[dict]:
         """转写阶段：跳过检查 → 音频提取 → Whisper 转写

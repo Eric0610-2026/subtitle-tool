@@ -20,6 +20,9 @@ from .config import cfg
 
 logger = logging.getLogger(__name__)
 
+# 主窗口只预览连续的前 100 行；转写发送端与 Qt 渲染端使用同一上限。
+PREVIEW_BLOCK_LIMIT = 100
+
 # ── 常量（从 config.json 读取）──
 
 VIDEO_EXTS = set(cfg.srt.video_exts)
