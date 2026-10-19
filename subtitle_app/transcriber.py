@@ -334,6 +334,7 @@ class Transcriber:
                     completed_blocks = []
                     resume_offset = 0.0
 
+            blocks: List[SubtitleBlock] = list(completed_blocks)
             try:
                 duration = self.get_duration(video, ffprobe) if ffprobe else 0.0
                 if extract_audio and not is_audio:
@@ -473,7 +474,6 @@ class Transcriber:
 
                 source_srt = output_dir / f"{safe_stem(video.name)}.{detected_lang}.srt"
                 # ── 从断点 segments 开始累积 ──
-                blocks: List[SubtitleBlock] = list(completed_blocks)
                 if completed_blocks:
                     t_post({"type": "preview", "message": "\n\n".join(
                         f"{b.index}\n{b.timing}\n{b.text}" for b in completed_blocks[:PREVIEW_BLOCK_LIMIT])})
@@ -548,14 +548,23 @@ class Transcriber:
                 return source_srt, detected_lang
             except Exception:
                 # ── 异常时保存断点 ──
-                if checkpoint_enabled and partial_srt:
+                if checkpoint_enabled and partial_srt and blocks:
                     try:
                         Transcriber._write_partial_srt(partial_srt, blocks)
                         logger.info("异常时已保存断点: %s (%d 段)", partial_srt, len(blocks))
-                    except UnboundLocalError:
-                        pass  # blocks 尚未赋值，无进度可保存
                     except Exception as save_err:
                         logger.warning("保存断点失败: %s", save_err)
+                # 实时事件只发送前 100 段；中断时补齐全文，仍由界面保留冻结显示。
+                # 保存必须回写断点，不能生成会被下一次任务误认成品的同名 SRT。
+                if blocks:
+                    try:
+                        text = "\n\n".join(
+                            f"{i}\n{b.timing}\n{b.text.strip()}"
+                            for i, b in enumerate((b for b in blocks if b.text.strip()), 1))
+                        post({"type": "preview", "message": text,
+                              "source_path": str(partial_srt)})
+                    except Exception as preview_err:
+                        logger.warning("同步中断字幕预览失败: %s", preview_err)
                 raise
 
     @staticmethod

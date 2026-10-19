@@ -361,6 +361,41 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             self.assertTrue(any(e["type"] == "progress" and e.get("stage") == "转写完成"
                                 and e.get("percent") == 100 for e in events))
 
+    def test_interrupted_long_transcription_posts_all_cues_to_partial_preview(self):
+        from subtitle_app.srt_utils import parse_srt, split_srt_blocks
+        for mode, checkpoint_enabled in (("stop", True), ("error", True), ("stop", False)):
+            with self.subTest(mode=mode, checkpoint_enabled=checkpoint_enabled), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                video = root / "test.mp4"
+                video.touch()
+                stopped = [False]
+                events = []
+                t = Transcriber()
+                t.stop_check = lambda: stopped[0]
+                def segments():
+                    for i in range(150):
+                        yield SimpleNamespace(start=float(i), end=i + 0.8, text=f"Sentence {i}.")
+                    if mode == "error":
+                        raise ValueError("segment failed")
+                    stopped[0] = True
+                    yield SimpleNamespace(start=150.0, end=150.8, text="Must not be saved.")
+                model = MagicMock()
+                model.transcribe.return_value = (segments(), SimpleNamespace(language="en"))
+                with patch.object(t, "load_whisper_model", return_value=model), \
+                        patch.object(t, "get_duration", return_value=200):
+                    with self.assertRaises(RuntimeError if mode == "stop" else ValueError):
+                        t.transcribe_video(video, root, {**self.base_opts, "post": events.append,
+                            "extract_audio": False, "checkpoint_enabled": checkpoint_enabled})
+                snapshot = [e for e in events if e["type"] == "preview"][-1]
+                self.assertEqual(len(split_srt_blocks(snapshot["message"])), 150)
+                self.assertNotIn("Must not be saved", snapshot["message"])
+                self.assertEqual(Path(snapshot["source_path"]), root / "test.partial.srt")
+                self.assertFalse((root / "test.srt").exists())
+                if checkpoint_enabled:
+                    self.assertEqual(len(parse_srt(root / "test.partial.srt")), 150)
+                else:
+                    self.assertFalse((root / "test.partial.srt").exists())
+
     def test_resume_seeds_first_100_preview_rows(self):
         from subtitle_app.srt_utils import write_srt, parse_srt
         events = []

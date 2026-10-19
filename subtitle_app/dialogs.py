@@ -22,6 +22,7 @@ from .local_service import service_url_prefix
 from .widgets import attach_popup_fade
 from .translation import (
     LANG_NAMES, clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot,
+    normalize_name_glossaries, parse_name_glossary,
 )
 
 # 仅保留既有控件尺寸；颜色、圆角和状态统一从 theme.py 继承。
@@ -214,6 +215,27 @@ class SettingsDialog(QDialog):
         g2.addWidget(self.target_lang, r, 1, 1, 2)
         r += 1
 
+        self._name_texts = {
+            lang: "\n".join(f"{source}={target}" for source, target in names.items())
+            for lang, names in normalize_name_glossaries(
+                values.get("name_glossaries", {})
+            ).items()
+        }
+        self._name_lang = self.target_lang.currentData()
+        g2.addWidget(QLabel("人名译法"), r, 0)
+        self.name_editor = QTextEdit()
+        self.name_editor.setFixedHeight(72)
+        self.name_editor.setPlaceholderText("每行一组：原名=译名")
+        self.name_editor.setPlainText(self._name_texts.get(self._name_lang, ""))
+        g2.addWidget(self.name_editor, r, 1, 1, 2)
+        self.target_lang.currentIndexChanged.connect(self._on_target_lang_changed)
+        r += 1
+        name_hint = QLabel("所有视频共用；按目标语言分别保存。整句人名直接使用指定译法，句内人名按原文纠正已知混淆。")
+        name_hint.setObjectName("dialogHint")
+        name_hint.setWordWrap(True)
+        g2.addWidget(name_hint, r, 1, 1, 2)
+        r += 1
+
         self.only_zh_cb = QCheckBox("只要译文（不生成双语）")
         self.only_zh_cb.setChecked(values.get("translation_only", False))
         g2.addWidget(self.only_zh_cb, r, 0, 1, 3)
@@ -287,8 +309,8 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(permanent_btn)
         layout.addLayout(btn_row)
 
-        session_btn.clicked.connect(lambda: self.done(1))
-        permanent_btn.clicked.connect(lambda: self.done(2))
+        session_btn.clicked.connect(lambda: self._save_and_close(1))
+        permanent_btn.clicked.connect(lambda: self._save_and_close(2))
 
         # 下拉弹层淡入过渡
         colors = getattr(parent, "colors", None)
@@ -301,6 +323,25 @@ class SettingsDialog(QDialog):
     def _on_send_all_toggled(self, checked: bool):
         """一次性发送开关：勾选后禁用批大小调节"""
         self.batch_size.setEnabled(not checked)
+
+    def _on_target_lang_changed(self):
+        self._name_texts[self._name_lang] = self.name_editor.toPlainText()
+        self._name_lang = self.target_lang.currentData()
+        self.name_editor.setPlainText(self._name_texts.get(self._name_lang, ""))
+
+    def _name_glossaries(self) -> dict:
+        texts = dict(self._name_texts)
+        texts[self._name_lang] = self.name_editor.toPlainText()
+        return {lang: names for lang, raw in texts.items()
+                if (names := parse_name_glossary(raw))}
+
+    def _save_and_close(self, code: int):
+        try:
+            self._name_glossaries()
+        except ValueError as e:
+            QMessageBox.warning(self, "人名译法格式错误", str(e))
+            return
+        self.done(code)
 
     def _batch_size_value(self):
         """批大小保存规则：等于 config 默认值时存 None（跟随配置），
@@ -318,6 +359,7 @@ class SettingsDialog(QDialog):
             "default_video_dir": self.default_dir.text().strip(),
             "reuse_auto_lang": self.reuse_lang_cb.isChecked(),
             "target_lang": self.target_lang.currentData(),
+            "name_glossaries": self._name_glossaries(),
             "translation_only": self.only_zh_cb.isChecked(),
             "translation_batch_size": self._batch_size_value(),
             "send_all": self.send_all_cb.isChecked(),
@@ -893,7 +935,7 @@ def show_embed_confirm_dialog(parent, e) -> None:
     text = e.get("text", "")
     file_name = e.get("file_name", "")
     resp = e.get("response")
-    if resp is None:
+    if resp is None or resp.cancelled:
         return
 
     dialog = QDialog(parent)
@@ -932,6 +974,9 @@ def show_embed_confirm_dialog(parent, e) -> None:
     layout.addLayout(btn_layout)
 
     def _finish_pause(action: str):
+        if resp.cancelled:
+            dialog.accept()
+            return
         resp.action = action
         if action == "embed":
             modified = editor.toPlainText()
@@ -943,4 +988,12 @@ def show_embed_confirm_dialog(parent, e) -> None:
     # 用户点击 X 关闭对话框时，默认跳过嵌入
     dialog.rejected.connect(lambda: _finish_pause("skip"))
 
-    dialog.exec()
+    cancel_timer = QTimer(dialog)
+    cancel_timer.setInterval(200)
+    cancel_timer.timeout.connect(lambda: dialog.reject() if resp.cancelled else None)
+    cancel_timer.start()
+
+    try:
+        dialog.exec()
+    finally:
+        cancel_timer.stop()

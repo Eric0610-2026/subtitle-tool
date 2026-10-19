@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """translation 单元测试（适配当前代码）"""
 import unittest
+import json
 import tempfile
 import threading
 import time
@@ -10,8 +11,104 @@ from unittest.mock import MagicMock, patch
 from subtitle_app.srt_utils import SubtitleBlock
 
 from subtitle_app.translation import (
-    TranslationClient, _extract_json, _compose_sentences,
+    TranslationClient, _extract_json, _compose_sentences, parse_name_glossary,
+    _enforce_name_translations, _active_names, make_prompt,
 )
+
+
+class TestNameGlossary(unittest.TestCase):
+    def test_parse_and_reject_invalid_lines(self):
+        self.assertEqual(parse_name_glossary("ぬね=甲名\nモム = 乙名\n"),
+                         {"ぬね": "甲名", "モム": "乙名"})
+        for raw in ("ぬね", "=甲名", "ぬね=", "ぬね=甲名\nぬね=丙名"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse_name_glossary(raw)
+
+    def test_corrects_swapped_names_without_matching_common_word(self):
+        names = {"ぬね": "甲名", "モム": "乙名"}
+        self.assertEqual(_enforce_name_translations(
+            "ぬねは本を読んでいる", "モム在读书", names), "甲名在读书")
+        self.assertEqual(_enforce_name_translations(
+            "モムが見てる", "乙名在看", names), "乙名在看")
+        self.assertEqual(_enforce_name_translations(
+            "あぬねのね", "普通句子", names), "普通句子")
+        for phrase in ("足ぬねない", "触ぬねがら", "乗ぬねさい"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(_enforce_name_translations(phrase, "ぬねは名字ではない", names),
+                                 "ぬねは名字ではない")
+        self.assertEqual(_enforce_name_translations(
+            "ぬねは見てる", "あぬねのね、モム在看", names),
+            "あぬねのね、甲名在看")
+
+    def test_name_boundaries_and_overlapping_names(self):
+        cases = [
+            ("Ann is here", "Ann来了", {"Ann": "安"}, "安来了"),
+            ("Anna is here", "Anna来了", {"Ann": "安"}, "Anna来了"),
+            ("Ann is here", "Annual report", {"Ann": "安"}, "Annual report"),
+            ("アンナが来た", "アンナ来了", {"アン": "安"}, "アンナ来了"),
+            ("Ann Lee met Ann", "Ann Lee见到了Ann", {"Ann": "安", "Ann Lee": "安莉"}, "安莉见到了安"),
+            ("山田太郎と太郎", "山田太郎和太郎", {"太郎": "小太郎", "山田太郎": "山田"}, "山田和小太郎"),
+            ("甲和乙", "甲遇见乙", {"甲": "乙名", "乙": "丙"}, "乙名遇见丙"),
+            ("A met B", "A遇见B", {"A": "B", "B": "丙"}, "B遇见B"),
+            ("しおりが来た", "诗织来了", {"しおり": "诗织", "织": "其他"}, "诗织来了"),
+            ("Ann met Bob", "Ann见到了Bob", {"Ann": "安", "Bob": "鲍勃"}, "安见到了鲍勃"),
+            ("Ann is here", "安说鲍勃来了", {"Ann": "安", "Bob": "鲍勃"}, "安说鲍勃来了"),
+        ]
+        for source, translated, names, expected in cases:
+            with self.subTest(source=source, translated=translated):
+                self.assertEqual(_enforce_name_translations(source, translated, names), expected)
+                self.assertEqual(_enforce_name_translations(source, expected, names), expected)
+
+    def test_prompt_selects_longest_source_name(self):
+        names = {"Ann": "安", "Ann Lee": "安莉", "Bob": "鲍勃"}
+        self.assertEqual(_active_names(["Ann Lee is here"], names), {"Ann Lee": "安莉"})
+        self.assertEqual(_active_names(["Annual report"], names), {})
+
+    def test_plain_and_batch_prompts_share_name_rules(self):
+        for names in ({}, {"Ann": "安"}):
+            batch = make_prompt("zh", names)
+            plain = make_prompt("zh", names, plain_text=True)
+            for rule in ("专有名词保留原文", "保留原文语义和语气", "注意上下文连贯"):
+                self.assertIn(rule, batch)
+                self.assertIn(rule, plain)
+            if names:
+                self.assertIn("Ann → 安", batch)
+                self.assertIn("Ann → 安", plain)
+            self.assertIn("只返回译文", plain)
+            self.assertNotIn("JSON", plain)
+
+    def test_plain_fallback_enforces_names_and_uses_longest_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = TranslationClient(Path(d) / "cache.json", lambda *a: None,
+                                       name_translations={"Ann": "安", "Ann Lee": "安莉"})
+            client._call_api = MagicMock(return_value={"choices": [
+                {"message": {"content": "Ann Lee来了"}}]})
+            self.assertEqual(client._call_api_single_plain("Ann Lee is here"),
+                             [{"id": 1, "zh": "安莉来了"}])
+            prompt = client._call_api.call_args.args[0]["messages"][0]["content"]
+            self.assertIn("Ann Lee → 安莉", prompt)
+            self.assertNotIn("Ann → 安", prompt)
+
+    def test_new_matching_does_not_resume_previous_rule_version(self):
+        import hashlib
+        from subtitle_app.srt_utils import sentence_cache_key
+        with tempfile.TemporaryDirectory() as d:
+            names = {"Ann": "安"}
+            old_fingerprint = hashlib.sha256(json.dumps(
+                names, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            state = Path(d) / "state.json"
+            state.write_text(json.dumps({"target_lang": "zh", "name_glossary": old_fingerprint,
+                                         "done": {"0": "旧误译"},
+                                         "originals": {"0": "Ann is here"}}), encoding="utf-8")
+            client = TranslationClient(Path(d) / "cache.json", lambda *a: None,
+                                       name_translations=names)
+            old_key = sentence_cache_key("Ann is here",
+                                         f"{client.model}:names:{old_fingerprint}", True, "zh")
+            client.cache[old_key] = "旧误译"
+            client._translate_batch = MagicMock(return_value=[{"id": 1, "zh": "Ann来了"}])
+            block = SubtitleBlock(index=1, start=0, end=1, text="Ann is here")
+            self.assertEqual(client.translate_blocks([block], "en", True, state_path=state), ["安来了"])
+            client._translate_batch.assert_called_once()
 
 
 class TestExtractJson(unittest.TestCase):
@@ -101,6 +198,43 @@ class TestTranslationClient(unittest.TestCase):
     def _client(d, **kw):
         return TranslationClient(
                                  Path(d) / "cache.json", lambda *a: None, **kw)
+
+    def test_name_glossary_exact_name_overrides_old_cache(self):
+        from subtitle_app.srt_utils import sentence_cache_key
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(d, name_translations={"ぬね": "甲名"})
+            old_key = sentence_cache_key("ぬね", client.model, True, "zh")
+            client.cache[old_key] = "モム"
+            client._translate_batch = MagicMock()
+            block = SubtitleBlock(index=1, start=0, end=1, text="ぬね")
+            self.assertEqual(client.translate_blocks([block], "ja", True), ["甲名"])
+            client._translate_batch.assert_not_called()
+
+    def test_name_glossary_changes_prompt_and_cache_scope(self):
+        with tempfile.TemporaryDirectory() as d:
+            block = SubtitleBlock(index=1, start=0, end=1, text="ぬねは見てる")
+            first = self._client(d, name_translations={"ぬね": "甲名", "モム": "乙名"})
+            first._call_api = MagicMock(return_value={
+                "choices": [{"message": {"content": '["モム在看"]'}}]
+            })
+            self.assertEqual(first.translate_blocks([block], "ja", True), ["甲名在看"])
+            prompt = first._call_api.call_args.args[0]["messages"][0]["content"]
+            self.assertIn("ぬね → 甲名", prompt)
+            self.assertNotIn("モム → 乙名", prompt)
+            second = self._client(d, name_translations={"ぬね": "丙名", "モム": "乙名"})
+            second._translate_batch = MagicMock(return_value=[{"id": 1, "zh": "モム在看"}])
+            self.assertEqual(second.translate_blocks([block], "ja", True), ["丙名在看"])
+            second._translate_batch.assert_called_once()
+
+    def test_changed_name_glossary_does_not_resume_old_translation(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "resume.json"
+            state.write_text(json.dumps({"target_lang": "zh", "done": {"0": "モム"},
+                                         "originals": {"0": "ぬね"}}), encoding="utf-8")
+            client = self._client(d, name_translations={"ぬね": "甲名"})
+            block = SubtitleBlock(index=1, start=0, end=1, text="ぬね")
+            self.assertEqual(client.translate_blocks([block], "ja", True, state_path=state),
+                             ["甲名"])
 
     def test_translate_blocks_and_cache(self):
         # 默认批次大小应跟随 config 的 translation.batch_size

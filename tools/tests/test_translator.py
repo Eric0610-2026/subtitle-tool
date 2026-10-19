@@ -3,6 +3,7 @@
 """translator.py 单元测试"""
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -77,6 +78,129 @@ class TestTranslateStage(unittest.TestCase):
             self.assertEqual(merged_opts["language"], "en")
             self.assertEqual(merged_opts["_detected_lang"], "en")
             self.assertEqual(merged_opts["_ffmpeg"], "ffmpeg.exe")
+
+
+class TestEmbedCancellation(unittest.TestCase):
+    def setUp(self):
+        from subtitle_app.pipeline import SubtitleWorker
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.source = _make_srt(self.root / "movie.en.srt")
+        self.media = self.root / "movie.mp4"
+        self.media.write_bytes(b"original video")
+        self.worker = SubtitleWorker()
+        self.opts = {"work_dir": str(self.root), "language": "en", "translate_enabled": False,
+                     "_ffmpeg": "mock-ffmpeg", "pause_before_embed": True,
+                     "_is_stopped": lambda: self.worker.stop_requested}
+        self.posts = []
+
+    def run_translation(self, post=None):
+        from subtitle_app.translator import translate_only
+        translate_only(self.source, self.root, self.media, 1, 1, self.opts, post or self.posts.append)
+
+    def assert_cancelled_files_preserved(self, embed):
+        embed.assert_not_called()
+        self.assertEqual(self.media.read_bytes(), b"original video")
+        self.assertTrue(self.source.exists())
+        self.assertFalse((self.root / "movie.srt").exists())
+        self.assertFalse(any(e["type"] == "output_path" for e in self.posts))
+        from subtitle_app.srt_utils import IGNORE_FILE
+        self.assertFalse((self.root / IGNORE_FILE).exists())
+
+    def test_worker_stop_interrupts_pending_confirmation(self):
+        from subtitle_app.translator import PauseResponse
+        entered = threading.Event()
+        response = PauseResponse()
+        errors = []
+        def post(event):
+            self.posts.append(event)
+            if event["type"] == "pause_before_embed":
+                entered.set()
+        def run():
+            try:
+                self.run_translation(post)
+            except Exception as exc:
+                errors.append(exc)
+        with patch("subtitle_app.translator.PauseResponse", return_value=response), \
+                patch("subtitle_app.translator.embed_subtitles_to_video") as embed:
+            self.worker.thread = threading.Thread(target=run, daemon=True)
+            self.worker.thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.worker.stop()
+                self.worker.thread.join(timeout=1)
+                self.assertFalse(self.worker.thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertTrue(response.cancelled)
+                self.assertTrue(response.event.is_set())
+                self.assert_cancelled_files_preserved(embed)
+            finally:
+                self.worker.stop_requested = True
+                response.event.set()
+                self.worker.thread.join(timeout=2)
+
+    def test_stop_wins_over_simultaneous_confirmation_and_timeout(self):
+        from subtitle_app.translator import PauseResponse
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                self.worker.stop_requested = False
+                response = PauseResponse()
+                response.event = MagicMock()
+                def wait(timeout):
+                    self.assertLessEqual(timeout, 0.2)
+                    self.worker.stop_requested = True
+                    return confirmed
+                response.event.wait.side_effect = wait
+                with patch("subtitle_app.translator.PauseResponse", return_value=response), \
+                        patch("subtitle_app.translator.embed_subtitles_to_video") as embed:
+                    self.run_translation()
+                    self.assertTrue(response.cancelled)
+                    self.assert_cancelled_files_preserved(embed)
+
+    def test_confirmation_skip_and_timeout_keep_existing_behavior(self):
+        from subtitle_app.translator import PauseResponse
+        for action in ("embed", "skip", "timeout"):
+            with self.subTest(action=action):
+                response = PauseResponse()
+                response.event = MagicMock()
+                response.event.wait.return_value = action != "timeout"
+                if action == "skip":
+                    response.action = "skip"
+                with patch("subtitle_app.translator.PauseResponse", return_value=response), \
+                        patch("subtitle_app.translator.time.monotonic", side_effect=[0, 3600]), \
+                        patch("subtitle_app.translator.embed_subtitles_to_video", return_value=(None, False)) as embed:
+                    self.run_translation()
+                    self.assertEqual(embed.call_count, 0 if action == "skip" else 1)
+                self.assertFalse(response.cancelled)
+                self.assertTrue((self.root / "movie.srt").exists())
+                self.assertEqual(self.media.read_bytes(), b"original video")
+
+    def test_stop_during_embed_or_before_cleanup_preserves_sources(self):
+        for stop_at in ("embed", "output", "cleanup"):
+            with self.subTest(stop_at=stop_at):
+                self.worker.stop_requested = False
+                self.posts.clear()
+                self.opts["pause_before_embed"] = False
+                mkv = self.root / "movie.mkv"
+                mkv.write_bytes(b"trusted test output")
+                def embed(*args, **kwargs):
+                    if stop_at == "embed":
+                        self.worker.stop_requested = True
+                    return mkv, True
+                def post(event):
+                    self.posts.append(event)
+                    if stop_at == "output" and event["type"] == "output_path":
+                        self.worker.stop_requested = True
+                    if stop_at == "cleanup" and "翻译临时字幕已删除" in event.get("message", ""):
+                        self.worker.stop_requested = True
+                with patch("subtitle_app.translator.embed_subtitles_to_video", side_effect=embed):
+                    self.run_translation(post)
+                self.assertTrue(self.worker.stop_requested)
+                self.assertEqual(self.media.read_bytes(), b"original video")
+                self.assertTrue(self.source.exists())
+                from subtitle_app.srt_utils import IGNORE_FILE
+                self.assertFalse((self.root / IGNORE_FILE).exists())
 
 
 class TestTranslateOnlyEarlyReturn(unittest.TestCase):
@@ -302,7 +426,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             client.get_cache_size.return_value = 0
             return client
 
-        def run(bs_marker="absent"):
+        def run(bs_marker="absent", names=None):
             srt = self.d / "bs.srt"
             blocks = [SubtitleBlock(index=1, start=0.0, end=2.0, text="Hello")]
             from subtitle_app.srt_utils import write_srt
@@ -320,6 +444,8 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             }
             if bs_marker != "absent":
                 opts["translation_batch_size"] = bs_marker
+            if names is not None:
+                opts["name_glossaries"] = names
             from subtitle_app.translator import translate_only
             with patch.multiple(
                 "subtitle_app.translator",
@@ -337,6 +463,9 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         captured.clear()
         run(bs_marker=50)
         self.assertEqual(captured["kwargs"]["batch_size"], 50)
+        captured.clear()
+        run(names={"zh": {"ぬね": "甲名"}, "en": {"ぬね": "Nune"}})
+        self.assertEqual(captured["kwargs"]["name_translations"], {"ぬね": "甲名"})
 
     def test_mkv_embed_success_and_fallback(self):
         """MKV 内嵌成功路径；失败 → 回退外挂 SRT"""

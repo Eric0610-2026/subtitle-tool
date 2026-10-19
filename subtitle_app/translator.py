@@ -7,6 +7,7 @@
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,6 +31,12 @@ class PauseResponse:
         self.event = threading.Event()
         self.action = "embed"  # "embed" | "skip"
         self.modified_text: Optional[str] = None  # None 表示未修改
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.action = "skip"
+        self.event.set()
 
 
 # ── 备份目录：统一存到 logs/srt_backup（相对于项目根目录）──
@@ -197,7 +204,9 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         client = TranslationClient(cache_path, post,
                                    batch_size=_bs,
                                    target_lang=opts.get("target_lang", "zh"),
-                                   send_all=send_all)
+                                    send_all=send_all,
+                                    name_translations=opts.get("name_glossaries", {}).get(
+                                        opts.get("target_lang", "zh"), {}))
         cache_size = 0
         try:
             if need_translate_idx:
@@ -348,8 +357,17 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 "response": pause_resp,
             })
             # 等待用户确认（最长 1 小时）
-            if not pause_resp.event.wait(timeout=3600):
-                post({"type": "log", "message": "等待用户确认超时，自动继续嵌入", "level": "WARNING"})
+            deadline = time.monotonic() + 3600
+            while not pause_resp.event.wait(timeout=0.2):
+                if is_stopped and is_stopped():
+                    pause_resp.cancel()
+                    return
+                if time.monotonic() >= deadline:
+                    post({"type": "log", "message": "等待用户确认超时，自动继续嵌入", "level": "WARNING"})
+                    break
+            if is_stopped and is_stopped():
+                pause_resp.cancel()
+                return
             if pause_resp.action == "skip":
                 post({"type": "log", "message": "用户选择跳过嵌入，仅保留外挂字幕", "level": "INFO"})
                 # pause_resp.action 保持 "skip"，下游条件会正确处理
@@ -362,6 +380,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     # ── 优先尝试内嵌字幕到 MKV ──
     # 视频文件：直接内嵌自身；字幕文件：找同名视频（找不到则只输出外挂字幕）
+    if is_stopped and is_stopped():
+        return
     mkv_ok = False
     if is_video and ffmpeg and pause_resp is not None and pause_resp.action == "skip":
         pass  # 用户选择跳过嵌入
@@ -373,13 +393,20 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 video_path, srt_for_embed, ffmpeg, post,
                 register_proc=opts.get("_register_proc"),
                 unregister_proc=opts.get("_unregister_proc"))
+            if is_stopped and is_stopped():
+                return
             if mkv_path and mkv_path.exists():
                 if mkv_trusted:
                     mkv_ok = True
                     post({"type": "output_path", "path": str(mkv_path.resolve())})
                     post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
+                    if is_stopped and is_stopped():
+                        return
                     # 清理临时文件
-                    _cleanup_files(post, [(translated_srt, "翻译临时字幕"), (source_srt, "原文字幕")])
+                    _cleanup_files(post, [(translated_srt, "翻译临时字幕"), (source_srt, "原文字幕")],
+                                   stop_check=is_stopped)
+                    if is_stopped and is_stopped():
+                        return
                     if video_path.exists():
                         _safe_unlink(video_path, post, "原视频")
                 else:
@@ -405,16 +432,24 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                 matched_video, srt_for_embed, ffmpeg, post,
                 register_proc=opts.get("_register_proc"),
                 unregister_proc=opts.get("_unregister_proc"))
+            if is_stopped and is_stopped():
+                return
             if mkv_path and mkv_path.exists() and mkv_trusted:
                 mkv_ok = True
                 post({"type": "output_path", "path": str(mkv_path.resolve())})
                 post({"type": "log", "message": f"✓ 内嵌字幕 MKV 完成: {mkv_path.name}", "level": "INFO"})
+                if is_stopped and is_stopped():
+                    return
                 # 删除原视频与翻译后的字幕（两者均已备份/可重建）
                 if matched_video.exists():
                     _safe_unlink(matched_video, post, "原视频")
+                if is_stopped and is_stopped():
+                    return
                 if source_srt and source_srt.exists():
                     _safe_unlink(source_srt, post, "翻译字幕")
-                _cleanup_files(post, [(translated_srt, "翻译临时字幕")])
+                _cleanup_files(post, [(translated_srt, "翻译临时字幕")], stop_check=is_stopped)
+    if is_stopped and is_stopped():
+        return
     # ── 内嵌失败或非视频 → 整理输出外挂字幕 ──
     if not mkv_ok:
         post({"type": "progress", "percent": 100, "stage": "组织输出", "idx": idx, "total": total})
@@ -459,8 +494,10 @@ def _safe_unlink(path: Path, post: Callable = None, label: str = "") -> None:
             post({"type": "log", "message": f"警告：{label}删除失败: {e}", "level": "WARNING"})
 
 
-def _cleanup_files(post: Callable, paths: list) -> None:
+def _cleanup_files(post: Callable, paths: list, stop_check=None) -> None:
     """批量安全删除文件"""
     for p, label in paths:
+        if stop_check and stop_check():
+            return
         if p and p.exists():
             _safe_unlink(p, post, label)

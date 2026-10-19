@@ -20,6 +20,28 @@ from subtitle_app.widgets import PopupFade, _PopupSeparatorDelegate
 
 
 class TestLanguagePopups(unittest.TestCase):
+    def test_name_glossaries_are_kept_per_target_language(self):
+        app = QApplication.instance() or QApplication([])
+        parent = QWidget()
+        dialog = SettingsDialog(parent, {
+            "target_lang": "zh",
+            "name_glossaries": {"zh": {"ぬね": "甲名"}, "en": {"ぬね": "Nune"}},
+        })
+        try:
+            dialog.show()
+            app.processEvents()
+            self.assertIn("ぬね=甲名", dialog.name_editor.toPlainText())
+            dialog.target_lang.setCurrentIndex(dialog.target_lang.findData("en"))
+            self.assertIn("ぬね=Nune", dialog.name_editor.toPlainText())
+            dialog.name_editor.setPlainText("ぬね=Nune\nモム=Momu")
+            dialog.target_lang.setCurrentIndex(dialog.target_lang.findData("zh"))
+            names = dialog.get_values()["name_glossaries"]
+            self.assertEqual(names["zh"]["ぬね"], "甲名")
+            self.assertEqual(names["en"]["モム"], "Momu")
+        finally:
+            dialog.close()
+            parent.close()
+
     def test_both_language_popups_are_rounded_separated_and_fade_in(self):
         app = QApplication.instance() or QApplication([])
         colors, _ = load_theme_colors()

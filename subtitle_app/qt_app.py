@@ -34,6 +34,7 @@ from .srt_utils import (
 from .icons import action_button, make_icon
 from .config import cfg
 from .dialogs import SettingsDialog, ModelManagerDialog, show_history_dialog, show_cache_dialog, EmbedDialog, show_embed_confirm_dialog, ExtractDialog
+from .translation import normalize_name_glossaries
 from .muxer import embed_subtitles_to_video, extract_embedded_subtitle, convert_to_mp4
 from .widgets import DropListWidget, SCAN_VIDEO_EXTS, AUDIO_EXTS, install_button_cursors
 from .panels import ProgressPanel, PreviewPanel, LogPanel, SignalBridge, _silent_double_input
@@ -136,6 +137,9 @@ class SubtitleApp(QMainWindow):
             "default_video_dir": getattr(cfg.app, "default_video_dir", ""),
             "reuse_auto_lang": getattr(cfg.whisper, "reuse_auto_lang", True),
             "target_lang": cfg.translation.target_lang,
+            "name_glossaries": normalize_name_glossaries(
+                getattr(cfg.translation, "name_glossaries", {})
+            ),
             "translation_only": getattr(cfg.translation, "translation_only", False),
             "translation_batch_size": None,  # None=跟随 config 的 batch_size 默认
             "send_all": getattr(cfg.translation, "send_all", False),
@@ -489,7 +493,7 @@ class SubtitleApp(QMainWindow):
     # ─── 交互 ───
 
     def _choose_video_dir(self):
-        """浏览并选择视频目录（类似 missav-downloader 的「保存到」风格）"""
+        """浏览并选择视频目录。"""
         path = QFileDialog.getExistingDirectory(self, "选择视频目录", self.video_dir.text())
         if path:
             self.video_dir.setText(path)
@@ -547,6 +551,7 @@ class SubtitleApp(QMainWindow):
         raw["whisper"]["reuse_auto_lang"] = values.get("reuse_auto_lang", True)
         trans = raw.setdefault("translation", {})
         trans["target_lang"] = values.get("target_lang", "zh")
+        trans["name_glossaries"] = values.get("name_glossaries", {})
         trans["translation_only"] = values.get("translation_only", False)
         trans["send_all"] = values.get("send_all", False)
         _bs_save = _batch_size_save_field(values)
@@ -866,6 +871,9 @@ class SubtitleApp(QMainWindow):
             "model_dir": _resolve_model_dir(s.get("model_dir", "")),
             "language": s.get("language", "auto"),
             "target_lang": s.get("target_lang", "zh"),
+            "name_glossaries": {
+                lang: dict(names) for lang, names in s.get("name_glossaries", {}).items()
+            },
             "device": cfg.whisper.device,
             "compute_type": cfg.whisper.compute_type,
             "translate_enabled": self.trans_cb.isChecked(),
@@ -1660,8 +1668,8 @@ class SubtitleApp(QMainWindow):
         show_embed_confirm_dialog(self, e)
 
     def _handle_preview_live(self, e):
-        # 实时预览内容与之前绑定文件的对应关系已失效，解绑避免保存覆盖旧文件
-        self.preview_panel.source_path = None
+        # 中断快照绑定断点文件；其它实时内容解绑，避免覆盖之前打开的字幕。
+        self.preview_panel.source_path = Path(e["source_path"]) if e.get("source_path") else None
         self.preview_panel.set_text(e.get("message", ""), preserve_live_preview=True)
 
     def _handle_preview_append(self, e):

@@ -5,6 +5,7 @@
 """
 
 import json
+import hashlib
 import logging
 import re
 import time
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .config import cfg
 from .local_service import local_model_name, translation_endpoint
@@ -119,18 +120,118 @@ def _response_content(resp: dict) -> str:
 
 LANG_NAMES = {k: v for k, v in cfg.translation_lang_names.__dict__.items()}
 
-def make_prompt(target_lang: str) -> str:
+def parse_name_glossary(text: str) -> Dict[str, str]:
+    """解析设置界面的每行「原名=译名」，拒绝含糊或重复的规则。"""
+    names: Dict[str, str] = {}
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        source, separator, target = line.partition("=")
+        source, target = source.strip(), target.strip()
+        if not separator or not source or not target:
+            raise ValueError(f"人名译法第 {line_no} 行应为：原名=译名")
+        if source in names:
+            raise ValueError(f"人名译法第 {line_no} 行重复：{source}")
+        names[source] = target
+    return names
+
+
+def normalize_name_glossaries(value) -> Dict[str, Dict[str, str]]:
+    """配置会把 JSON 对象转为 SimpleNamespace；任务只保留普通字典快照。"""
+    outer = vars(value) if hasattr(value, "__dict__") else value
+    if not isinstance(outer, dict):
+        return {}
+    result: Dict[str, Dict[str, str]] = {}
+    for lang, names in outer.items():
+        inner = vars(names) if hasattr(names, "__dict__") else names
+        if isinstance(inner, dict):
+            result[str(lang)] = {
+                str(source): str(target) for source, target in inner.items()
+                if str(source).strip() and str(target).strip()
+            }
+    return result
+
+
+def _name_pattern(name: str) -> str:
+    """ASCII 英文姓名要求单词边界；日文姓名允许后接助词。"""
+    escaped = re.escape(name)
+    if re.fullmatch(r"[\u3040-\u309f]+", name):
+        prefix = (r"(?<![A-Za-z0-9\u3040-\u30ff\u3400-\u9fff])"
+                  if len(name) <= 2 else r"(?<![\u3040-\u309f])")
+        return prefix + escaped
+    if re.fullmatch(r"[\u30a0-\u30ff]+", name):
+        return r"(?<![\u30a0-\u30ff])" + escaped + r"(?![\u30a0-\u30ff])"
+    if name.isascii() and any(c.isalpha() for c in name):
+        return r"(?<![A-Za-z0-9_])" + escaped + r"(?![A-Za-z0-9_])"
+    return escaped
+
+
+def _name_spans(text: str, names: Iterable[str]) -> List[re.Match]:
+    """一次匹配，优先长姓名；重叠的短名不作为另一个人物。"""
+    ordered = sorted((name for name in names if name), key=len, reverse=True)
+    if not ordered:
+        return []
+    pattern = "|".join(f"(?:{_name_pattern(name)})" for name in ordered)
+    return list(re.finditer(pattern, text))
+
+
+def _active_names(texts: Iterable[str], names: Dict[str, str]) -> Dict[str, str]:
+    found = {match.group() for text in texts for match in _name_spans(text, names)}
+    return {name: target for name, target in names.items() if name in found}
+
+
+def _enforce_name_translations(source: str, translated: str,
+                               names: Dict[str, str]) -> str:
+    """保护正确译名，按最长匹配一次替换，避免串名和级联替换。"""
+    matched = _active_names([source], names)
+    if not matched:
+        return translated
+    # 已配置译名始终原样保护，不能把译名内部的短原名再次翻译。
+    replacements = {target: target for target in names.values()}
+    replacements.update(matched)
+    # 若已有本句的正确姓名，不猜测额外姓名的身份，避免误改补充语境。
+    present = _name_spans(translated, list(matched) + list(matched.values()))
+    if len(matched) == 1 and not present:
+        selected = next(iter(matched.values()))
+        for name, target in names.items():
+            if name not in matched:
+                replacements.setdefault(name, selected)
+                replacements[target] = selected
+    # 正确译名优先于与它同形的原名；不支持从文本推断这种歧义。
+    for target in matched.values():
+        replacements[target] = target
+    spans = _name_spans(translated, replacements)
+    pieces = []
+    previous = 0
+    for match in spans:
+        pieces.extend((translated[previous:match.start()], replacements[match.group()]))
+        previous = match.end()
+    pieces.append(translated[previous:])
+    return "".join(pieces)
+
+
+def make_prompt(target_lang: str, names: Optional[Dict[str, str]] = None,
+                *, plain_text: bool = False) -> str:
     lang_name = LANG_NAMES.get(target_lang, "简体中文")
-    return (
-        f"你是严谨的字幕翻译器。将以下数组中的字幕文本逐条翻译为{lang_name}。"
+    name_rule = ("指定人名必须按下方译法；未指定的专有名词保留原文"
+                 if names else "专有名词保留原文")
+    input_rule = "以下文本" if plain_text else "以下数组中的字幕文本逐条"
+    output_rule = ("5. 只返回译文，不要其他内容" if plain_text else
+                   '5. 返回格式严格为 JSON 数组，保持顺序，每个元素为对应译文\n示例：["你好", "世界"]')
+    prompt = (
+        f"你是严谨的字幕翻译器。将{input_rule}翻译为{lang_name}。"
         "要求：\n"
         "1. 保留原文语义和语气\n"
         f"2. 译文符合{lang_name}表达习惯，自然流畅\n"
         "3. 注意上下文连贯\n"
-        "4. 专有名词保留原文\n"
-        "5. 返回格式严格为 JSON 数组，保持顺序，每个元素为对应译文\n"
-        '示例：["你好", "世界"]'
+        f"4. {name_rule}\n"
+        f"{output_rule}"
     )
+    if names:
+        prompt += "\n指定人名译法（同名必须使用相同译法）：\n"
+        prompt += "\n".join(f"{source} → {target}" for source, target in names.items())
+    return prompt
 
 # ── 自定义异常 ──
 
@@ -199,7 +300,8 @@ class TranslationClient:
 
     def __init__(self, cache_path: Path, post_ui: Callable,
                  batch_size: int = None, target_lang: str = "zh",
-                 send_all: bool = False):
+                 send_all: bool = False,
+                 name_translations: Optional[Dict[str, str]] = None):
         if batch_size is None:
             batch_size = cfg.translation.batch_size
         # 钳位：0/负数会导致分批 `range(0, len, 0)` 抛 ValueError、`// 0` 抛 ZeroDivisionError
@@ -211,6 +313,14 @@ class TranslationClient:
         self.endpoint = translation_endpoint()   # 固定本机 llama-server，无外部地址
         self.model = local_model_name()
         self.target_lang = target_lang
+        self.name_translations = dict(name_translations or {})
+        fingerprint = hashlib.sha256(json.dumps(
+            self.name_translations, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")).hexdigest() if self.name_translations else ""
+        fingerprint = f"v2:{fingerprint}" if fingerprint else ""
+        self._glossary_fingerprint = fingerprint
+        self._cache_model = f"{self.model}:names:{fingerprint}" if fingerprint else self.model
+        # 大型公共人名表只在本批原文实际出现时加入提示，避免每次请求塞入整张表。
         self.system_prompt = make_prompt(target_lang)
         # 进程级共享缓存：并发流水线中所有 client 共享同一内存 dict，
         # 配合全局锁保证写盘串行，避免后写覆盖先写导致缓存丢失
@@ -253,7 +363,10 @@ class TranslationClient:
         sent_originals: Dict[str, str] = {str(gsid): sent for gsid, _, sent in flat}
         if state_path and state_path.exists():
             state = load_json(state_path, {})
-            done = state.get("done", {}) if state.get("target_lang") == self.target_lang else {}
+            done = state.get("done", {}) if (
+                state.get("target_lang") == self.target_lang
+                and state.get("name_glossary", "") == self._glossary_fingerprint
+            ) else {}
             saved_originals = state.get("originals", {})
             for entry in flat:
                 gsid = entry[0]
@@ -269,9 +382,15 @@ class TranslationClient:
 
         to_translate: List[Tuple[int, str]] = []
         for gsid, bidx, sent in flat:
+            # 仅整句恰好为人名时直接使用指定译法；短日文名字不能做裸子串替换，
+            # 否则可能把普通词中的相同假名误替换。句内人名由提示词指导模型。
+            exact_name = self.name_translations.get(sent.strip())
+            if exact_name:
+                sent_trans[gsid] = exact_name
+                continue
             if gsid in sent_trans and str(sent_trans[gsid]).strip():
                 continue
-            key = sentence_cache_key(sent, self.model, is_bilingual, self.target_lang)
+            key = sentence_cache_key(sent, self._cache_model, is_bilingual, self.target_lang)
             cached = self.cache.get(key)
             if isinstance(cached, str) and cached.strip() and cached.strip() != sent:
                 sent_trans[gsid] = cached.strip()
@@ -362,7 +481,8 @@ class TranslationClient:
                     translations = self._translate_batch(batch, context_text, 0)
                     applied = _apply_batch_translations(
                         batch, translations, text_to_gsid, sent_trans,
-                        self.cache, self._cache_lock, self.model, is_bilingual, self.target_lang)
+                        self.cache, self._cache_lock, self._cache_model,
+                        is_bilingual, self.target_lang, self.name_translations)
                     with para_lock:
                         for orig_text, zh_text in applied:
                             if not zh_text:
@@ -431,6 +551,7 @@ class TranslationClient:
                                    or completed_count + 1 == total_batches):
                     save_json(state_path, {
                         "target_lang": self.target_lang,
+                        "name_glossary": self._glossary_fingerprint,
                         "done": _snapshot_done(sent_trans, self._cache_lock),
                         "originals": sent_originals,
                         "updated_at": datetime.now().isoformat(),
@@ -477,8 +598,9 @@ class TranslationClient:
                         plain = self._call_api_single_plain(orig)
                         if plain:
                             zh = str(plain[0].get("zh") or "").strip()
+                    zh = _enforce_name_translations(orig, zh, self.name_translations)
                     if zh and zh != orig:
-                        key = sentence_cache_key(orig, self.model, is_bilingual, self.target_lang)
+                        key = sentence_cache_key(orig, self._cache_model, is_bilingual, self.target_lang)
                         with self._cache_lock:
                             self.cache[key] = zh
                         for gsid in gsids:
@@ -510,6 +632,7 @@ class TranslationClient:
             if state_path:
                 save_json(state_path, {
                     "target_lang": self.target_lang,
+                    "name_glossary": self._glossary_fingerprint,
                     "done": _snapshot_done(sent_trans, self._cache_lock),
                     "originals": sent_originals,
                     "updated_at": datetime.now().isoformat(),
@@ -553,6 +676,7 @@ class TranslationClient:
         if state_path:
             save_json(state_path, {
                 "target_lang": self.target_lang,
+                "name_glossary": self._glossary_fingerprint,
                 "done": _snapshot_done(sent_trans, self._cache_lock),
                 "originals": sent_originals,
                 "updated_at": datetime.now().isoformat(),
@@ -565,10 +689,11 @@ class TranslationClient:
         prompt_text = json.dumps(texts, ensure_ascii=False)
         if context:
             prompt_text = context + prompt_text
+        active_names = _active_names(texts, self.name_translations)
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": make_prompt(self.target_lang, active_names)},
                 {"role": "user", "content": prompt_text},
             ],
             "temperature": cfg.translation.temperature,
@@ -660,10 +785,12 @@ class TranslationClient:
         raise last_err
 
     def _call_api_single_plain(self, text: str) -> List[Dict]:
+        active_names = _active_names([text], self.name_translations)
+        instruction = make_prompt(self.target_lang, active_names, plain_text=True)
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "你是严谨的字幕翻译器。将以下文本翻译为简体中文，只返回译文，不要其他内容。"},
+                {"role": "system", "content": instruction},
                 {"role": "user", "content": text},
             ],
             "temperature": cfg.translation.temperature, "stream": False,
@@ -681,7 +808,8 @@ class TranslationClient:
                 if choices and isinstance(choices, list) and len(choices) > 0:
                     content = _response_content(resp_data)
                     if content:
-                        return [{"id": 1, "zh": content.strip()}]
+                        return [{"id": 1, "zh": _enforce_name_translations(
+                            text, content.strip(), self.name_translations)}]
         except TranslationStopped:
             raise
         except Exception as e:
@@ -869,6 +997,7 @@ def _apply_batch_translations(
     model: str,
     is_bilingual: bool = True,
     target_lang: str = "zh",
+    name_translations: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[str, str]]:
     """把一批 API 结果写回 sent_trans / cache。
 
@@ -917,6 +1046,7 @@ def _apply_batch_translations(
             zh = ordered_zh[i]
         if not zh:
             continue
+        zh = _enforce_name_translations(orig_text, zh, name_translations or {})
         if zh == orig_text:
             # 模型把原文当译文返回（拒译/未答）：不当有效译文，不写缓存，留待单条补翻
             applied.append((orig_text, ""))

@@ -103,6 +103,54 @@ class TestWindowRegressions(unittest.TestCase):
             self.assertIsNone(server)
             lock.unlock.assert_not_called()
 
+    def test_interrupted_preview_saves_full_partial_without_unfreezing(self):
+        from subtitle_app.srt_utils import parse_srt, find_existing_subtitle
+        window = self.make_window()
+        media = self.root / "movie.mp4"
+        media.touch()
+        partial = self.root / "movie.partial.srt"
+        text = "\n\n".join(f"{i}\n00:00:01,000 --> 00:00:02,000\nSentence {i}" for i in range(1, 151))
+        window._handle_preview_append({"message": "\n\n".join(text.split("\n\n")[:100])})
+        window.preview_panel._flush_live_render()
+        with patch.object(window.preview_panel, "_render_structured_preview") as render:
+            window._handle_preview_live({"message": text, "source_path": str(partial)})
+        render.assert_not_called()
+        self.assertEqual(window.preview_panel.preview.rowCount(), 100)
+        self.assertEqual(window.preview_panel.source_path, partial)
+        self.assertIn("Sentence 150", window.preview_panel.get_text())
+        window._save_preview()
+        self.assertEqual(len(parse_srt(partial)), 150)
+        self.assertFalse((self.root / "movie.srt").exists())
+        self.assertIsNone(find_existing_subtitle(media))
+        window.show()
+        for dark in (False, True):
+            window.dark_mode = dark
+            window.colors = qt_app.DARK if dark else qt_app.LIGHT
+            window._apply_style()
+            self.app.processEvents()
+            self.assertFalse(window.grab().isNull())
+            self.assertEqual(window.preview_panel.preview.rowCount(), 100)
+            self.assertIn("Sentence 150", window.preview_panel.get_text())
+        window._handle_preview_live({"message": ""})
+        self.assertIsNone(window.preview_panel.source_path)
+
+    def test_cancelled_embed_confirmations_are_skipped_or_closed(self):
+        from PySide6.QtCore import QTimer
+        from subtitle_app.translator import PauseResponse
+        window = self.make_window()
+        response = PauseResponse()
+        response.cancel()
+        with patch.object(dialogs, "QDialog") as dialog:
+            dialogs.show_embed_confirm_dialog(window, {"response": response})
+        dialog.assert_not_called()
+        response = PauseResponse()
+        QTimer.singleShot(0, response.cancel)
+        dialogs.show_embed_confirm_dialog(window, {"response": response, "text": "subtitle"})
+        self.assertTrue(response.cancelled)
+        self.assertEqual(response.action, "skip")
+        self.assertTrue(response.event.is_set())
+        self.assertFalse(any(d.isVisible() for d in window.findChildren(QDialog)))
+
     def test_manual_embed_preserves_untrusted_sources(self):
         window = self.make_window()
         video, srt, mkv = [self.root / name for name in ("movie.mp4", "movie.srt", "movie.mkv")]
@@ -122,10 +170,17 @@ class TestWindowRegressions(unittest.TestCase):
             window = self.make_window()
         self.assertTrue(window.settings_data["translation_only"])
         self.assertTrue(window.settings_data["send_all"])
+        names = {"zh": {"ぬね": "甲名"}}
         with patch.object(qt_app, "__file__", str(self.root / "qt_app.py")):
-            window._save_settings_permanently({"translation_only": True, "send_all": True})
+            window._save_settings_permanently({"translation_only": True, "send_all": True,
+                                               "name_glossaries": names})
         self.assertTrue(load_json(config_path, {})["translation"]["translation_only"])
         self.assertTrue(load_json(config_path, {})["translation"]["send_all"])
+        self.assertEqual(load_json(config_path, {})["translation"]["name_glossaries"], names)
+        window.settings_data["name_glossaries"] = names
+        opts = window._build_opts()
+        names["zh"]["ぬね"] = "丙名"
+        self.assertEqual(opts["name_glossaries"]["zh"]["ぬね"], "甲名")
 
     def test_history_restore_reload_and_visuals(self):
         ignored_path = self.root / "movie.mp4"
