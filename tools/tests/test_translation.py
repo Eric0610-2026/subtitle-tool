@@ -237,30 +237,23 @@ class TestTranslationClient(unittest.TestCase):
                              ["甲名"])
 
     def test_translate_blocks_and_cache(self):
-        # 默认批次大小应跟随 config 的 translation.batch_size
         from subtitle_app.config import cfg
-        c = TranslationClient(Path(tempfile.mktemp()), lambda *a: None)
-        self.assertEqual(c.batch_size, cfg.translation.batch_size)
-        # 基本翻译 + 空缓存大小
         with tempfile.TemporaryDirectory() as d:
-            c = self._client(d, batch_size=10)
-            self.assertEqual(c.get_cache_size(), 0)
+            self.assertEqual(self._client(d).batch_size, cfg.translation.batch_size)
+            client = self._client(d, batch_size=10)
+            self.assertEqual(client.get_cache_size(), 0)
             blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello"),
                       SubtitleBlock(index=2, start=1, end=2, text="World")]
-            c._translate_batch = lambda texts, context="", depth=0: [
-                {"id": i + 1, "zh": f"译{t}"} for i, t in enumerate(texts)]
-            self.assertEqual(c.translate_blocks(blocks, "en", is_bilingual=True),
+            client._translate_batch = MagicMock(return_value=[
+                {"id": 1, "zh": "译Hello"}, {"id": 2, "zh": "译World"}])
+            self.assertEqual(client.translate_blocks(blocks, "en", is_bilingual=True),
                              ["译Hello", "译World"])
-        # 第二次调用缓存命中，不再调 _translate_batch
-        with tempfile.TemporaryDirectory() as d:
-            c = self._client(d, batch_size=10)
-            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello")]
-            mock = MagicMock(return_value=[{"id": 1, "zh": "译Hello"}])
-            c._translate_batch = mock
-            c.translate_blocks(blocks, "en", is_bilingual=True)
-            self.assertEqual(mock.call_count, 1)
-            c.translate_blocks(blocks, "en", is_bilingual=True)
-            self.assertEqual(mock.call_count, 1)
+            client._translate_batch.assert_called_once()
+            # 第二次直接命中缓存，返回相同译文且不再请求模型。
+            client._translate_batch.reset_mock()
+            self.assertEqual(client.translate_blocks(blocks, "en", is_bilingual=True),
+                             ["译Hello", "译World"])
+            client._translate_batch.assert_not_called()
 
     def test_batch_size_zero_or_negative_clamped(self):
         """batch_size=0/负数会导致分批 range(0, len, 0) / `// 0` 崩溃，应钳位到至少 1"""
@@ -362,7 +355,7 @@ class TestRecursionProtection(unittest.TestCase):
         client._call_api = raise_err
         result = client._translate_batch(["hello"])
         self.assertEqual(result[0]["zh"], "hello")
-        # 中文源/缓存全命中时返回译文；缓存第二次命中不调 API
+        # 中文源保持原文；缓存命中由 TestTranslationClient 覆盖
         with tempfile.TemporaryDirectory() as d:
             c = TranslationClient(
                                   Path(d) / "cache.json", lambda *a: None, batch_size=10)
@@ -371,19 +364,6 @@ class TestRecursionProtection(unittest.TestCase):
             c._translate_batch = mock
             self.assertEqual(c.translate_blocks(blocks, "zh", is_bilingual=True),
                              ["你好世界"])
-        with tempfile.TemporaryDirectory() as d:
-            c = TranslationClient(
-                                  Path(d) / "cache.json", lambda *a: None, batch_size=10)
-            blocks = [SubtitleBlock(index=1, start=0, end=1, text="Hello world")]
-            mock = MagicMock(return_value=[{"id": 1, "zh": "你好世界"}])
-            c._translate_batch = mock
-            res = c.translate_blocks(blocks, "en", is_bilingual=True)
-            mock.assert_called_once()
-            self.assertEqual(res, ["你好世界"])
-            mock.reset_mock()
-            res2 = c.translate_blocks(blocks, "en", is_bilingual=True)
-            mock.assert_not_called()
-            self.assertEqual(res2, ["你好世界"])
         # 缓存/断点 state 里的空串不应阻止重新翻译
         from subtitle_app.srt_utils import sentence_cache_key
         with tempfile.TemporaryDirectory() as d:
@@ -433,37 +413,6 @@ class TestRecursionProtection(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("你好。", out[0])
         self.assertIn("World.", out[0])
-
-
-class TestSentenceSplitting(unittest.TestCase):
-    """句子拆分扩展测试"""
-
-    def test_abbreviation_chinese_and_cache_key(self):
-        from subtitle_app.srt_utils import split_sentences, sentence_cache_key
-        # Dr. 不应触发句子分割
-        self.assertEqual(len(split_sentences("Dr. Smith is here.")), 1)
-        # 中文标点拆分
-        sents = split_sentences("你好。世界！今天天气怎么样？")
-        self.assertGreaterEqual(len(sents), 3)
-        # 缓存 key：确定性 + 大小写归一化 + 模型区分
-        k1 = sentence_cache_key("Hello", "m", True)
-        self.assertEqual(k1, sentence_cache_key("Hello", "m", True))
-        self.assertEqual(k1, sentence_cache_key("hello", "m", True))
-        self.assertNotEqual(k1, sentence_cache_key("Hello", "m2", True))
-
-
-class TestChineseDetection(unittest.TestCase):
-    """中文检测扩展测试"""
-
-    def test_japanese_and_bilingual_detection(self):
-        from subtitle_app.srt_utils import has_chinese
-        # 纯假名 → 非中文
-        self.assertFalse(has_chinese("こんにちは", "zh"))
-        self.assertFalse(has_chinese("カタカナです", "zh"))
-        # 日文汉字 + 假名 → 非中文
-        self.assertFalse(has_chinese("返事をください"))
-        # 含中文字符 → 是中文
-        self.assertTrue(has_chinese("Hello\n你好世界"))
 
 
 class TestSharedCache(unittest.TestCase):

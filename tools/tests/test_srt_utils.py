@@ -121,6 +121,7 @@ class TestSplitSentences(unittest.TestCase):
                          ["你好。", "世界！", "你好吗？"])
         self.assertEqual(split_sentences("Hello world. How are you? I am fine."),
                          ["Hello world.", "How are you?", "I am fine."])
+        self.assertEqual(split_sentences("Dr. Smith is here."), ["Dr. Smith is here."])
         self.assertEqual(split_sentences(""), [])
 
     def test_abbreviations_initials_and_internal_periods(self):
@@ -154,6 +155,7 @@ class TestCacheKey(unittest.TestCase):
         # 确定性 + 长度
         a = sentence_cache_key("Hello", "m", True)
         self.assertEqual(a, sentence_cache_key("Hello", "m", True))
+        self.assertEqual(a, sentence_cache_key("hello", "m", True))
         self.assertEqual(len(a), 64)
         # 区分双语/纯译文模式
         self.assertNotEqual(sentence_cache_key("Hello", "m", True),
@@ -170,10 +172,21 @@ class TestToSimplified(unittest.TestCase):
 
 class TestHasChinese(unittest.TestCase):
     def test_detects_chinese(self):
-        self.assertTrue(has_chinese("这是中文"))
-        self.assertTrue(has_chinese("Hello\n世界"))
-        self.assertFalse(has_chinese("This is English"))
-        self.assertFalse(has_chinese("Hello\nWorld"))
+        cases = [
+            ("这是中文", "", True),
+            ("Hello\n世界", "", True),
+            ("Hello\n你好世界", "", True),
+            ("This is English", "", False),
+            ("Hello\nWorld", "", False),
+            ("こんにちは", "zh", False),
+            ("カタカナです", "zh", False),
+            ("返事をください", "", False),
+            ("こんにちは\n世界", "ja", False),
+            ("Hello\n世界です", "", False),
+        ]
+        for text, source_lang, expected in cases:
+            with self.subTest(text=text, source_lang=source_lang):
+                self.assertEqual(has_chinese(text, source_lang), expected)
 
 
 class TestSafeStem(unittest.TestCase):

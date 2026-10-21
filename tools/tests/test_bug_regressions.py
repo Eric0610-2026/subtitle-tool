@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QAbstractButton, QListWidgetItem, QMessageBox, QDialog, QListWidget, QPushButton
 from subtitle_app import qt_app, translation, dialogs
 from subtitle_app.panels import EditDialog
-from subtitle_app.srt_utils import SubtitleBlock, has_chinese, load_json, save_json, sanitize_blocks, sentence_cache_key
+from subtitle_app.srt_utils import SubtitleBlock, load_json, save_json, sanitize_blocks, sentence_cache_key
 from subtitle_app.translator import translate_only
 
 
@@ -239,11 +239,6 @@ class TestTranslationRegressions(unittest.TestCase):
         self.assertLessEqual(blocks[-1].end, 10.5)
         self.assertEqual([b.start for b in blocks], [i / 10 for i in range(100)])
         self.assertTrue(all(b.end > b.start for b in blocks))
-
-    def test_multiline_japanese_is_not_chinese(self):
-        self.assertFalse(has_chinese("こんにちは\n世界", "ja"))
-        self.assertFalse(has_chinese("Hello\n世界です"))
-        self.assertTrue(has_chinese("Hello\n世界"))
 
     def test_file_failure_does_not_emit_global_error(self):
         with tempfile.TemporaryDirectory() as directory:

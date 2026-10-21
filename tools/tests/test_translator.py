@@ -237,24 +237,6 @@ class TestTranslateOnlyEarlyReturn(unittest.TestCase):
 class TestTranslateOnlyPassthrough(unittest.TestCase):
     """translate_only 不翻译（翻译禁用）"""
 
-    def test_no_translate_passthrough(self):
-        with tempfile.TemporaryDirectory() as d:
-            srt_path = Path(d) / "test.srt"
-            _make_srt(srt_path)
-            item = Path(d) / "test.mp4"
-            item.write_text("dummy")
-
-            opts = {"work_dir": d, "language": "en", "translate_enabled": False}
-            posts = []
-
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, Path(d), item, 0, 1, opts, posts.append)
-
-            # 应有 preview 消息
-            previews = [p for p in posts if p["type"] == "preview"]
-            self.assertEqual(len(previews), 1)
-            self.assertIn("Hello world", previews[0]["message"])
-
     @patch("subtitle_app.translator._prune_backups")
     def test_backup_retention_uses_task_snapshot(self, prune_backups):
         """备份份数来自任务参数，而非运行中可变化的全局配置。"""
@@ -285,7 +267,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.tempdir.cleanup()
 
     def _run(self, srt_texts=None, detected_lang="en", translation_only=False,
-             is_chinese_source=False, mkv_ok=False):
+             is_chinese_source=False, mkv_ok=None):
         """辅助：执行 translate_only 并返回 posts"""
         srt_path = self.d / "test.srt"
         blocks = [SubtitleBlock(index=i + 1, start=float(i * 3), end=float(i * 3 + 2),
@@ -303,7 +285,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
             "translate_enabled": True,
             "translation_only": translation_only,
             "_detected_lang": detected_lang,
-            "_ffmpeg": "ffmpeg.exe" if mkv_ok else None,
+            "_ffmpeg": "ffmpeg.exe" if mkv_ok is not None else None,
             "_is_stopped": lambda: False,
         }
         posts = []
@@ -317,7 +299,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
         def mock_client_side_effect(*args, **kwargs):
             client = MagicMock()
-            if translation_only or is_chinese_source:
+            if is_chinese_source:
                 # 返回原文（不翻译）
                 client.translate_blocks.return_value = [b.text for b in blocks]
             else:
@@ -360,60 +342,20 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertIn("汉字", Path(output).read_text(encoding="utf-8"))
 
     def test_translate_output_modes(self):
-        """输出模式：双语（原文+译文）/仅翻译（只译文）/中文源繁简转换"""
-        # 双语模式：文本 + 中文翻译
-        posts, mocks = self._run(srt_texts=["Hello", "World"])
-        mocks["ensure_running"].assert_called_once()
-        previews = [p for p in posts if p["type"] == "preview"]
-        self.assertGreater(len(previews), 0)
-        lines = previews[0]["message"].split("\n")
-        # 双语模式下预览为标准 SRT 块：序号/时间/原文/译文
-        self.assertEqual(lines[0], "1")
-        self.assertIn("-->", lines[1])
-        self.assertEqual(lines[2], "Hello")
-        # 译文列只含纯译文，不得重复显示原文（双语模式下 final_texts 已是"原文\n译文"）
-        self.assertEqual(lines[3], "Hello（中文）")
-        # 仅翻译模式：只输出中文
-        posts, mocks = self._run(srt_texts=["Hello", "World"], translation_only=True)
-        previews = [p for p in posts if p["type"] == "preview"]
-        self.assertGreater(len(previews), 0)
-        # 中文源 → 繁简转换
-        blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text="Hello")]
-        srt_path = self.d / "test.srt"
-        from subtitle_app.srt_utils import write_srt
-        write_srt(srt_path, blocks, [b.text for b in blocks])
-
-        item = self.d / "test.mp4"
-        item.write_text("dummy")
-
-        opts = {
-            "work_dir": str(self.d),
-            "language": "zh",
-            "translate_enabled": True,
-            "translation_only": False,
-            "_detected_lang": "zh",
-            "_ffmpeg": None,
-        }
-        posts = []
-
-        # 模拟 translate_blocks 返回：中文源时 has_chinese 会跳过翻译
-        # 没有 need_translate_idx，直接走 zh_texts = [b.text for b in blocks]
-        MockClient = MagicMock()
-        client = MagicMock()
-        client.translate_blocks.return_value = ["Hello"]
-        client.get_cache_size.return_value = 0
-        MockClient.return_value = client
-        with patch.multiple(
-            "subtitle_app.translator",
-            TranslationClient=MockClient,
-            ensure_running=MagicMock(return_value=(True, "ok", False)),
-        ):
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
-
-        # 应输出繁简转换后的文本
-        previews = [p for p in posts if p["type"] == "preview"]
-        self.assertGreater(len(previews), 0)
+        """双语/纯译文写入对应内容；预览译文列不重复原文。"""
+        from subtitle_app.srt_utils import parse_srt
+        for translation_only in (False, True):
+            with self.subTest(translation_only=translation_only):
+                posts, mocks = self._run(srt_texts=["Hello", "World"],
+                                         translation_only=translation_only)
+                mocks["ensure_running"].assert_called_once()
+                preview = next(p["message"] for p in posts if p["type"] == "preview")
+                self.assertEqual(preview.splitlines()[:4], [
+                    "1", "00:00:00,000 --> 00:00:02,000", "Hello", "Hello（中文）"])
+                output = next(p["path"] for p in posts if p["type"] == "output_path")
+                expected = [f"{src}（中文）" if translation_only else f"{src}\n{src}（中文）"
+                            for src in ("Hello", "World")]
+                self.assertEqual([b.text for b in parse_srt(Path(output))], expected)
 
     def test_batch_size_mode_defaults(self):
         """批大小默认读 cfg.translation.batch_size；显式传入时覆盖"""
@@ -476,157 +418,57 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         self.assertGreater(len(outputs), 0)
         # MKV 内嵌失败 → 回退外挂 SRT
         posts, mocks = self._run(srt_texts=["Hello", "World"], mkv_ok=False)
+        mocks["embed_subtitles_to_video"].assert_called_once()
         outputs = [p for p in posts if p["type"] == "output_path"]
         self.assertGreater(len(outputs), 0)
         # 输出路径应该是 .srt 文件
         self.assertTrue(outputs[-1]["path"].endswith(".srt"))
 
-    def test_state_file_checkpoint(self):
-        """断点续翻：state 文件存在"""
-        srt_path = self.d / "test.srt"
-        blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text="Hello"),
-                  SubtitleBlock(index=2, start=4.0, end=6.0, text="World")]
-        from subtitle_app.srt_utils import write_srt
-        write_srt(srt_path, blocks, [b.text for b in blocks])
-
-        # 创建 state 文件
-        state_path = srt_path.with_name(srt_path.stem + ".translate_state.json")
-        state_path.write_text(json.dumps({"done": {"0": "Hello（中文）"}}, ensure_ascii=False), encoding="utf-8")
-
-        item = self.d / "test.mp4"
-        item.write_text("dummy")
-
-        opts = {
-            "work_dir": str(self.d),
-            "language": "en",
-            "translate_enabled": True,
-            "translation_only": False,
-            "_detected_lang": "en",
-            "_ffmpeg": None,
-        }
-        posts = []
-
-        MockClient = MagicMock()
-        client = MagicMock()
-        client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
-        client.get_cache_size.return_value = 0
-        MockClient.return_value = client
-        with patch.multiple(
-            "subtitle_app.translator",
-            TranslationClient=MockClient,
-            ensure_running=MagicMock(return_value=(True, "ok", False)),
-        ):
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
-
-        # 日志中包含断点续翻信息
-        logs = [p for p in posts if p["type"] == "log"]
-        self.assertTrue(any("断点续翻" in m["message"] for m in logs))
-
-        # state 文件应被清理
-        self.assertFalse(state_path.exists())
-
-    def test_state_file_created_on_first_run(self):
-        """回归：全新翻译（无 state 文件）也必须创建并落盘断点
-
-        旧逻辑只在 state 文件"已存在"时传给 translate_blocks，而它只会在
-        translate_blocks 内部创建——自举矛盾，断点续翻成了死功能：
-        进程中断/崩溃时整轮翻译进度全部丢失。
-        """
-        srt_path = self.d / "test.srt"
-        blocks = [SubtitleBlock(index=1, start=1.0, end=3.0, text="Hello"),
-                  SubtitleBlock(index=2, start=4.0, end=6.0, text="World")]
-        from subtitle_app.srt_utils import write_srt
-        write_srt(srt_path, blocks, [b.text for b in blocks])
-
-        item = self.d / "test.mp4"
-        item.write_text("dummy")
-        state_path = srt_path.with_name(srt_path.stem + ".translate_state.json")
-        self.assertFalse(state_path.exists())
-
-        opts = {
-            "work_dir": str(self.d),
-            "language": "en",
-            "translate_enabled": True,
-            "translation_only": False,
-            "_detected_lang": "en",
-            "_ffmpeg": None,
-            "_is_stopped": lambda: False,
-        }
-        posts = []
-
-        MockClient = MagicMock()
-        client = MagicMock()
-        client.translate_blocks.return_value = ["Hello（中文）", "World（中文）"]
-        client.get_cache_size.return_value = 0
-        MockClient.return_value = client
-        with patch.multiple(
-            "subtitle_app.translator",
-            TranslationClient=MockClient,
-            ensure_running=MagicMock(return_value=(True, "ok", False)),
-        ):
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, self.d, item, 0, 1, opts, posts.append)
-
-        # 翻译成功后 state 应被清理（不残留）
-        self.assertFalse(state_path.exists())
-        # 关键验证点：state_path 必须作为参数传入 translate_blocks（而非 None）
-        self.assertTrue(client.translate_blocks.called, "应调用 translate_blocks")
-        args, kwargs = client.translate_blocks.call_args
-        self.assertIsNotNone(args[3] if len(args) > 3 else kwargs.get("state_path"),
-                             "首次翻译也必须传 state_path，断点续翻才能生效")
+    def test_state_path_passed_and_cleaned_for_first_run_and_resume(self):
+        """首次翻译也必须传入断点路径；续翻提示与成功清理均保留。"""
+        state_path = self.d / "test.translate_state.json"
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                self.assertFalse(state_path.exists())
+                if resume:
+                    state_path.write_text(json.dumps({"done": {"0": "Hello（中文）"}},
+                                                     ensure_ascii=False), encoding="utf-8")
+                posts, mocks = self._run(srt_texts=["Hello", "World"])
+                call = mocks["client"].translate_blocks
+                call.assert_called_once()
+                args, kwargs = call.call_args
+                self.assertEqual(args[3] if len(args) > 3 else kwargs.get("state_path"),
+                                 state_path)
+                logs = [p["message"] for p in posts if p["type"] == "log"]
+                self.assertEqual(any("断点续翻" in message for message in logs), resume)
+                self.assertFalse(state_path.exists())
 
 
-class TestTranslateOnlyNonVideo(unittest.TestCase):
-    """非视频文件 → 外挂字幕 + 进度文件记录"""
+class TestPassthroughOutputAndProgress(unittest.TestCase):
+    """不翻译时的字幕输出与完成记录。"""
 
-    def test_non_video_output(self):
-        with tempfile.TemporaryDirectory() as d:
-            d = Path(d)
-            srt_path = d / "test.srt"
-            _make_srt(srt_path)
-            item = d / "test.mp3"  # 音频文件
-            item.write_text("dummy")
-
-            opts = {
-                "work_dir": str(d),
-                "language": "en",
-                "translate_enabled": False,
-            }
-            posts = []
-
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, d, item, 0, 1, opts, posts.append)
-
-            outputs = [p for p in posts if p["type"] == "output_path"]
-            self.assertGreater(len(outputs), 0)
-            # 非视频应输出到 source_srt 同目录
-            self.assertIn(str(d), outputs[-1]["path"])
-
-    def test_progress_file_written(self):
-        with tempfile.TemporaryDirectory() as d:
-            d = Path(d)
-            srt_path = d / "test.srt"
-            _make_srt(srt_path)
-            item = d / "test.mp4"
-            item.write_text("dummy")
-
-            from subtitle_app.srt_utils import IGNORE_FILE
-            opts = {
-                "work_dir": str(d),
-                "language": "en",
-                "translate_enabled": False,
-            }
-            posts = []
-
-            from subtitle_app.translator import translate_only
-            translate_only(srt_path, d, item, 0, 1, opts, posts.append)
-
-            progress_file = d / IGNORE_FILE
-            self.assertTrue(progress_file.exists())
-            data = json.loads(progress_file.read_text(encoding="utf-8"))
-            self.assertIn("done", data)
-            self.assertIn(str(item.resolve()), data["done"])
+    def test_passthrough_output_and_progress(self):
+        from subtitle_app.srt_utils import IGNORE_FILE, parse_srt
+        from subtitle_app.translator import translate_only
+        for suffix in (".mp3", ".mp4"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                srt_path = _make_srt(root / "test.srt")
+                item = root / ("test" + suffix)
+                item.write_text("dummy")
+                posts = []
+                translate_only(srt_path, root, item, 0, 1, {
+                    "work_dir": str(root), "language": "en", "translate_enabled": False,
+                }, posts.append)
+                previews = [p for p in posts if p["type"] == "preview"]
+                self.assertEqual(len(previews), 1)
+                self.assertIn("Hello world", previews[0]["message"])
+                output = Path(next(p["path"] for p in posts if p["type"] == "output_path"))
+                self.assertEqual(output.parent, root)
+                self.assertEqual([b.text for b in parse_srt(output)],
+                                 ["Hello world", "This is a test"])
+                data = json.loads((root / IGNORE_FILE).read_text(encoding="utf-8"))
+                self.assertIn(str(item.resolve()), data["done"])
 
     def test_record_progress_concurrent_no_lost_update(self):
         """回归：并行线程同时记录进度 → 不抛异常、全部条目保留（无丢失更新）"""

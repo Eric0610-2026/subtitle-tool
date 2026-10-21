@@ -94,14 +94,8 @@ class ModelManagerTest(unittest.TestCase):
         self.assertTrue(any(c.args[0]["type"] == "local_model_progress" for c in self.post.call_args_list))
 
     def test_hy_unload_uses_unified_service_cleanup(self):
+        # 服务归属由统一关闭入口核实，界面层只验证调用和结果传递。
         with patch.object(local_service, "shutdown_service", return_value=(True, "Hy-MT2 已卸下")) as stop:
-            self.window._load_local_model_worker("hy-mt2", "unload")
-        stop.assert_called_once()
-        self.assertTrue(self.result()["ok"])
-
-    def test_external_hy_service_can_be_unloaded(self):
-        with patch.object(local_service, "is_service_running", return_value=True), \
-                patch.object(local_service, "shutdown_service", return_value=(True, "Hy-MT2 已卸下")) as stop:
             self.window._load_local_model_worker("hy-mt2", "unload")
         stop.assert_called_once()
         self.assertTrue(self.result()["ok"])

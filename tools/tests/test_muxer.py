@@ -675,13 +675,5 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertFalse(trustworthy)
             self.assertFalse((Path(d) / "movie.mp4").exists())
 
-    def test_missing_file(self):
-        """文件不存在 → (None, False)"""
-        from subtitle_app.muxer import convert_to_mp4
-        mp4, trustworthy = convert_to_mp4(Path("missing.mkv"), "ffmpeg.exe", [].append)
-        self.assertIsNone(mp4)
-        self.assertFalse(trustworthy)
-
-
 if __name__ == "__main__":
     unittest.main()

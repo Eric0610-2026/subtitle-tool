@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from subtitle_app import local_service
 
@@ -116,23 +116,23 @@ class LocalServiceTest(unittest.TestCase):
         _reset_state()
 
     def test_probe_and_listening_detection(self):
-        # 未监听端口：连接失败/超时均视为不可用
-        with patch.object(local_service, "_PORT", 59999), \
-                patch.object(local_service, "_HOST", "127.0.0.1"):
+        # 模拟响应和连接，不依赖本机端口占用或代理设置。
+        with patch.object(local_service.urllib.request, "urlopen") as urlopen:
+            response = urlopen.return_value.__enter__.return_value
+            for status in (200, 503):
+                with self.subTest(status=status):
+                    response.status = status
+                    self.assertEqual(local_service._probe(0.3), status == 200)
+            urlopen.side_effect = TimeoutError("timed out")
             self.assertFalse(local_service._probe(0.3))
-            self.assertFalse(local_service._port_listening(0.2))
-        # 自占一个端口：_port_listening 应识别出已被监听
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-        try:
-            with patch.object(local_service, "_PORT", port), \
-                    patch.object(local_service, "_HOST", "127.0.0.1"):
-                self.assertTrue(local_service._port_listening(0.2))
-        finally:
-            s.close()
+
+        for error in (None, ConnectionRefusedError("refused"), TimeoutError("timed out")):
+            with self.subTest(error=error), patch("socket.socket") as socket_factory:
+                sock = MagicMock()
+                sock.connect.side_effect = error
+                socket_factory.return_value = sock
+                self.assertEqual(local_service._port_listening(0.2), error is None)
+                sock.close.assert_called_once()
 
     def test_find_model_empty_and_first_gguf(self):
         # 空目录 → None

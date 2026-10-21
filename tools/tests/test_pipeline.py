@@ -18,21 +18,6 @@ def setUpModule():
     unittest.addModuleCleanup(cleanup.stop)
 
 
-class TestSubtitleWorkerInit(unittest.TestCase):
-    """SubtitleWorker 基本构造"""
-
-    def test_constructor_and_stop_requested(self):
-        w = SubtitleWorker()
-        self.assertIsNotNone(w)
-        self.assertFalse(w.stop_requested)
-        self.assertIsNone(w.thread)
-        self.assertIsNotNone(w.transcriber)
-        w.stop_requested = True
-        self.assertTrue(w.stop_requested)
-        w.stop_requested = False
-        self.assertFalse(w.stop_requested)
-
-
 class TestSubtitleWorkerProcManagement(unittest.TestCase):
     """子进程注册/注销/终止"""
 
@@ -98,10 +83,14 @@ class TestStartAndStop(unittest.TestCase):
         """设置变动只能影响下一次任务，不能修改已提交给 worker 的参数。"""
         thread = MockThread.return_value
         w = SubtitleWorker()
+        self.assertFalse(w.stop_requested)
+        w.stop()
+        self.assertTrue(w.stop_requested)
         options = {"work_dir": "/tmp", "post": MagicMock(), "backup_max_files": 7}
 
         w.start([Path("test.mp4")], options)
 
+        self.assertFalse(w.stop_requested)
         submitted_options = MockThread.call_args.kwargs["args"][1]
         options["backup_max_files"] = 99
         self.assertEqual(submitted_options["backup_max_files"], 7)
@@ -368,45 +357,6 @@ class TestTranscribeStage(unittest.TestCase):
         mock_transcriber.transcribe_video.assert_called_once()
 
 
-class TestUnifiedStagedSerial(unittest.TestCase):
-    """串行（concurrency=1）统一走两阶段调度：不再有独立的逐文件路径"""
-
-    def setUp(self):
-        self.w = SubtitleWorker()
-        self.post = MagicMock()
-        self.base_opts = {
-            "work_dir": str(Path.cwd()),
-            "model_dir": "fake-model",
-            "language": "auto",
-            "target_lang": "zh",
-            "device": "cpu",
-            "compute_type": "int8",
-            "translate_enabled": False,
-            "extract_audio": True,
-            "vad_filter": True,
-            "skip_completed": False,
-            "post": self.post,
-            "_is_stopped": lambda: False,
-            "_register_proc": MagicMock(),
-            "_unregister_proc": MagicMock(),
-        }
-
-    @patch("subtitle_app.pipeline.translate_stage")
-    @patch("subtitle_app.pipeline.find_tool")
-    def test_serial_runs_transcribe_then_translate(self, mock_find_tool, mock_translate):
-        """concurrency=1 时仍依次执行转写与翻译（统一两阶段调度）"""
-        mock_find_tool.return_value = None
-
-        with tempfile.TemporaryDirectory() as d:
-            srt = Path(d) / "test.srt"
-            srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
-
-            self.w._run([srt], {**self.base_opts, "concurrency": 1})
-            mock_translate.assert_called_once()
-        done_calls = [c for c in self.post.call_args_list if c[0][0].get("type") == "done"]
-        self.assertTrue(done_calls)
-
-
 class TestRun(unittest.TestCase):
     """_run 完整流水线"""
 
@@ -422,10 +372,12 @@ class TestRun(unittest.TestCase):
         for concurrency in (1, 2):
             with self.subTest(concurrency=concurrency):
                 self.post.reset_mock()
+                mock_translate.reset_mock()
                 with tempfile.TemporaryDirectory() as d:
                     srt = Path(d) / "test.srt"
                     srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
                     self.w._run([srt], self._make_opts(concurrency))
+                    mock_translate.assert_called_once()
                 done_calls = [c for c in self.post.call_args_list
                               if c[0][0].get("type") == "done"]
                 self.assertTrue(len(done_calls) >= 1)

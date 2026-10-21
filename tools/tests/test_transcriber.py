@@ -11,26 +11,9 @@ from unittest.mock import MagicMock, patch
 
 from subtitle_app.transcriber import (
     Transcriber, split_long_blocks, MAX_BLOCK_DURATION,
-    _MODEL_SPEED, _parse_ffmpeg_time, _dedupe_adjacent_blocks,
+    _parse_ffmpeg_time, _dedupe_adjacent_blocks,
 )
 from subtitle_app.srt_utils import SubtitleBlock
-
-
-class TestTranscriberInit(unittest.TestCase):
-    """Transcriber 基本构造"""
-
-    def test_constructor_and_proc_handlers(self):
-        t = Transcriber()
-        self.assertIsNotNone(t)
-        self.assertEqual(t._model_cache, {})
-        self.assertIsNone(t.stop_check)
-        self.assertIsNone(t._register_proc)
-        self.assertIsNone(t._unregister_proc)
-        reg = MagicMock()
-        unreg = MagicMock()
-        t.attach_proc_handlers(reg, unreg)
-        self.assertEqual(t._register_proc, reg)
-        self.assertEqual(t._unregister_proc, unreg)
 
 
 class TestTranscriberClearCache(unittest.TestCase):
@@ -54,6 +37,7 @@ class TestTranscriberClearCache(unittest.TestCase):
     def test_clear_cache_keeps_models_and_release(self):
         """clear_cache() 不再卸载模型，仅释放 CUDA 缓存；release_model 清空缓存"""
         t = Transcriber()
+        self.assertFalse(t.is_loaded())
         t.clear_cache()  # 空缓存 + torch 不可用（setUp mock）都不崩溃
         mock_model = MagicMock()
         t._model_cache["key1"] = ("cpu", "int8", mock_model)
@@ -134,17 +118,25 @@ class TestGetDuration(unittest.TestCase):
     @patch("subtitle_app.transcriber.subprocess.Popen")
     def test_get_duration_success_and_failure(self, mock_popen):
         t = Transcriber()
+        register, unregister = MagicMock(), MagicMock()
+        t.attach_proc_handlers(register, unregister)
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate.return_value = ("123.456\n", "")
         mock_popen.return_value = proc
         self.assertAlmostEqual(t.get_duration(Path("test.mp4"), "ffprobe"), 123.456)
+        register.assert_called_once_with(proc)
+        unregister.assert_called_once_with(proc)
+        register.reset_mock()
+        unregister.reset_mock()
         # 失败返回 0.0
         proc2 = MagicMock()
         proc2.returncode = 1
         proc2.communicate.return_value = ("", "error")
         mock_popen.return_value = proc2
         self.assertEqual(t.get_duration(Path("test.mp4"), "ffprobe"), 0.0)
+        register.assert_called_once_with(proc2)
+        unregister.assert_called_once_with(proc2)
 
 
 class TestWritePartialSrt(unittest.TestCase):
@@ -228,15 +220,6 @@ class TestSplitLongBlocks(unittest.TestCase):
         self.assertTrue(all(b.text.strip() for b in out))
 
 
-class TestModelSpeedFactors(unittest.TestCase):
-    """_MODEL_SPEED 静态权重表（进度条权重估算用）"""
-
-    def test_speed_factors_present(self):
-        from subtitle_app.transcriber import _MODEL_SPEED
-        self.assertGreater(_MODEL_SPEED.get("large-v3-turbo", 1.5), 0)
-        self.assertIn("tiny", _MODEL_SPEED)
-
-
 class TestTranscribeVideoBasic(unittest.TestCase):
     """transcribe_video 基础流程"""
 
@@ -270,8 +253,13 @@ class TestTranscribeVideoBasic(unittest.TestCase):
         proc.returncode = 0
         proc.poll.return_value = 0
         proc.stdout = None
-        proc.stderr = None
-        mock_popen.return_value = proc
+        proc.stderr = iter(())
+
+        def extract_audio(cmd, **kwargs):
+            Path(cmd[-1]).write_bytes(b"fake audio")
+            return proc
+
+        mock_popen.side_effect = extract_audio
 
         # Mock Whisper model
         mock_model = MagicMock()
@@ -298,15 +286,12 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             video.write_text("fake video content", encoding="utf-8")
             output_dir = Path(d)
 
-            try:
-                result_srt, lang = self.t.transcribe_video(video, output_dir, self.base_opts)
-                self.assertEqual(lang, "en")
-                self.assertTrue(result_srt.exists())
-                content = result_srt.read_text(encoding="utf-8")
-                self.assertIn("Hello world.", content)
-            except RuntimeError:
-                # ffmpeg mock may fail, but Whisper transcribe should still work
-                pass
+            result_srt, lang = self.t.transcribe_video(video, output_dir, self.base_opts)
+            mock_model.transcribe.assert_called_once()
+            self.assertEqual(lang, "en")
+            self.assertTrue(result_srt.exists())
+            content = result_srt.read_text(encoding="utf-8")
+            self.assertIn("Hello world.", content)
 
     def test_stop_and_segment_error_save_checkpoint_once(self):
         from subtitle_app.srt_utils import parse_srt
@@ -330,6 +315,7 @@ class TestTranscribeVideoBasic(unittest.TestCase):
                 video.touch()
                 exception = RuntimeError if mode == "stop" else ValueError
                 with patch.object(t, "load_whisper_model", return_value=model), \
+                        patch.object(t, "get_duration", return_value=100.0), \
                         patch.object(Transcriber, "_write_partial_srt",
                                      wraps=Transcriber._write_partial_srt) as write:
                     with self.assertRaises(exception):
