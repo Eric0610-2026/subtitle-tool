@@ -182,6 +182,33 @@ class TestWindowRegressions(unittest.TestCase):
         names["zh"]["ぬね"] = "丙名"
         self.assertEqual(opts["name_glossaries"]["zh"]["ぬね"], "甲名")
 
+    def test_completed_history_matches_full_path_only(self):
+        window = self.make_window()
+        first = self.root / "目录 A"
+        second = self.root / "目录 B"
+        first.mkdir()
+        second.mkdir()
+        completed = first / "movie.part1.mp4"
+        other_files = [second / completed.name, first / "movie.mp4",
+                       first / "movie.part1.wav"]
+        for path in [completed, *other_files]:
+            path.touch()
+        save_json(window._ignore_path, {"done": [str(completed)]})
+
+        window._scan_path(str(first), True)
+        window._scan_path(str(second), True)
+
+        self.assertCountEqual(window.video_jobs, other_files)
+        self.assertEqual(window.video_list.count(), len(other_files))
+        if os.name == "nt":
+            # 路径大小写、分隔符不同仍指向同一个已完成文件。
+            save_json(window._ignore_path, {"done": [str(completed).upper().replace("\\", "/")]})
+            window._add_paths([completed], True)
+            self.assertCountEqual(window.video_jobs, other_files)
+        # 手动添加文件仍可显式重新处理已完成的路径。
+        window._add_paths([completed], True, check_done=False)
+        self.assertCountEqual(window.video_jobs, [*other_files, completed])
+
     def test_history_restore_reload_and_visuals(self):
         ignored_path = self.root / "movie.mp4"
         ignored = str(ignored_path.resolve())

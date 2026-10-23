@@ -591,18 +591,12 @@ class SubtitleApp(QMainWindow):
             self._add_log_entry(f"已扫描文件夹：{d}")
 
     def _load_done_set(self):
-        done = set()
-        done_stems = set()
+        # 按完整路径匹配；Path 在 Windows 上兼容大小写和分隔符差异。
         data = load_json(self._ignore_path, {})
-        for path_str in data.get("done", []):
-            done.add(path_str)
-            done_stems.add(Path(path_str).stem)
-            first_part = Path(path_str).stem.split(".")[0]
-            if first_part != Path(path_str).stem:
-                done_stems.add(first_part)
+        done = {Path(path_str).resolve() for path_str in data.get("done", [])}
         if done:
             self._add_log_entry(f"历史记录：{len(done)} 个已完成文件")
-        return done, done_stems
+        return done
 
     def _migrate_old_progress(self):
         old = APP_DIR / ".subtitle_progress.json"
@@ -666,7 +660,7 @@ class SubtitleApp(QMainWindow):
         jobs = self.video_jobs if is_video else self.subtitle_jobs
         exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
         existing = {str(p.resolve()) for p in jobs}
-        done, done_stems = self._load_done_set() if check_done else (set(), set())
+        done = self._load_done_set() if check_done else set()
         added = 0
         skipped = 0
         for p in paths:
@@ -675,7 +669,7 @@ class SubtitleApp(QMainWindow):
             resolved = str(p.resolve())
             if resolved in existing:
                 continue
-            if check_done and (resolved in done or p.stem in done_stems or str(p) in done):
+            if check_done and Path(resolved) in done:
                 skipped += 1
                 continue
             jobs.append(p)
