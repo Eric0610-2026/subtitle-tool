@@ -4,11 +4,109 @@
 import tempfile
 import unittest
 import os
+import json
+import shutil
+import subprocess
+import sys
+import time
+import venv
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from subtitle_app import subtitle_app
 from subtitle_app import qt_app
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows launchers")
+class PortableLauncherTest(unittest.TestCase):
+    def test_exe_survives_move_and_finds_python(self):
+        self._check_launcher("字幕工具.exe")
+
+    def _rename_after_exit(self, source, target):
+        # Windows 虚拟环境的转发进程可能比探针本身稍晚退出。
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                return source.rename(target)
+            except PermissionError as error:
+                if error.winerror != 32 or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _check_launcher(self, filename):
+        project = Path(__file__).resolve().parents[2]
+        launcher = project / filename
+        with tempfile.TemporaryDirectory() as d:
+            parent = Path(d)
+            root = parent / "原目录 with spaces & parentheses (1)"
+            (root / "subtitle_app").mkdir(parents=True)
+            shutil.copy2(launcher, root / launcher.name)
+            (root / "subtitle_app" / "subtitle_app.py").write_text(
+                "import json, os, sys\nfrom pathlib import Path\n"
+                "root = Path(__file__).resolve().parents[1]\n"
+                "visible = None\n"
+                "if os.environ.get('LAUNCHER_GUI_CHECK') == '1':\n"
+                "    import ctypes\n"
+                "    from PySide6.QtWidgets import QApplication, QWidget\n"
+                "    app = QApplication([])\n"
+                "    window = QWidget()\n"
+                "    window.setWindowTitle('Subtitle launcher test')\n"
+                "    window.resize(100, 80)\n"
+                "    window.show()\n"
+                "    app.processEvents()\n"
+                "    visible = bool(ctypes.windll.user32.IsWindowVisible(ctypes.c_void_p(int(window.winId()))))\n"
+                "    window.close()\n"
+                "result = root / 'launch-result.json'\n"
+                "temporary = result.with_suffix('.tmp')\n"
+                "temporary.write_text(json.dumps({'cwd': os.getcwd(), "
+                "'python': sys.executable, 'entry': sys.argv[0], 'pid': os.getpid(), 'visible': visible}), encoding='utf-8')\n"
+                "temporary.replace(result)\n", encoding="utf-8",
+            )
+            venv.EnvBuilder(with_pip=False).create(root / ".venv")
+            env = dict(os.environ)
+            env["PATH"] = str(Path(sys.executable).parent)
+            env["QT_QPA_PLATFORM"] = "windows"
+            env.pop("LAUNCHER_GUI_CHECK", None)
+            for stage in ("original", "moved", "system-python"):
+                with self.subTest(stage=stage):
+                    if stage == "moved":
+                        root = self._rename_after_exit(root, parent / "移动后的目录 with spaces & (2)")
+                    elif stage == "system-python":
+                        self._rename_after_exit(root / ".venv", root / "unused-env")
+                        env["LAUNCHER_GUI_CHECK"] = "1"
+                    result = root / "launch-result.json"
+                    result.unlink(missing_ok=True)
+                    completed = subprocess.run(
+                        [str(root / launcher.name)],
+                        cwd=parent, env=env, capture_output=True, timeout=10,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    deadline = time.monotonic() + 10
+                    while not result.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertTrue(result.is_file(), "Launcher did not launch Python")
+                    data = json.loads(result.read_text(encoding="utf-8"))
+                    # 探针写完结果后仍可能正在退出；等待其释放目录，再模拟移动。
+                    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                    kernel.OpenProcess.restype = wintypes.HANDLE
+                    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                    process = kernel.OpenProcess(0x00100000, False, data["pid"])
+                    if process:
+                        try:
+                            self.assertEqual(kernel.WaitForSingleObject(process, 10000), 0)
+                        finally:
+                            kernel.CloseHandle(process)
+                    self.assertEqual(Path(data["cwd"]), root)
+                    self.assertEqual(Path(data["entry"]), root / "subtitle_app/subtitle_app.py")
+                    expected = (Path(sys.executable).with_name("pythonw.exe")
+                                if stage == "system-python" else root / ".venv/Scripts/pythonw.exe")
+                    self.assertEqual(Path(data["python"]), expected)
+                    if stage == "system-python":
+                        self.assertTrue(data["visible"], "Launcher hid the native Qt window")
 
 
 class ModelPathMigrationTest(unittest.TestCase):

@@ -36,6 +36,7 @@ def _ensure_deps() -> bool:
         proc = subprocess.run(
             [python, "-m", "pip", "install", "-r", str(req), "-q"],
             capture_output=True, text=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         _msgbox("依赖安装超时", "pip install 超过 5 分钟未完成，请检查网络连接")
