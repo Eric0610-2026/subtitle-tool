@@ -6,6 +6,7 @@ import time
 import unittest
 import uuid
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -23,6 +24,7 @@ class TestTrayWindow(unittest.TestCase):
 
     def setUp(self):
         self.patches = ExitStack()
+        self.quit = self.patches.enter_context(patch.object(self.app, "quit"))
         for method in (
             "_start_handoff_server", "_restore_window_state",
             "_save_window_state", "_run_startup_checks", "_setup_tray",
@@ -39,11 +41,14 @@ class TestTrayWindow(unittest.TestCase):
         self.patches.close()
 
     def test_close_hides_and_tray_click_restores(self):
+        self.window.worker.thread = Mock()
+        self.window.worker.thread.is_alive.return_value = True
         with patch.object(self.window.worker, "stop") as stop:
             self.window.close()
         self.assertFalse(self.window.isVisible())
         self.assertFalse(self.window._closing)
         stop.assert_not_called()
+        self.quit.assert_not_called()
 
         self.window._on_tray_activated(QSystemTrayIcon.Trigger)
         self.assertTrue(self.window.isVisible())
@@ -54,7 +59,8 @@ class TestTrayWindow(unittest.TestCase):
         try:
             if server is None:
                 self.skipTest("当前环境不支持 QLocalServer 唤醒通道；降级启动由 mock 用例验证")
-            self.window.close()
+            with patch.object(self.window, "_has_active_tasks", return_value=True):
+                self.window.close()
             self.assertFalse(self.window.isVisible())
             self.assertIsNone(_claim_single_instance(Mock(), name))
             deadline = time.monotonic() + 1.0
@@ -68,7 +74,8 @@ class TestTrayWindow(unittest.TestCase):
             lock.unlock()
 
     def test_hidden_embed_confirmation_waits_for_restore(self):
-        self.window.close()
+        with patch.object(self.window, "_has_active_tasks", return_value=True):
+            self.window.close()
         event = {"response": Mock(), "file_name": "example.mp4"}
         with patch("subtitle_app.qt_app.system_notify") as notify, patch(
             "subtitle_app.qt_app.show_embed_confirm_dialog"
@@ -95,12 +102,40 @@ class TestTrayWindow(unittest.TestCase):
 
     def test_exit_uses_unified_service_cleanup_and_hide_does_not(self):
         with patch("subtitle_app.local_service.shutdown_service", return_value=(True, "已卸下")) as stop:
-            self.window.close()
+            with patch.object(self.window, "_has_active_tasks", return_value=True):
+                self.window.close()
             stop.assert_not_called()
             self.window._exiting = True
             with patch.object(self.window.worker, "stop"):
                 self.window.close()
             stop.assert_called_once()
+
+    def test_idle_close_cleans_up_and_quits_without_confirmation(self):
+        self.window.video_jobs = [Path("queued.mp4")]
+        with patch.object(self.window.worker, "stop") as stop, patch.object(
+            self.window.worker.transcriber, "is_loaded", return_value=True
+        ), patch.object(self.window.worker.transcriber, "release_model") as release, patch(
+            "subtitle_app.local_service.shutdown_service", return_value=(True, "已卸下")
+        ) as shutdown, patch.object(QMessageBox, "question") as question:
+            self.window.close()
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.window._closing)
+        stop.assert_called_once()
+        release.assert_called_once()
+        shutdown.assert_called_once()
+        self.window._save_window_state.assert_called_once()
+        self.window._tray_icon.hide.assert_called_once()
+        self.quit.assert_called_once()
+        question.assert_not_called()
+
+    def test_manual_operations_keep_close_in_tray(self):
+        for flag in ("_manual_embedding", "_manual_extracting", "_loading_local_model"):
+            with self.subTest(operation=flag), patch.object(self.window, flag, True, create=True):
+                self.window.show()
+                self.window.close()
+                self.assertFalse(self.window.isVisible())
+                self.assertFalse(self.window._closing)
+                self.quit.assert_not_called()
 
 
 if __name__ == "__main__":

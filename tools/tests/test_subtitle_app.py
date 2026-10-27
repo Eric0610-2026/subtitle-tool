@@ -147,6 +147,12 @@ class ModelPathMigrationTest(unittest.TestCase):
 
 
 class DependencyInstallTest(unittest.TestCase):
+    def test_windows_taskbar_identity(self):
+        with patch.object(sys, "platform", "win32"), \
+                patch("ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID", return_value=0) as set_id:
+            qt_app._set_windows_app_id()
+        set_id.assert_called_once_with("SubtitleTool.Desktop")
+
     def test_marker_tracks_requirements_and_interpreter(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

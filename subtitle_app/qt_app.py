@@ -106,7 +106,7 @@ class SubtitleApp(QMainWindow):
         self._ignore_set = self._load_ignore_set()
         self._start_time: Optional[float] = None
         self._closing = False  # 窗口关闭中：后台线程停止发 UI 信号
-        self._exiting = False  # 仅托盘「彻底退出」进入真正的关闭流程
+        self._exiting = False  # 托盘「彻底退出」可跳过忙碌时的隐藏逻辑
         self._pending_embed_events = []  # 隐藏期间等待用户处理的嵌入确认
         self._manual_embedding = False  # 后台手动嵌入进行中
         self._loading_local_model = False  # 后台手动加载/卸下模型进行中
@@ -280,7 +280,6 @@ class SubtitleApp(QMainWindow):
                 return
         self._exiting = True
         self.close()
-        QApplication.instance().quit()
 
     def _show_pending_embed_dialogs(self) -> None:
         while self.isVisible() and self._pending_embed_events and not self._closing:
@@ -1695,7 +1694,7 @@ class SubtitleApp(QMainWindow):
 
     def closeEvent(self, event):
         """应用关闭时停止处理线程、释放 Whisper 模型显存、关闭本会话拉起的本地翻译服务并保存窗口状态"""
-        if self._tray_icon is not None and not self._exiting:
+        if self._tray_icon is not None and not self._exiting and self._has_active_tasks():
             self._save_window_state()
             self.hide()
             event.ignore()
@@ -1717,6 +1716,7 @@ class SubtitleApp(QMainWindow):
         if self._tray_icon is not None:
             self._tray_icon.hide()
         super().closeEvent(event)
+        QApplication.instance().quit()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1758,6 +1758,18 @@ def _claim_single_instance(on_activate, name: str = _INSTANCE_NAME):
     raise RuntimeError("检测到字幕工具已经运行，但无法唤醒原窗口")
 
 
+def _set_windows_app_id():
+    """让 Windows 将 Python 托管的窗口识别为独立应用。"""
+    import sys
+    if sys.platform == "win32":
+        import ctypes
+        result = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "SubtitleTool.Desktop"
+        )
+        if result != 0:
+            logger.warning("设置 Windows 任务栏应用标识失败：%s", result)
+
+
 def main():
     import sys
     import logging
@@ -1785,7 +1797,10 @@ def main():
         handlers=[logging.StreamHandler(), file_handler],
     )
 
+    # 必须在创建 Qt 应用及任何原生窗口之前设置任务栏分组标识。
+    _set_windows_app_id()
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "icon.ico")))
     install_button_cursors(app)
     app.setStyle("Fusion")
     app.setApplicationName("本地字幕生成工具")
