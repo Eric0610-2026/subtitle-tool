@@ -16,7 +16,7 @@ from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
     load_json, save_json, IGNORE_FILE,
-    match_video_for_subtitle,
+    match_video_for_subtitle, split_bilingual_subtitles,
 )
 from .translation import TranslationClient, TranslationStopped
 from .muxer import embed_subtitles_to_video
@@ -248,21 +248,13 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         if translation_only:
             final_texts = zh_texts
         elif not is_chinese_source:
-            final_texts = []
-            missing_zh = 0
-            for block, zh in zip(blocks, zh_texts):
-                z = (zh or "").strip()
-                if z:
-                    # 非空译文统一写双语，包括与原文相同的极短语气词。
-                    final_texts.append(f"{block.text}\n{z}")
-                else:
-                    # 仍无译文：保留原文，并计数
-                    missing_zh += 1
-                    final_texts.append(block.text)
+            missing_zh = sum(not (zh or "").strip() for zh in zh_texts)
+            original_count = len(blocks)
+            blocks, final_texts = split_bilingual_subtitles(blocks, zh_texts)
             if missing_zh:
                 post({
                     "type": "log",
-                    "message": f"⚠ 仍有 {missing_zh}/{len(blocks)} 条字幕无有效译文（已保留原文）",
+                    "message": f"⚠ 仍有 {missing_zh}/{original_count} 条字幕无有效译文（已保留原文）",
                     "level": "WARNING",
                 })
         else:

@@ -419,6 +419,80 @@ def _wrap_latin_line(line: str, max_chars: int) -> List[str]:
     return result
 
 
+def split_bilingual_subtitles(
+    blocks: List[SubtitleBlock], translations: List[str],
+    max_chars: int = SUBTITLE_LINE_MAX_CHARS,
+) -> Tuple[List[SubtitleBlock], List[str]]:
+    """双语长句拆为连续短段，原文/译文各一行；时间按文本比例分配。
+
+    标点和词边界优先，双语切点按相对位置估计，不代表逐词对齐。
+    两种语言长度极不均衡时，较短一侧的片段会跨段保留，避免空行。
+    """
+    output_blocks: List[SubtitleBlock] = []
+    output_texts: List[str] = []
+
+    def single_line(text: str) -> str:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return ("" if any(is_cjk(c) for c in text) else " ").join(lines)
+
+    def parts(line: str, count: int) -> List[str]:
+        # 每段至少保留一个字符，且剩余文本能在余下段数内放下。
+        remaining = line
+        result = []
+        for left in range(min(count, len(line)), 1, -1):
+            if len(remaining) < left:
+                break
+            low = max(1, len(remaining) - (left - 1) * max_chars)
+            high = min(max_chars, len(remaining) - left + 1)
+            target = len(remaining) / left
+            candidates = range(low, high + 1)
+            nearby = [i for i in candidates
+                      if abs(i - target) <= max(1, max_chars // 3)
+                      and (remaining[i - 1] in _CJK_PUNCTUATION + ".!?;,:"
+                           or remaining[i - 1].isspace()
+                           or remaining[i].isspace())]
+            cut = min(nearby or candidates, key=lambda i: abs(i - target))
+            head, remaining = remaining[:cut].strip(), remaining[cut:].strip()
+            if head:
+                result.append(head)
+            if not remaining:
+                break
+        if remaining:
+            result.append(remaining)
+        # 极短的一侧延续显示，长的一侧仍保持单行且不丢字。
+        return [result[min(len(result) - 1, i * len(result) // count)]
+                for i in range(count)]
+
+    for block, translated in zip(blocks, translations):
+        source = single_line(block.text)
+        target = single_line(translated or "")
+        if not source:
+            continue
+        count = (max(len(source), len(target)) + max_chars - 1) // max_chars if max_chars > 0 else 1
+        if not target or count <= 1:
+            output_blocks.append(SubtitleBlock(len(output_blocks) + 1, block.start, block.end, source))
+            output_texts.append(f"{source}\n{target}" if target else source)
+            continue
+        start_ms, end_ms = round(block.start * 1000), round(block.end * 1000)
+        if end_ms - start_ms < count:
+            raise ValueError("字幕时间过短，无法拆成有效的双语短段")
+        source_parts, target_parts = parts(source, count), parts(target, count)
+        weights = [max(len(src), len(dst)) for src, dst in zip(source_parts, target_parts)]
+        total_weight = sum(weights)
+        consumed = 0
+        current_ms = start_ms
+        for i, (src, dst, weight) in enumerate(zip(source_parts, target_parts, weights)):
+            consumed += weight
+            next_ms = end_ms if i == count - 1 else min(
+                end_ms - (count - i - 1),
+                max(current_ms + 1, start_ms + round((end_ms - start_ms) * consumed / total_weight)),
+            )
+            output_blocks.append(SubtitleBlock(len(output_blocks) + 1, current_ms / 1000, next_ms / 1000, src))
+            output_texts.append(f"{src}\n{dst}")
+            current_ms = next_ms
+    return output_blocks, output_texts
+
+
 def write_srt(path: Path, blocks: List[SubtitleBlock], texts: List[str]) -> None:
     lines = []
     idx = 0

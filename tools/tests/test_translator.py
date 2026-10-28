@@ -357,6 +357,24 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                             for src in ("Hello", "World")]
                 self.assertEqual([b.text for b in parse_srt(Path(output))], expected)
 
+    def test_long_bilingual_preview_matches_split_output(self):
+        from subtitle_app.srt_utils import parse_srt, parse_srt_text
+
+        source = "あ、" * 23
+        posts, _ = self._run(srt_texts=[source], detected_lang="ja")
+        output = next(p["path"] for p in posts if p["type"] == "output_path")
+        subtitles = parse_srt(Path(output))
+        preview = parse_srt_text(next(p["message"] for p in posts if p["type"] == "preview"))
+        self.assertGreater(len(subtitles), 1)
+        self.assertEqual(subtitles, preview)
+        self.assertEqual(subtitles[0].start, 0.0)
+        self.assertEqual(subtitles[-1].end, 2.0)
+        for previous, following in zip(subtitles, subtitles[1:]):
+            self.assertEqual(previous.end, following.start)
+        for block in subtitles:
+            self.assertEqual(len(block.text.splitlines()), 2)
+            self.assertTrue(all(len(line) <= 25 for line in block.text.splitlines()))
+
     def test_batch_size_mode_defaults(self):
         """批大小默认读 cfg.translation.batch_size；显式传入时覆盖"""
         captured = {}

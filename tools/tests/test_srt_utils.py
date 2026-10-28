@@ -13,6 +13,7 @@ from subtitle_app.srt_utils import (
     load_json, save_json, fmt_job_display, find_existing_subtitle,
     match_video_for_subtitle,
     wrap_subtitle_text,
+    split_bilingual_subtitles,
 )
 
 
@@ -289,6 +290,55 @@ class TestWrapSubtitleText(unittest.TestCase):
     """wrap_subtitle_text：长行折行，防止播放器中一行过长被挤压换行"""
 
     M = 25
+
+    def test_bilingual_long_lines_become_consecutive_two_line_cues(self):
+        cases = [
+            ("あ、" * 23, "啊、" * 23),
+            ("どうしたらいいんだ。今日クラスで黒歴史までばらされて授業何もできなかった。",
+             "我该怎么办？今天在课堂上，连过去的黑历史都被翻出来，我根本无法上课。"),
+            ("あ" * 60, "译" * 26),
+            ("あ" * 15 + "\n" + "い" * 15, "啊" * 30),
+            ("This is a long source sentence with several words to split.",
+             "这是一句需要拆分为多个短段显示的字幕。"),
+        ]
+        for source, target in cases:
+            with self.subTest(source=source):
+                original = SubtitleBlock(7, 1.125, 7.875, source)
+                blocks, texts = split_bilingual_subtitles([original], [target], self.M)
+                self.assertGreater(len(blocks), 1)
+                self.assertEqual(blocks[0].start, original.start)
+                self.assertEqual(blocks[-1].end, original.end)
+                for i, (block, text) in enumerate(zip(blocks, texts), 1):
+                    self.assertEqual(block.index, i)
+                    self.assertLess(block.start, block.end)
+                    lines = text.splitlines()
+                    self.assertEqual(len(lines), 2)
+                    self.assertTrue(all(0 < len(line) <= self.M for line in lines))
+                    self.assertEqual(block.text, lines[0])
+                for previous, following in zip(blocks, blocks[1:]):
+                    self.assertEqual(previous.end, following.start)
+                for side, original_text in enumerate((source, target)):
+                    joined = "".join(t.splitlines()[side] for t in texts)
+                    self.assertEqual("".join(joined.split()), "".join(original_text.split()))
+                with tempfile.TemporaryDirectory() as d:
+                    path = Path(d) / "split.srt"
+                    write_srt(path, blocks, texts)
+                    self.assertEqual([b.text for b in parse_srt(path)], texts)
+                self.assertEqual(original.text, source)
+
+    def test_bilingual_short_disabled_missing_and_uneven_text(self):
+        block = SubtitleBlock(3, 0, 2, "あ、" * 23)
+        blocks, texts = split_bilingual_subtitles([block], ["啊、" * 23], 0)
+        self.assertEqual(texts, [block.text + "\n" + "啊、" * 23])
+        self.assertEqual(len(blocks), 1)
+        for target in ("短句", ""):
+            blocks, texts = split_bilingual_subtitles([SubtitleBlock(1, 0, 2, "短句")], [target])
+            self.assertEqual(texts, ["短句\n短句" if target else "短句"])
+        blocks, texts = split_bilingual_subtitles([SubtitleBlock(1, 0, 2, "あ")], ["译" * 80])
+        self.assertEqual("".join(t.splitlines()[1] for t in texts), "译" * 80)
+        self.assertTrue(all(t.splitlines()[0] == "あ" for t in texts))
+        with self.assertRaisesRegex(ValueError, "时间过短"):
+            split_bilingual_subtitles([SubtitleBlock(1, 0, 0.001, "あ" * 60)], ["啊" * 60])
 
     def test_short_and_disabled(self):
         """短行/空行不变；宽度 0 禁用折行"""
