@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # PowerShell 脚本内允许的字符（标题/正文白名单）
 _TITLE_ALLOWED = r"[^\w\s\-_.()\[\]【】]"
-_MSG_ALLOWED = r"[^\w\s\-_.()\[\]【】，。！？、：；]"
+_MSG_ALLOWED = r"[^\w\s\-_.()\[\]【】，。！？、:：；]"
 
 
 def notify(title: str, msg: str) -> None:

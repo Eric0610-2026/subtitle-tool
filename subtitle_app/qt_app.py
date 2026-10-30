@@ -1610,10 +1610,11 @@ class SubtitleApp(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.preview_panel.setReadOnly(False)
         elapsed = time.time() - self._start_time if self._start_time else 0
+        elapsed_text = fmt_duration(elapsed).removeprefix("0")
         if stopped:
-            stats_msg = f"处理已停止 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
+            stats_msg = f"处理已停止 | 总耗时 {elapsed_text} | {self._stats.get('files', 0)} 个文件"
         else:
-            stats_msg = f"处理完成 | 总耗时 {fmt_duration(elapsed)} | {self._stats.get('files', 0)} 个文件"
+            stats_msg = f"处理完成 | 总耗时 {elapsed_text} | {self._stats.get('files', 0)} 个文件"
         self._add_log_entry(stats_msg)
         notify_body = f"{msg}\n{stats_msg}"
         system_notify("字幕工具", notify_body)
