@@ -658,6 +658,28 @@ class TestStopAndBreaker(unittest.TestCase):
             self.assertTrue(any("放弃剩余补翻" in l.get("message", "") for l in logs),
                             "补翻连续失败应触发熔断日志")
 
+    def test_progress_never_reaches_complete_before_missing_translation_repair(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(d, batch_size=20)
+            events = []
+            client.post_ui = events.append
+            calls = []
+
+            def translate(texts, context="", depth=0):
+                calls.append(list(texts))
+                # 主批留下漏译，后续逐句补翻成功。
+                return [{"id": i + 1, "zh": text if len(calls) == 1 else "译文"}
+                        for i, text in enumerate(texts)]
+
+            client._translate_batch = translate
+            client.translate_blocks(self._blocks(12), "en", True)
+            progress = [e for e in events if e.get("type") == "progress"]
+            percentages = [e["percent"] for e in progress]
+            self.assertTrue(any("补翻进度" in e.get("detail", "") for e in progress))
+            self.assertEqual(percentages, sorted(percentages))
+            self.assertEqual(percentages[-1], 100)
+            self.assertTrue(all(p < 100 for p in percentages[:-1]))
+
 
 class TestCacheLRU(unittest.TestCase):
     """缓存淘汰按 LRU：命中即触碰，超额时裁掉最久未用而非最早插入"""

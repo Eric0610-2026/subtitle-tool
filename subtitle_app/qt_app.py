@@ -18,7 +18,7 @@ from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QCheckBox, QListWidgetItem,
-    QLabel, QTabWidget, QSplitter,
+    QLabel, QSplitter,
     QFrame, QFileDialog, QMessageBox,
     QMenu, QDialog, QGridLayout, QSystemTrayIcon,
 )
@@ -26,7 +26,7 @@ from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtNetwork import QHostAddress, QLocalServer, QLocalSocket, QTcpServer, QTcpSocket
 
 from .srt_utils import (
-    SUB_EXTS, fmt_job_display, fmt_duration,
+    fmt_job_display, fmt_duration,
     load_json, save_json, estimate_eta,
     OverallProgress, find_tool, IGNORE_FILE,
     _read_text_auto, shift_srt_timestamps,
@@ -98,7 +98,10 @@ class SubtitleApp(QMainWindow):
 
         self.work_dir = str(APP_DIR)
         self.video_jobs: List[Path] = []
-        self.subtitle_jobs: List[Path] = []
+        self._session_opts = None
+        self._session_seen = set()
+        self._batch_paths = set()
+        self._session_failures = []
         from .pipeline import SubtitleWorker
         self.worker = SubtitleWorker()
         self._ignore_path = APP_DIR / IGNORE_FILE
@@ -265,6 +268,7 @@ class SubtitleApp(QMainWindow):
     def _has_active_tasks(self) -> bool:
         return bool(
             (self.worker.thread and self.worker.thread.is_alive())
+            or self._session_opts is not None
             or self._manual_embedding
             or getattr(self, "_manual_extracting", False)
             or self._loading_local_model
@@ -352,7 +356,6 @@ class SubtitleApp(QMainWindow):
         left.setObjectName("filePanel")
         ll = QVBoxLayout(left)
         ll.setContentsMargins(8, 6, 8, 0)
-        self.tabs = QTabWidget()
 
         def _make_list(is_video: bool):
             w = DropListWidget(is_video_tab=is_video)
@@ -365,15 +368,11 @@ class SubtitleApp(QMainWindow):
             return w
 
         self.video_list = _make_list(True)
-        self.sub_list = _make_list(False)
-        self.tabs.addTab(self.video_list, "视频/音频生成字幕")
-        self.tabs.addTab(self.sub_list, "已有字幕翻译")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        ll.addWidget(self.tabs)
+        ll.addWidget(self.video_list)
         btn_row = QHBoxLayout()
         for text, cb in [
-            ("📂 添加文件", lambda: self._add_files(self.tabs.currentIndex() == 0)),
-            ("📁 添加文件夹", lambda: self._add_folder(self.tabs.currentIndex() == 0)),
+            ("📂 添加文件", lambda: self._add_files(True)),
+            ("📁 添加文件夹", lambda: self._add_folder(True)),
             ("✕ 移除", lambda: self._remove_selected()),
             ("☑ 全选", lambda: self._select_all()),
             ("🗑 清空", lambda: self._clear_jobs()),
@@ -391,7 +390,6 @@ class SubtitleApp(QMainWindow):
         self.preview_panel = PreviewPanel()
         self.preview_panel.setObjectName("previewPanel")
         self.preview_panel.connect_toolbar(self._save_preview)
-        self.preview_panel.fileDropped.connect(self._on_preview_file_dropped)
         top_splitter.addWidget(self.preview_panel)
         top_splitter.setSizes([540, 660])
         top_splitter.setStretchFactor(0, 1)
@@ -512,11 +510,9 @@ class SubtitleApp(QMainWindow):
             self._add_log_entry(f"默认视频目录不存在：{d}，跳过扫描")
             return
         self.video_dir.setText(d)
-        # 按当前标签页类型扫描：视频页扫视频/音频，字幕页扫字幕
-        is_video = self.tabs.currentIndex() == 0
-        self._scan_path(d, is_video)
-        kind = "视频/音频" if is_video else "字幕"
-        self._add_log_entry(f"已从默认目录扫描{kind}文件：{d}")
+        # 任务列表只接收视频和音频，外挂字幕由管线自动匹配。
+        self._scan_path(d, True)
+        self._add_log_entry(f"已从默认目录扫描视频/音频文件：{d}")
 
     def _open_settings(self):
         dlg = SettingsDialog(self, self.settings_data,
@@ -570,7 +566,7 @@ class SubtitleApp(QMainWindow):
 
 
     def _add_files(self, is_video: bool):
-        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
+        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS
         ext_str = " ".join(f"*{e}" for e in sorted(exts))
         files, _ = QFileDialog.getOpenFileNames(
             self, "选择文件", self.video_dir.text(),
@@ -581,7 +577,7 @@ class SubtitleApp(QMainWindow):
     def _add_folder(self, is_video: bool):
         d = QFileDialog.getExistingDirectory(self, "选择文件夹", self.video_dir.text())
         if d:
-            exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
+            exts = SCAN_VIDEO_EXTS | AUDIO_EXTS
             paths = []
             for f in sorted(Path(d).iterdir()):
                 if f.suffix.lower() in exts:
@@ -626,12 +622,14 @@ class SubtitleApp(QMainWindow):
         return str(path.resolve()) in self._ignore_set
 
     def _toggle_ignore(self, item):
-        lb = self.video_list if self.tabs.currentIndex() == 0 else self.sub_list
-        jobs = self.video_jobs if self.tabs.currentIndex() == 0 else self.subtitle_jobs
+        lb = self.video_list
+        jobs = self.video_jobs
         row = lb.row(item)
         if row < 0 or row >= len(jobs):
             return
         path = jobs[row]
+        if path.resolve() in self._batch_paths:
+            return
         resolved = str(path.resolve())
         if resolved in self._ignore_set:
             self._ignore_set.discard(resolved)
@@ -655,9 +653,9 @@ class SubtitleApp(QMainWindow):
             item.setFont(font)
 
     def _add_paths(self, paths: List[Path], is_video: bool, check_done: bool = True):
-        lb = self.video_list if is_video else self.sub_list
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
-        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
+        lb = self.video_list
+        jobs = self.video_jobs
+        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS
         existing = {str(p.resolve()) for p in jobs}
         done = self._load_done_set() if check_done else set()
         added = 0
@@ -675,7 +673,7 @@ class SubtitleApp(QMainWindow):
             existing.add(resolved)
             item = QListWidgetItem(fmt_job_display(p).split("  ", 1)[1])
             item.setIcon(make_icon("audio" if p.suffix.lower() in AUDIO_EXTS
-                                   else "video" if is_video else "file", lb))
+                                   else "video", lb))
             item.setData(Qt.UserRole, str(p))
             lb.addItem(item)
             if self._is_ignored(p):
@@ -690,21 +688,18 @@ class SubtitleApp(QMainWindow):
         d = Path(path)
         if not d.exists():
             return
-        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS if is_video else SUB_EXTS
+        exts = SCAN_VIDEO_EXTS | AUDIO_EXTS
         self._add_paths([d / f for f in sorted(d.iterdir()) if f.suffix.lower() in exts], is_video)
 
-    def _on_tab_changed(self, index: int):
-        """切换标签页时不做任何自动扫描（扫描由「📌 默认」按钮手动触发）"""
-        pass
-
     def _remove_selected(self):
-        is_video = self.tabs.currentIndex() == 0
-        lb = self.video_list if is_video else self.sub_list
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
+        lb = self.video_list
+        jobs = self.video_jobs
         removed = set()
         for item in reversed(sorted(lb.selectedItems(), key=lambda x: lb.row(x))):
             row = lb.row(item)
             if 0 <= row < len(jobs):
+                if jobs[row].resolve() in self._batch_paths:
+                    continue
                 jobs.pop(row)
             lb.takeItem(row)
             removed.add(row)
@@ -712,8 +707,8 @@ class SubtitleApp(QMainWindow):
 
     def _sync_jobs_from_list(self, is_video: bool):
         """列表拖拽排序后，按新顺序重建 jobs"""
-        lb = self.video_list if is_video else self.sub_list
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
+        lb = self.video_list
+        jobs = self.video_jobs
         new_jobs = []
         for i in range(lb.count()):
             path_str = lb.item(i).data(Qt.UserRole)
@@ -737,7 +732,7 @@ class SubtitleApp(QMainWindow):
         menu.exec(lb.viewport().mapToGlobal(pos))
 
     def _select_all(self):
-        lb = self.video_list if self.tabs.currentIndex() == 0 else self.sub_list
+        lb = self.video_list
         lb.selectAll()
 
     def _confirm(self, title, text, default_no=False):
@@ -751,19 +746,20 @@ class SubtitleApp(QMainWindow):
         return box.exec() == QMessageBox.Yes
 
     def _clear_jobs(self):
-        if not self._confirm("清空队列", "确定清空当前文件列表？"):
+        if not self._confirm("清空队列", "确定清空文件列表？正在处理的批次将保留。"):
             return
-        is_video = self.tabs.currentIndex() == 0
-        lb = self.video_list if is_video else self.sub_list
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
-        lb.clear()
-        jobs.clear()
-        self._add_log_entry("队列已清空")
+        lb = self.video_list
+        jobs = self.video_jobs
+        for row in range(len(jobs) - 1, -1, -1):
+            if jobs[row].resolve() not in self._batch_paths:
+                jobs.pop(row)
+                lb.takeItem(row)
+        self._add_log_entry("待处理队列已清空，当前批次保持不变")
 
     def _load_preview(self, item, is_video: bool):
         """选中文件时加载对应 SRT 到预览区"""
-        jobs = self.video_jobs if is_video else self.subtitle_jobs
-        lb = self.video_list if is_video else self.sub_list
+        jobs = self.video_jobs
+        lb = self.video_list
         row = lb.row(item)
         if row < 0 or row >= len(jobs):
             return
@@ -791,16 +787,6 @@ class SubtitleApp(QMainWindow):
                 return
         self.preview_panel.clear()
 
-    def _on_preview_file_dropped(self, path: str):
-        """拖入字幕到预览区时，同时加入已有字幕翻译列表"""
-        self._add_paths([Path(path)], is_video=False, check_done=False)
-        self.tabs.setCurrentIndex(1)
-        resolved = str(Path(path).resolve())
-        for i in range(self.sub_list.count()):
-            if self.sub_list.item(i).data(Qt.UserRole) == resolved:
-                self.sub_list.setCurrentRow(i)
-                break
-
     def _offset_preview_time(self):
         """批量调整预览区字幕时间戳"""
         content = self.preview_panel.get_text().strip()
@@ -825,9 +811,8 @@ class SubtitleApp(QMainWindow):
         else:
             # 无绑定（如转写实时预览）：退回按当前选中项推导目标，
             # 先弹确认避免静默覆盖无关字幕文件
-            is_video = self.tabs.currentIndex() == 0
-            jobs = self.video_jobs if is_video else self.subtitle_jobs
-            lb = self.video_list if is_video else self.sub_list
+            jobs = self.video_jobs
+            lb = self.video_list
             sel = lb.selectedItems()
             if not sel or not jobs:
                 QMessageBox.information(self, "提示", "请先选中一个文件")
@@ -889,6 +874,10 @@ class SubtitleApp(QMainWindow):
         if self._loading_local_model:
             QMessageBox.warning(self, "提示", "本地模型正在加载或卸下，请等待完成")
             return
+        self._session_opts = dict(opts)
+        self._session_seen = {j.resolve() for j in jobs}
+        self._batch_paths = set(self._session_seen)
+        self._session_failures = []
         self._start_time = time.time()
         self._stats = {"files": len(jobs)}
         self._output_paths = []
@@ -905,16 +894,47 @@ class SubtitleApp(QMainWindow):
         self.progress_panel.overall_label.setText(f"第 1/{len(jobs)} 个 · 已完成 0%")
         self.worker.start(jobs, opts)
 
+    def _continue_processing(self, event):
+        if self._closing or self._session_opts is None:
+            return
+        if self.worker.thread and self.worker.thread.is_alive():
+            QTimer.singleShot(20, lambda: self._continue_processing(event))
+            return
+        stopped = event.get("stopped", False) or self.worker.stop_requested
+        self._batch_paths.clear()
+        if event.get("type") == "error" or "失败" in event.get("message", ""):
+            self._session_failures.append(event.get("message", "处理失败"))
+            self._add_log_entry(event.get("message", "处理失败"), "ERROR",
+                                trace=event.get("trace", ""))
+        jobs = [] if stopped else [j for j in self._active_jobs()
+                                    if j.resolve() not in self._session_seen]
+        if jobs:
+            self._batch_paths = {j.resolve() for j in jobs}
+            self._session_seen.update(self._batch_paths)
+            self._stats["files"] += len(jobs)
+            self._reset_progress()
+            w = getattr(cfg.progress, "transcribe_weight", 80.0) if hasattr(cfg, "progress") else 80.0
+            self._overall = OverallProgress(len(jobs), transcribe_weight=w)
+            self._overall.start()
+            self.progress_panel.overall_label.setText(f"新一批 1/{len(jobs)} 个 · 已完成 0%")
+            self._add_log_entry(f"读取新增任务，开始下一批 {len(jobs)} 个文件")
+            self.worker.start(jobs, self._session_opts)
+            return
+        self._session_opts = None
+        message = "用户已停止处理" if stopped else "所有批次处理完成！"
+        if self._session_failures:
+            message += "\n失败汇总：\n" + "\n".join(self._session_failures)
+        self._handle_done({"message": message, "stopped": stopped})
+
     def _get_jobs(self):
-        is_video = self.tabs.currentIndex() == 0
-        return self.video_jobs if is_video else self.subtitle_jobs
+        return self.video_jobs
 
     def _active_jobs(self):
         """返回所有未被忽略的作业"""
         return [j for j in self._get_jobs() if not self._is_ignored(j)]
 
     def _start(self):
-        if self.worker.thread and self.worker.thread.is_alive():
+        if self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()):
             QMessageBox.warning(self, "提示", "正在处理中")
             return
         if getattr(self, "_manual_embedding", False) or getattr(self, "_manual_extracting", False):
@@ -940,7 +960,7 @@ class SubtitleApp(QMainWindow):
         self.progress_panel.reset()
 
     def _stop(self):
-        if not (self.worker.thread and self.worker.thread.is_alive()):
+        if self._session_opts is None and not (self.worker.thread and self.worker.thread.is_alive()):
             # 防御性复位：worker 线程若已异常退出而未发 done/error（理论上
             # pipeline 顶层已兜底），按钮会卡在"运行中"；此时直接恢复可操作状态
             if self.worker.thread is not None and self.stop_btn.isEnabled():
@@ -956,7 +976,7 @@ class SubtitleApp(QMainWindow):
         self._add_log_entry("已请求停止")
 
     def _retry(self):
-        if self.worker.thread and self.worker.thread.is_alive():
+        if self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()):
             QMessageBox.warning(self, "提示", "正在处理中")
             return
         jobs = self._active_jobs()
@@ -977,7 +997,7 @@ class SubtitleApp(QMainWindow):
             self._add_log_entry(f"打开历史对话框失败: {e}", level="ERROR", trace=traceback.format_exc())
         finally:
             self._ignore_set = self._load_ignore_set()
-            for file_list in (self.video_list, self.sub_list):
+            for file_list in (self.video_list,):
                 for i in range(file_list.count()):
                     self._refresh_item_visual(file_list.item(i))
 
@@ -1007,7 +1027,7 @@ class SubtitleApp(QMainWindow):
         if self._model_manager is not None:
             self._model_manager.update_state(
                 self._local_model_states, self._local_model_operation,
-                bool(self.worker.thread and self.worker.thread.is_alive()))
+                bool(self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive())))
 
     def _refresh_model_manager(self):
         self._render_model_manager()
@@ -1052,7 +1072,7 @@ class SubtitleApp(QMainWindow):
     def _operate_local_model(self, model, action):
         if self._closing or self._loading_local_model:
             return
-        if self.worker.thread and self.worker.thread.is_alive():
+        if self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()):
             self._render_model_manager()
             return
         if model not in ("whisper", "hy-mt2") or action not in ("load", "unload"):
@@ -1146,7 +1166,7 @@ class SubtitleApp(QMainWindow):
         self._local_model_operation = None
         if getattr(self, "_closing", False):
             return
-        running = bool(self.worker.thread and self.worker.thread.is_alive())
+        running = bool(self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()))
         self.start_btn.setEnabled(not running)
         self.retry_btn.setEnabled(not running)
         self._local_model_states = {}
@@ -1173,7 +1193,7 @@ class SubtitleApp(QMainWindow):
         if getattr(self, "_manual_embedding", False):
             QMessageBox.warning(self, "提示", "嵌入任务正在执行中，请等待完成")
             return
-        if self.worker.thread and self.worker.thread.is_alive():
+        if self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()):
             QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再嵌入")
             return
         ffmpeg = find_tool("ffmpeg.exe", APP_DIR) or find_tool("ffmpeg", APP_DIR)
@@ -1292,7 +1312,7 @@ class SubtitleApp(QMainWindow):
         if getattr(self, "_manual_extracting", False):
             QMessageBox.warning(self, "提示", "提取任务正在执行中，请等待完成")
             return
-        if self.worker.thread and self.worker.thread.is_alive():
+        if self._session_opts is not None or (self.worker.thread and self.worker.thread.is_alive()):
             QMessageBox.warning(self, "提示", "主任务正在处理中，请先停止再提取")
             return
         ffmpeg = find_tool("ffmpeg.exe", APP_DIR) or find_tool("ffmpeg", APP_DIR)
@@ -1565,6 +1585,9 @@ class SubtitleApp(QMainWindow):
                 f"第 {idx}/{self._overall.total} 个 · 已完成 {overall_pct:.0f}%")
 
     def _handle_done(self, e):
+        if self._session_opts is not None:
+            self._continue_processing(e)
+            return
         p = self.progress_panel
         msg = e.get("message", "完成")
         stopped = e.get("stopped", False)
@@ -1597,6 +1620,9 @@ class SubtitleApp(QMainWindow):
         self._refresh_model_manager_if_visible()
 
     def _handle_error(self, e):
+        if self._session_opts is not None:
+            self._continue_processing({**e, "type": "error"})
+            return
         msg = e.get("message", "错误")
         self._add_log_entry(msg, "ERROR", trace=e.get("trace", ""))
         self.start_btn.setEnabled(True)

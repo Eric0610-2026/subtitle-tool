@@ -55,6 +55,83 @@ class TestWindowRegressions(unittest.TestCase):
         save_json(self.root / qt_app.IGNORE_FILE, {"ignored": ["example.mp4"]})
         self.assertEqual(self.make_window()._ignore_set, {"example.mp4"})
 
+    def test_media_queue_continues_batches_with_frozen_settings_and_failure_summary(self):
+        window = self.make_window()
+        first, second, third = [self.root / f"{n}.mp4" for n in (1, 2, 3)]
+        subtitle = self.root / "1.srt"
+        for path in (first, subtitle):
+            path.touch()
+        window._scan_path(str(self.root), True)
+        self.assertEqual(window.video_jobs, [first])
+        window.worker.thread = None
+        window.worker.stop_requested = False
+        with patch.object(window.worker, "start") as start, patch.object(qt_app, "system_notify") as notify:
+            window._start()
+            original_opts = start.call_args.args[1].copy()
+            window.settings_data["target_lang"] = "ja"
+            window._add_paths([subtitle, second, third], True, check_done=False)
+            # 清空仅影响下一批，不能移除正在处理的文件。
+            with patch.object(window, "_confirm", return_value=True):
+                window._clear_jobs()
+            self.assertEqual(window.video_jobs, [first])
+            window._add_paths([second], True, check_done=False)
+            # 完成事件可能早于后台线程真正退出；等线程退出后才读取新增列表。
+            window.worker.thread = Mock()
+            window.worker.thread.is_alive.return_value = True
+            with patch.object(qt_app.QTimer, "singleShot") as later:
+                window._handle_error({"message": "第一批失败"})
+                self.assertEqual(start.call_count, 1)
+                window.worker.thread.is_alive.return_value = False
+                later.call_args.args[1]()
+            self.assertEqual(start.call_count, 2)
+            self.assertEqual(start.call_args.args[0], [second])
+            self.assertEqual(start.call_args.args[1], original_opts)
+            self.assertTrue(window._has_active_tasks())
+            notify.assert_not_called()
+            window._add_paths([third], True, check_done=False)
+            window._handle_done({"message": "完成"})
+            self.assertEqual(start.call_args.args[0], [third])
+            window._handle_done({"message": "完成"})
+            self.assertEqual(start.call_count, 3)
+            self.assertIsNone(window._session_opts)
+            self.assertIn("第一批失败", notify.call_args.args[1])
+            self.assertTrue(window.start_btn.isEnabled())
+
+    def test_stop_prevents_next_batch_and_preserves_waiting_files(self):
+        window = self.make_window()
+        first, waiting = self.root / "first.mp4", self.root / "waiting.mp4"
+        window._add_paths([first], True, check_done=False)
+        window.worker.thread = None
+        with patch.object(window.worker, "start") as start, patch.object(qt_app, "system_notify"):
+            window._start()
+            window._add_paths([waiting], True, check_done=False)
+            with patch.object(window, "_confirm", return_value=True):
+                window._stop()
+            window._handle_done({"stopped": True})
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(window.video_jobs, [first, waiting])
+            self.assertIsNone(window._session_opts)
+            self.assertEqual(window.progress_panel.overall_label.text(), "已停止（部分完成）")
+
+    def test_low_progress_has_no_square_background_at_left_corner(self):
+        window = self.make_window()
+        window.show()
+        for dark in (False, True):
+            window.dark_mode = dark
+            window.colors = qt_app.DARK if dark else qt_app.LIGHT
+            window._apply_style()
+            self.app.processEvents()
+            for bar in (window.progress_panel.stage_bar, window.progress_panel.overall_progress):
+                bar.setFormat("")
+                for value in (1, 2, 5, 100):
+                    bar.setValue(value)
+                    self.app.processEvents()
+                    image = bar.grab().toImage()
+                    # 圆角外透明，只有少量抗锯齿覆盖，不再铺不透明轨道底色。
+                    self.assertLess(image.pixelColor(0, 0).alpha(), 64)
+                    self.assertNotEqual(image.pixelColor(2, image.height() // 2).name(),
+                                        window.colors["border"])
+
     def test_main_and_settings_button_cursors_in_both_themes(self):
         window = self.make_window()
         window.show()

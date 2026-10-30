@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRectF
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QTextEdit, QListWidget, QListWidgetItem,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QFont, QColor, QBrush, QDragEnterEvent, QDropEvent, QPalette,
+    QPainter, QLinearGradient,
 )
 
 from .srt_utils import _read_text_auto, split_srt_blocks, SRT_TIMING_LINE_RE, PREVIEW_BLOCK_LIMIT
@@ -82,6 +83,48 @@ def _silent_double_input(parent, title: str, label: str,
     return spin.value(), result == QDialog.Accepted
 
 
+class RoundedProgressBar(QProgressBar):
+    """窄填充也使用有效圆角，不通过最小宽度夸大实际进度。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 避免样式表先在自绘圆角后面铺出方形背景/填充。
+        self.setStyleSheet("QProgressBar { background: transparent; border: none; }"
+                           "QProgressBar::chunk { background: transparent; }")
+
+    def paintEvent(self, event):
+        owner = self.parentWidget()
+        while owner is not None and not isinstance(getattr(owner, "colors", None), dict):
+            owner = owner.parentWidget()
+        if owner is not None:
+            colors = owner.colors
+        else:
+            light, dark = load_theme_colors()
+            colors = dark if self.palette().color(QPalette.Base).lightness() < 128 else light
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        rect = QRectF(self.rect())
+        painter.setBrush(QColor(colors["border"]))
+        painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        span = self.maximum() - self.minimum()
+        fraction = max(0.0, min(1.0, (self.value() - self.minimum()) / span)) if span else 0.0
+        width = rect.width() * fraction
+        if width > 0:
+            fill = QRectF(rect.x(), rect.y(), width, rect.height())
+            if self.invertedAppearance() ^ (self.layoutDirection() == Qt.RightToLeft):
+                fill.moveRight(rect.right())
+            gradient = QLinearGradient(fill.topLeft(), fill.topRight())
+            gradient.setColorAt(0, QColor(colors["accent"]))
+            gradient.setColorAt(1, QColor("#a78bfa"))
+            painter.setBrush(gradient)
+            radius = min(fill.height() / 2, width / 2)
+            painter.drawRoundedRect(fill, radius, radius)
+        if self.isTextVisible():
+            painter.setPen(QColor(colors["text"]))
+            painter.drawText(rect, Qt.AlignCenter, self.text())
+
+
 class ProgressPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -97,7 +140,7 @@ class ProgressPanel(QFrame):
         label.setMinimumWidth(10)
         label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         v.addWidget(label)
-        bar = QProgressBar()
+        bar = RoundedProgressBar()
         bar.setRange(0, 100)
         bar.setValue(0)
         bar.setFixedHeight(20)

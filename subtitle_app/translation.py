@@ -517,7 +517,7 @@ class TranslationClient:
                         slow_hint = "本地模型推理中"
                         self.post_ui({
                             "type": "progress",
-                            "percent": (completed_count / max(total_batches, 1)) * 100,
+                            "percent": (completed_count / max(total_batches, 1)) * 95,
                             "stage": "翻译",
                             "detail": f"批次 {batch_id}/{total_batches} 仍在翻译中（{slow_hint}，已完成 {completed_count}/{total_batches} 批）",
                             "total": len(blocks), "cache": len(self.cache),
@@ -559,7 +559,7 @@ class TranslationClient:
                 completed_count += 1
                 self.post_ui({
                     "type": "progress",
-                    "percent": (completed_count / max(total_batches, 1)) * 100,
+                    "percent": (completed_count / max(total_batches, 1)) * 95,
                     "stage": "翻译",
                     "detail": f"批次 {completed_count}/{total_batches} 完成",
                     "total": len(blocks), "cache": len(self.cache),
@@ -624,7 +624,7 @@ class TranslationClient:
                 if i % 10 == 0 or i == len(miss_map):
                     self.post_ui({
                         "type": "progress",
-                        "percent": 95 + 5 * (i / max(len(miss_map), 1)),
+                        "percent": 95 + 4 * (i / max(len(miss_map), 1)),
                         "stage": "翻译",
                         "detail": f"补翻进度 {i}/{len(miss_map)}",
                         "total": len(blocks), "cache": len(self.cache),
