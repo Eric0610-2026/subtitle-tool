@@ -18,7 +18,7 @@ from .srt_utils import (
     load_json, save_json, IGNORE_FILE,
     match_video_for_subtitle, split_bilingual_subtitles,
 )
-from .translation import TranslationClient, TranslationStopped
+from .translation import TranslationClient, TranslationStopped, IncompleteTranslation
 from .muxer import embed_subtitles_to_video
 from .local_service import ensure_running, service_url_prefix
 
@@ -187,7 +187,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         already_translated_idx = set()
         need_translate_idx = []
         for i, block in enumerate(blocks):
-            if has_chinese(block.text, detected_lang):
+            if opts.get("target_lang", "zh").startswith("zh") and has_chinese(block.text, detected_lang):
                 already_translated_idx.add(i)
             else:
                 need_translate_idx.append(i)
@@ -237,6 +237,20 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             else:
                 zh_texts = [b.text for b in blocks]
             cache_size = client.get_cache_size()
+        except IncompleteTranslation as e:
+            partial_texts = [b.text for b in blocks]
+            for i, text in zip(need_translate_idx, e.texts):
+                partial_texts[i] = text
+            if not translation_only:
+                partial_blocks, partial_texts = split_bilingual_subtitles(blocks, partial_texts)
+            else:
+                partial_blocks = blocks
+            partial_path = source_srt.with_name(source_srt.stem + ".partial.srt")
+            write_srt(partial_path, partial_blocks, partial_texts)
+            post({"type": "log", "level": "WARNING",
+                  "message": f"{e}；部分字幕保存至 {partial_path.name}，已暂停内嵌与清理"})
+            post({"type": "output_path", "path": str(partial_path.resolve())})
+            raise
         except TranslationStopped:
             # 用户停止：静默结束本文件（不写输出、不算失败；done 由 pipeline 统一发）
             return
@@ -463,6 +477,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         post({"type": "output_path", "path": str(final_srt.resolve())})
 
     # ── 记录进度 ──
+    if translate_enabled:
+        partial_path = source_srt.with_name(source_srt.stem + ".partial.srt")
+        if partial_path.exists():
+            _safe_unlink(partial_path, post, "旧部分字幕")
     _record_progress(opts["work_dir"], item)
     # 上报真实翻译完成计数（pipeline 提供回调；旧实现用文件序号，并行下失真）
     bump_translated = opts.get("_bump_translated")

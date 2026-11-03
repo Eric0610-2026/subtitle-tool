@@ -184,6 +184,9 @@ class TestHasChinese(unittest.TestCase):
             ("返事をください", "", False),
             ("こんにちは\n世界", "ja", False),
             ("Hello\n世界です", "", False),
+            ("Hello 老师, please come here.", "en", False),
+            ("Hello\n老师 please come here", "en", False),
+            ("这是 DNA 检测", "zh", True),
         ]
         for text, source_lang, expected in cases:
             with self.subTest(text=text, source_lang=source_lang):

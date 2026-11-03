@@ -755,6 +755,7 @@ def has_chinese(text: str, source_lang: str = "") -> bool:
         parts = text.split("\n", 1)
         second = parts[1].strip()
         if ((source_lang or "").startswith("ja")
+                or (not (source_lang or "").startswith("zh") and re.search(r"[A-Za-z]{2,}", second))
                 or any(0x3040 <= ord(c) <= 0x30FF for c in second)
                 or any(c in _JAPANESE_SPECIFIC_KANJI for c in second)):
             return False
@@ -764,7 +765,9 @@ def has_chinese(text: str, source_lang: str = "") -> bool:
     has_kana = any(0x3040 <= ord(c) <= 0x30FF for c in text)
     has_jp_specific = any(c in _JAPANESE_SPECIFIC_KANJI for c in text)
 
-    if is_jp or has_kana or has_jp_specific:
+    has_foreign_words = (not (source_lang or "").startswith("zh")
+                         and re.search(r"[A-Za-z]{2,}", text))
+    if is_jp or has_kana or has_jp_specific or has_foreign_words:
         return False
     return _has_han(text)
 

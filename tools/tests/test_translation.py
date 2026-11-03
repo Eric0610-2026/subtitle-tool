@@ -13,6 +13,7 @@ from subtitle_app.srt_utils import SubtitleBlock
 from subtitle_app.translation import (
     TranslationClient, _extract_json, _compose_sentences, parse_name_glossary,
     _enforce_name_translations, _active_names, make_prompt,
+    IncompleteTranslation, _valid_translation,
 )
 
 
@@ -472,6 +473,54 @@ class TestApplyBatchTranslations(unittest.TestCase):
         self.assertNotIn(0, sent_trans)
         self.assertNotIn(2, sent_trans)
 
+    def test_invalid_ids_are_not_guessed(self):
+        for ids in ((1, 1), (0, 2), (1, None), (1.5, 2)):
+            with self.subTest(ids=ids):
+                done, cache, applied = self._run(
+                    ["A", "B"], [{"id": sid, "zh": text}
+                                 for sid, text in zip(ids, ("甲", "乙"))])
+                self.assertEqual((done, cache, applied), ({}, {}, []))
+
+    def test_incomplete_or_duplicate_response_is_split(self):
+        for bad_items in (["甲"], [{"id": 1, "zh": "甲"}, {"id": 1, "zh": "乙"}]):
+            with self.subTest(items=bad_items), tempfile.TemporaryDirectory() as d:
+                client = TranslationClient(Path(d) / "cache.json", lambda e: None)
+                def response(items):
+                    return {"choices": [{"message": {"content": json.dumps(items)}}]}
+                client._call_api = MagicMock(side_effect=[response(bad_items),
+                                                          response(["甲"]), response(["乙"])])
+                self.assertEqual(client._translate_batch(["A", "B"]),
+                                 [{"id": 1, "zh": "甲"}, {"id": 2, "zh": "乙"}])
+                self.assertEqual(client._call_api.call_count, 3)
+
+    def test_translation_validation_preserves_names(self):
+        cases = [
+            ("Hello", "hello!", {}, False),
+            ("明日は学校に行きます", "明日は学校に行きます。", {}, False),
+            ("先生、本人だったりして?", "老师、本人だったりして?", {}, False),
+            ("Hello", "抱歉，无法提供翻译", {}, False),
+            ("ミクが来た", "ミク来了", {}, True),
+            ("ゆうなが来た", "ゆうな来了", {"ゆうな": "ゆうな"}, True),
+            ("Hello", "你好", {}, True),
+        ]
+        for source, target, names, expected in cases:
+            with self.subTest(target=target):
+                self.assertEqual(_valid_translation(source, target, "zh", names), expected)
+
+    def test_invalid_cache_and_state_are_retranslated(self):
+        from subtitle_app.srt_utils import sentence_cache_key
+        with tempfile.TemporaryDirectory() as d:
+            client = TranslationClient(Path(d) / "cache.json", lambda e: None)
+            source = "明日は学校に行きます"
+            state = Path(d) / "state.json"
+            state.write_text(json.dumps({"target_lang": "zh", "done": {"0": source + "。"},
+                                         "originals": {"0": source}}), encoding="utf-8")
+            client.cache[sentence_cache_key(source, client.model, True)] = source + "。"
+            client._translate_batch = MagicMock(return_value=[{"id": 1, "zh": "明天去学校"}])
+            self.assertEqual(client.translate_blocks([SubtitleBlock(1, 0, 1, source)],
+                                                     "ja", True, state), ["明天去学校"])
+            client._translate_batch.assert_called_once()
+
 
 class TestTranslateSplit(unittest.TestCase):
     """递归拆批后第二个子批的 id 需重新编号，避免回填错位"""
@@ -653,8 +702,14 @@ class TestStopAndBreaker(unittest.TestCase):
             # 25 句、批 20 → 主阶段 2 批（不触发空批熔断），全部拒译
             c._translate_batch = lambda texts, context="", depth=0: [
                 {"id": i + 1, "zh": t} for i, t in enumerate(texts)]
-            res = c.translate_blocks(self._blocks(25), "en", True)
-            self.assertEqual(len(res), 25)
+            c._call_api_single_plain = MagicMock(side_effect=lambda text: [{"id": 1, "zh": text}])
+            state = Path(d) / "state.json"
+            with self.assertRaises(IncompleteTranslation) as raised:
+                c.translate_blocks(self._blocks(25), "en", True, state)
+            self.assertEqual(len(raised.exception.texts), 25)
+            self.assertEqual(raised.exception.missing_count, 25)
+            self.assertEqual(c._call_api_single_plain.call_count, 20)
+            self.assertEqual(json.loads(state.read_text())["done"], {})
             self.assertTrue(any("放弃剩余补翻" in l.get("message", "") for l in logs),
                             "补翻连续失败应触发熔断日志")
 
@@ -679,6 +734,28 @@ class TestStopAndBreaker(unittest.TestCase):
             self.assertEqual(percentages, sorted(percentages))
             self.assertEqual(percentages[-1], 100)
             self.assertTrue(all(p < 100 for p in percentages[:-1]))
+
+    def test_plain_repair_success_and_stop(self):
+        from subtitle_app.translation import TranslationStopped
+        for stopped in (False, True):
+            with self.subTest(stopped=stopped), tempfile.TemporaryDirectory() as d:
+                events = []
+                client = self._client(d)
+                client.post_ui = events.append
+                client._translate_batch = MagicMock(return_value=[{"id": 1, "zh": "T1!"}])
+                client._call_api_single_plain = MagicMock(
+                    side_effect=TranslationStopped() if stopped else None,
+                    return_value=[{"id": 1, "zh": "译文"}])
+                state = Path(d) / "state.json"
+                if stopped:
+                    with self.assertRaises(TranslationStopped):
+                        client.translate_blocks(self._blocks(1), "en", True, state)
+                    self.assertTrue(state.exists())
+                    self.assertFalse(any(e.get("percent") == 100 for e in events))
+                else:
+                    self.assertEqual(client.translate_blocks(self._blocks(1), "en", True, state),
+                                     ["译文"])
+                client._call_api_single_plain.assert_called_once_with("T1")
 
 
 class TestCacheLRU(unittest.TestCase):

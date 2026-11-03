@@ -9,6 +9,7 @@ import hashlib
 import logging
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import concurrent.futures
@@ -272,6 +273,43 @@ class TranslationStopped(RuntimeError):
     pass
 
 
+class IncompleteTranslation(RuntimeError):
+    """保留部分译文，让输出层暂停发布并保留续翻状态。"""
+
+    def __init__(self, texts: List[str], missing_count: int):
+        super().__init__(f"仍有 {missing_count} 句无有效译文，已保留断点，请重试")
+        self.texts = texts
+        self.missing_count = missing_count
+
+
+def _valid_translation(source: str, translated: Optional[str], target_lang: str,
+                       names: Optional[Dict[str, str]] = None) -> bool:
+    if not isinstance(translated, str) or not translated.strip():
+        return False
+
+    def content(text):
+        return "".join(c.casefold() for c in text
+                       if not c.isspace() and not unicodedata.category(c).startswith("P"))
+    if content(source) == content(translated):
+        return False
+    if not target_lang.startswith("zh"):
+        return True
+    if re.search(r"(?:无法|不能|不便)(?:为你|为您)?(?:翻译|提供翻译)|"
+                 r"I (?:cannot|can't|am unable to) (?:translate|assist|help)",
+                 translated, re.IGNORECASE):
+        return False
+    # 指定姓名允许保留假名。其他片假名专名与中文共存时交给人工检查。
+    remainder = translated
+    for name in sorted(set((names or {}).keys()) | set((names or {}).values()),
+                       key=len, reverse=True):
+        remainder = re.sub(_name_pattern(name), "", remainder)
+    if re.search(r"[\u3041-\u3096]{2,}", remainder):
+        return False
+    if re.search(r"[\u3040-\u30ff]", remainder) and not re.search(r"[\u3400-\u9fff]", remainder):
+        return False
+    return True
+
+
 def _extract_error(resp: dict) -> str:
     """从本地翻译服务响应中提取错误消息
 
@@ -336,6 +374,8 @@ class TranslationClient:
                          translation_concurrency: int = 1,
                          stop_check: Optional[Callable[[], bool]] = None) -> List[str]:
         self._stop_check = stop_check
+        if source_lang.startswith("zh") and self.target_lang.startswith("zh"):
+            return [block.text for block in blocks]
         # Step 0: 按时间间隔划分段落
         para_of_block: List[int] = []
         current_para = 0
@@ -374,8 +414,8 @@ class TranslationClient:
                 zh_done = done.get(gsid_str, "")
                 if (
                     isinstance(zh_done, str)
-                    and zh_done.strip()
-                    and zh_done.strip() != sent_originals.get(gsid_str)
+                    and _valid_translation(sent_originals[gsid_str], zh_done,
+                                           self.target_lang, self.name_translations)
                     and saved_originals.get(gsid_str) == sent_originals.get(gsid_str)
                 ):
                     sent_trans[gsid] = zh_done.strip()
@@ -392,7 +432,7 @@ class TranslationClient:
                 continue
             key = sentence_cache_key(sent, self._cache_model, is_bilingual, self.target_lang)
             cached = self.cache.get(key)
-            if isinstance(cached, str) and cached.strip() and cached.strip() != sent:
+            if _valid_translation(sent, cached, self.target_lang, self.name_translations):
                 sent_trans[gsid] = cached.strip()
                 with self._cache_lock:
                     if key in self.cache:
@@ -541,8 +581,10 @@ class TranslationClient:
                         })
                         self._abort_translation(batch_futures, state_path,
                                                 sent_originals, sent_trans)
-                        raise RuntimeError(
-                            f"连续 {MAX_EMPTY_BATCHES} 批无有效译文（本地服务可能不可用或全部拒译）")
+                        missing_count = sum(not sent_trans.get(gsid, "").strip()
+                                            for gsid, _, _ in flat)
+                        raise IncompleteTranslation(
+                            _reassemble_blocks(blocks, flat, sent_trans), missing_count)
                 else:
                     consecutive_empty = 0
                 # 崩溃后最多重做 4 批；主动停止/异常仍由 _abort_translation 立即落盘。
@@ -593,13 +635,13 @@ class TranslationClient:
                         if not it.get("zh") and it.get("en"):
                             it["zh"] = it["en"]
                         zh = str(it.get("zh") or "").strip()
-                    if not zh:
+                    if not _valid_translation(orig, zh, self.target_lang, self.name_translations):
                         # 最后兜底：纯文本单句
                         plain = self._call_api_single_plain(orig)
                         if plain:
                             zh = str(plain[0].get("zh") or "").strip()
                     zh = _enforce_name_translations(orig, zh, self.name_translations)
-                    if zh and zh != orig:
+                    if _valid_translation(orig, zh, self.target_lang, self.name_translations):
                         key = sentence_cache_key(orig, self._cache_model, is_bilingual, self.target_lang)
                         with self._cache_lock:
                             self.cache[key] = zh
@@ -608,6 +650,9 @@ class TranslationClient:
                         got_translation = True
                     else:
                         logger.warning("单条补翻仍无有效译文: %r", orig[:80])
+                except TranslationStopped:
+                    self._abort_translation(batch_futures, state_path, sent_originals, sent_trans)
+                    raise
                 except Exception as e:
                     logger.warning("单条补翻失败 %r: %s", orig[:80], e)
                 # 熔断统计：异常/无译文/译文=原文（拒译）都算无进展，
@@ -649,7 +694,12 @@ class TranslationClient:
             self._abort_translation(batch_futures, state_path, sent_originals, sent_trans)
             raise TranslationStopped()
 
-        # Step 4: 立即告知 UI 翻译完成（不影响后续 I/O）
+        missing_count = sum(not sent_trans.get(gsid, "").strip() for gsid, _, _ in flat)
+        if missing_count:
+            self._abort_translation([], state_path, sent_originals, sent_trans)
+            raise IncompleteTranslation(_reassemble_blocks(blocks, flat, sent_trans), missing_count)
+
+        # Step 4: 仅完整翻译才告知 UI 完成
         self.post_ui({
             "type": "progress", "percent": 100,
             "stage": "翻译", "detail": f"翻译完成（共 {len(blocks)} 条）",
@@ -722,7 +772,14 @@ class TranslationClient:
 
         # 响应解析（独立 try，确保解析失败也触发递归拆分）
         try:
-            return self._parse_translation_response(resp_data)
+            translations = self._parse_translation_response(resp_data)
+            ids = [item.get("id") for item in translations if isinstance(item, dict)]
+            numeric_ids = [int(sid) for sid in ids]
+            if (len(translations) != len(texts) or len(ids) != len(texts)
+                    or any(str(sid) != str(number) for sid, number in zip(ids, numeric_ids))
+                    or set(numeric_ids) != set(range(1, len(texts) + 1))):
+                raise RuntimeError("翻译响应条数或 ID 不匹配")
+            return translations
         except Exception as e:
             logger.warning("翻译响应解析失败（深度 %d），拆分为小批次重试: %s", depth, e)
             if len(texts) > 1 and depth < MAX_RECURSION_DEPTH:
@@ -1022,32 +1079,30 @@ def _apply_batch_translations(
             it["zh"] = it["translation"]
         norm.append(it)
 
-    # id → 原文
-    by_id: Dict[int, str] = {}
-    for it in norm:
-        sid = it.get("id", 0)
-        try:
-            sid = int(sid)
-        except (TypeError, ValueError):
-            continue
-        zh = str(it.get("zh") or "").strip()
-        if 1 <= sid <= len(batch) and zh:
-            by_id[sid] = zh
-
-    # 顺序回退仅当返回值与输入条数一致时使用，防止条数不足时把相邻句子译文错位对齐
-    if len(norm) == len(batch):
-        ordered_zh: List[str] = [str(it.get("zh") or "").strip() for it in norm]
+    # 仅完全无 ID 且等长时允许按顺序回填。显式 ID 必须唯一且合法。
+    ids = [it.get("id") for it in norm]
+    if all(sid is None for sid in ids):
+        if len(norm) != len(batch):
+            return applied
+        by_id = {i + 1: it.get("zh", "") for i, it in enumerate(norm)}
     else:
-        ordered_zh: List[str] = []
+        try:
+            numeric_ids = [int(sid) for sid in ids]
+        except (TypeError, ValueError):
+            return applied
+        if (len(set(numeric_ids)) != len(numeric_ids)
+                or any(str(sid) != str(number) or not 1 <= number <= len(batch)
+                       for sid, number in zip(ids, numeric_ids))):
+            return applied
+        by_id = {sid: it.get("zh", "") for sid, it in zip(numeric_ids, norm)}
 
     for i, orig_text in enumerate(batch):
         zh = by_id.get(i + 1, "")
-        if not zh and ordered_zh and i < len(ordered_zh):
-            zh = ordered_zh[i]
-        if not zh:
+        if not isinstance(zh, str) or not zh.strip():
             continue
+        zh = zh.strip()
         zh = _enforce_name_translations(orig_text, zh, name_translations or {})
-        if zh == orig_text:
+        if not _valid_translation(orig_text, zh, target_lang, name_translations):
             # 模型把原文当译文返回（拒译/未答）：不当有效译文，不写缓存，留待单条补翻
             applied.append((orig_text, ""))
             continue
