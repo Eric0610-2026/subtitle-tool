@@ -466,6 +466,8 @@ def split_bilingual_subtitles(
     for block, translated in zip(blocks, translations):
         source = single_line(block.text)
         target = single_line(translated or "")
+        if target == source:
+            target = ""
         if not source:
             continue
         count = (max(len(source), len(target)) + max_chars - 1) // max_chars if max_chars > 0 else 1

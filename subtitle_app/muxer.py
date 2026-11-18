@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -621,42 +622,48 @@ def convert_to_mp4(video_path: Path, ffmpeg_bin: str, post: Callable,
         ("libx264", "aac", "全重编码 (libx264+aac)", cfg.translation.embed_timeout * 3),
     ]
 
-    best = None  # (mp4_path, is_trustworthy)，记录最后有效候选
-    for i, (vcodec, acodec, desc, timeout) in enumerate(attempts):
-        cmd = _build_mp4_cmd(ffmpeg_bin, video_path, mp4_path, vcodec, acodec)
-        cmd_str = " ".join(str(a) for a in cmd)
-        post({"type": "log", "message": f"转换 {video_path.name} → {mp4_path.name}（{desc}）...", "level": "INFO"})
+    try:
+        with tempfile.TemporaryDirectory(prefix=".subtitle_mp4_", dir=mp4_path.parent) as work_dir:
+            best_path = None
+            trustworthy = False
+            for attempt, (vcodec, acodec, desc, timeout) in enumerate(attempts, 1):
+                candidate = Path(work_dir) / f"attempt_{attempt}.mp4"
+                cmd = _build_mp4_cmd(ffmpeg_bin, video_path, candidate, vcodec, acodec)
+                post({"type": "log", "message": f"转换 {video_path.name} → {mp4_path.name}（{desc}）...",
+                      "level": "INFO"})
 
-        result = _run_ffmpeg(cmd, post, timeout,
-                             register_proc, unregister_proc,
-                             timeout_msg=f"转换超时（ffmpeg 超过 {timeout}s）")
-        if result is None:
-            post({"type": "log", "message": f"第 {i+1} 次尝试超时", "level": "WARNING"})
-            _cleanup_file(mp4_path)
-            continue
+                result = _run_ffmpeg(cmd, post, timeout,
+                                     register_proc, unregister_proc,
+                                     timeout_msg=f"转换超时（ffmpeg 超过 {timeout}s）")
+                if result is None:
+                    _cleanup_file(candidate)
+                    continue
 
-        proc, _, stderr = result
-        if proc.returncode == 0 and mp4_path.exists() and mp4_path.stat().st_size > _MP4_MIN_SIZE:
-            ok, detail = _verify_duration(video_path, mp4_path, ffmpeg_bin)
-            post({"type": "log", "message": f"第 {i+1} 次尝试输出 {mp4_path.name} | {detail}",
-                  "level": "WARNING" if not ok else "INFO"})
-            if ok:
-                return mp4_path, True
-            # 时长验证失败：记录候选并继续下一级（重编码可能修复）
-            best = (mp4_path, False)
-            post({"type": "log",
-                  "message": "时长验证未通过，继续尝试更高兼容性转换...", "level": "WARNING"})
-            continue
+                proc, _, stderr = result
+                if proc.returncode != 0 or not candidate.exists() or candidate.stat().st_size <= _MP4_MIN_SIZE:
+                    _log_ffmpeg_error(post, " ".join(cmd), proc, stderr)
+                    _cleanup_file(candidate)
+                    continue
 
-        _log_ffmpeg_error(post, cmd_str, proc, stderr)
-        _cleanup_file(mp4_path)
+                trustworthy, detail = _verify_duration(video_path, candidate, ffmpeg_bin)
+                post({"type": "log", "message": f"第 {attempt} 次尝试输出 {mp4_path.name} | {detail}",
+                      "level": "INFO" if trustworthy else "WARNING"})
+                _cleanup_file(best_path)
+                best_path = candidate
+                if trustworthy:
+                    break
+                if attempt < len(attempts):
+                    post({"type": "log", "message": "时长验证未通过，继续尝试更高兼容性转换...",
+                          "level": "WARNING"})
 
-    if best:
-        best_path, best_ok = best
-        # 后续级别的尝试可能超时并清理了 best 文件，返回前确认仍存在
-        if not best_path.exists():
-            return None, False
+            if best_path is None:
+                return None, False
+            best_path.rename(mp4_path)
+    except OSError as exc:
+        post({"type": "log", "message": f"保存转换结果失败: {exc}（保留原文件）", "level": "WARNING"})
+        return None, False
+
+    if not trustworthy:
         post({"type": "log",
               "message": "所有级别均未通过时长验证，保留原文件（禁止删除）", "level": "WARNING"})
-        return best
-    return None, False
+    return mp4_path, trustworthy

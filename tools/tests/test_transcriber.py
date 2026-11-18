@@ -293,10 +293,52 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             content = result_srt.read_text(encoding="utf-8")
             self.assertIn("Hello world.", content)
 
+    def test_audio_progress_coalesces_lines_and_reports_actual_duration(self):
+        proc = MagicMock(returncode=0)
+        proc.poll.return_value = 0
+        proc.stderr = iter(["time=00:00:01.00\n", "time=00:00:03.50\n", "summary\n"])
+        events = []
+
+        def drain_in_order(target, args, daemon):
+            return SimpleNamespace(start=lambda: target(*args))
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.touch()
+            with patch("subtitle_app.transcriber.subprocess.Popen", return_value=proc), \
+                    patch("subtitle_app.transcriber.threading.Thread", side_effect=drain_in_order):
+                result = self.t.extract_audio_with_progress(Path("test.mp4"), "ffmpeg", 3.0, audio, events.append)
+        self.assertEqual(result, 3.5)
+        self.assertEqual([event["percent"] for event in events], [0, 100])
+
+    def test_resume_fallback_does_not_mix_old_and_new_blocks(self):
+        from subtitle_app.srt_utils import parse_srt
+
+        for ffmpeg in (None, "ffmpeg"):
+            with self.subTest(ffmpeg=ffmpeg), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "test.wav"
+                video.touch()
+                checkpoint = root / "test.partial.srt"
+                checkpoint.write_text("1\n00:00:00,000 --> 00:00:01,000\nOld transcript.\n", encoding="utf-8")
+                model = MagicMock()
+                model.transcribe.return_value = (
+                    iter([SimpleNamespace(start=0.0, end=1.0, text="New transcript.")]),
+                    SimpleNamespace(language="en", duration=2.0),
+                )
+                with patch.object(self.t, "load_whisper_model", return_value=model), \
+                        patch("subtitle_app.transcriber.subprocess.Popen", return_value=MagicMock(returncode=1)):
+                    result, _ = self.t.transcribe_video(video, root, {
+                        **self.base_opts, "_ffmpeg": ffmpeg, "_ffprobe": None, "_is_audio": True,
+                        "extract_audio": False,
+                    })
+                self.assertEqual([block.text for block in parse_srt(result)], ["New transcript."])
+                self.assertFalse(checkpoint.exists())
+
     def test_stop_and_segment_error_save_checkpoint_once(self):
         from subtitle_app.srt_utils import parse_srt
 
-        for mode in ("stop", "error"):
+        for mode in ("stop", "stop_after_last_segment", "error"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 t = Transcriber()
                 state = {"stopped": False}
@@ -307,13 +349,14 @@ class TestTranscribeVideoBasic(unittest.TestCase):
                     if mode == "error":
                         raise ValueError("segment failed")
                     state["stopped"] = True
-                    yield SimpleNamespace(start=1.0, end=2.0, text="Must not be saved.")
+                    if mode == "stop":
+                        yield SimpleNamespace(start=1.0, end=2.0, text="Must not be saved.")
 
                 model = MagicMock()
                 model.transcribe.return_value = (segments(), SimpleNamespace(language="en"))
                 video = Path(d) / "test.mp4"
                 video.touch()
-                exception = RuntimeError if mode == "stop" else ValueError
+                exception = ValueError if mode == "error" else RuntimeError
                 with patch.object(t, "load_whisper_model", return_value=model), \
                         patch.object(t, "get_duration", return_value=100.0), \
                         patch.object(Transcriber, "_write_partial_srt",
@@ -388,7 +431,8 @@ class TestTranscribeVideoBasic(unittest.TestCase):
         completed = [SubtitleBlock(i + 1, float(i), i + 0.8, f"Saved {i}.") for i in range(120)]
         model = MagicMock()
         model.transcribe.return_value = (
-            iter([SimpleNamespace(start=0.0, end=0.8, text="Next sentence.")]), SimpleNamespace(language="en"))
+            iter([SimpleNamespace(start=0.0, end=0.8, text="Next sentence.")]),
+            SimpleNamespace(language="en", duration=80.2))
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory) / "test.wav"
             video.touch()
@@ -399,7 +443,7 @@ class TestTranscribeVideoBasic(unittest.TestCase):
                 Path(cmd[-1]).touch()
                 return fake_trim
             with patch.object(self.t, "load_whisper_model", return_value=model), \
-                    patch.object(self.t, "get_duration", return_value=200), \
+                    patch.object(self.t, "get_duration", return_value=0), \
                     patch("subtitle_app.transcriber.subprocess.Popen", side_effect=trim):
                 result, _ = self.t.transcribe_video(video, Path(directory),
                     {**self.base_opts, "post": events.append, "extract_audio": False,
@@ -410,6 +454,8 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             self.assertNotIn("Saved 100.", initial)
             self.assertFalse(any(e["type"] == "preview_append" for e in events))
             self.assertEqual(len(parse_srt(result)), 121)
+            segment_event = next(event for event in events if "generated" in event)
+            self.assertAlmostEqual(segment_event["percent"], 120.6 / 200 * 100)
 
 
 class TestAutoLangReuse(unittest.TestCase):

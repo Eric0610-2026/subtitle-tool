@@ -341,7 +341,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
         output = next(p["path"] for p in posts if p["type"] == "output_path")
         self.assertIn("汉字", Path(output).read_text(encoding="utf-8"))
 
-    def test_incomplete_translation_preserves_source_and_resumes(self):
+    def test_aborted_translation_preserves_source_and_resumes(self):
         from subtitle_app.translator import translate_only
         from subtitle_app.translation import IncompleteTranslation
         from subtitle_app.srt_utils import write_srt, parse_srt
@@ -360,19 +360,21 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                 opts = {"work_dir": d, "language": "en", "_ffmpeg": "ffmpeg",
                         "translation_only": translation_only, "_bump_translated": bump}
 
-                def translate(client, texts, context="", depth=0):
-                    return [{"id": i + 1, "zh": "你好" if t == "Hello" else t}
-                            for i, t in enumerate(texts)]
+                def translate(client, blocks, source_lang, is_bilingual, state_path,
+                              stop_check=None):
+                    from subtitle_app.srt_utils import save_json
+                    save_json(state_path, {
+                        "target_lang": "zh", "name_glossary": "",
+                        "done": {"0": "你好"}, "originals": {"0": "Hello", "1": "World"},
+                    })
+                    raise IncompleteTranslation(["你好", "World"], 1)
 
                 with patch("subtitle_app.translator.ensure_running", return_value=(True, "ok", False)), \
                         patch("subtitle_app.translator.embed_subtitles_to_video") as embed, \
-                        patch("subtitle_app.translation.TranslationClient._translate_batch", translate), \
-                        patch("subtitle_app.translation.TranslationClient._call_api_single_plain",
-                              return_value=[{"id": 1, "zh": "World"}]) as plain:
+                        patch("subtitle_app.translation.TranslationClient.translate_blocks", translate):
                     with self.assertRaises(IncompleteTranslation):
                         translate_only(source, root, video, 0, 1, opts, events.append)
                     embed.assert_not_called()
-                    plain.assert_called_once_with("World")
                 self.assertEqual(source.read_bytes(), original)
                 self.assertEqual(video.read_bytes(), b"original")
                 bump.assert_not_called()
@@ -394,6 +396,51 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                 self.assertFalse(partial.exists())
                 bump.assert_called_once()
                 self.assertIn("世界", (root / "test.srt").read_text(encoding="utf-8"))
+
+    def test_partial_translation_continues_video_embedding(self):
+        from subtitle_app.translator import translate_only
+        from subtitle_app.srt_utils import write_srt, parse_srt
+
+        for translation_only in (False, True):
+            with self.subTest(translation_only=translation_only), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                source = root / "test.en.srt"
+                blocks = [SubtitleBlock(1, 0, 1, "Hello"), SubtitleBlock(2, 1, 2, "World")]
+                write_srt(source, blocks, [b.text for b in blocks])
+                video = root / "test.mp4"
+                video.write_bytes(b"original")
+                events = []
+                bump = MagicMock()
+                opts = {"work_dir": d, "language": "en", "_ffmpeg": "ffmpeg",
+                        "translation_only": translation_only, "_bump_translated": bump}
+
+                def translate(client, texts, context="", depth=0):
+                    return [{"id": i + 1, "zh": "你好" if t == "Hello" else t}
+                            for i, t in enumerate(texts)]
+
+                def embed(video_path, subtitle_path, *args, **kwargs):
+                    texts = [b.text for b in parse_srt(subtitle_path)]
+                    self.assertTrue(any("你好" in t for t in texts))
+                    self.assertEqual(texts[-1], "World")
+                    self.assertFalse(any("World\nWorld" in t for t in texts))
+                    output = root / "test.mkv"
+                    output.write_bytes(b"merged")
+                    return output, True
+
+                with patch("subtitle_app.translator.ensure_running", return_value=(True, "ok", False)), \
+                        patch("subtitle_app.translator.embed_subtitles_to_video", side_effect=embed) as mux, \
+                        patch("subtitle_app.translation.TranslationClient._translate_batch", translate), \
+                        patch("subtitle_app.translation.TranslationClient._call_api_single_plain",
+                              return_value=[{"id": 1, "zh": "World"}]):
+                    translate_only(source, root, video, 0, 1, opts, events.append)
+                mux.assert_called_once()
+                bump.assert_called_once()
+                self.assertTrue((root / "test.mkv").exists())
+                self.assertFalse((root / "test.en.translate_state.json").exists())
+                self.assertTrue(any(e.get("level") == "WARNING" and "1/2" in e.get("message", "")
+                                    and "保留原文" in e["message"] for e in events))
+                self.assertTrue(any(e.get("percent") == 100 and "1 句保留原文" in e.get("detail", "")
+                                    for e in events))
 
     def test_translate_output_modes(self):
         """双语/纯译文写入对应内容；预览译文列不重复原文。"""

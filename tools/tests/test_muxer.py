@@ -655,25 +655,33 @@ class TestConvertToMp4(unittest.TestCase):
             self.assertEqual(v.read_bytes(), b"original")
             self.assertEqual(list(Path(d).glob("*.tmp.mp4")), [])
 
-    def test_best_file_cleaned_by_later_timeout(self):
-        """第一级验证失败记录 best，后续级别超时清理文件 → 返回 (None, False) 而非坏候选"""
-        with tempfile.TemporaryDirectory() as d:
-            v = self._video(d)
-            from subtitle_app.muxer import convert_to_mp4
-            calls = {"n": 0}
-            def level1_success_then_timeouts(cmd, post, timeout, register_proc=None,
-                                             unregister_proc=None, timeout_msg=None):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    return self._mock_success(cmd, post, timeout)
-                return None  # 后续级别超时
-            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=level1_success_then_timeouts), \
-                 patch("subtitle_app.muxer._verify_duration", return_value=(False, "时长不符")):
-                posts = []
-                mp4, trustworthy = convert_to_mp4(v, "ffmpeg.exe", posts.append)
-            self.assertIsNone(mp4)
+    def test_failed_retries_preserve_completed_unverified_candidate(self):
+        from subtitle_app.muxer import convert_to_mp4
+
+        content = b"original attempt" * 256
+        with tempfile.TemporaryDirectory() as directory:
+            video = self._video(directory)
+            output = video.with_suffix(".mp4")
+
+            def produce_output(cmd, post, timeout, *args, **kwargs):
+                candidate = Path(cmd[-1])
+                self.assertFalse(output.exists())
+                if "aac" not in cmd:
+                    candidate.write_bytes(content)
+                    return MagicMock(returncode=0), "", ""
+                candidate.write_bytes(b"incomplete")
+                if "libx264" not in cmd:
+                    return None
+                return MagicMock(returncode=1), "", "re-encoding failed"
+
+            with patch("subtitle_app.muxer._run_ffmpeg", side_effect=produce_output) as run, \
+                    patch("subtitle_app.muxer._verify_duration", return_value=(False, "时长不符")):
+                mp4, trustworthy = convert_to_mp4(video, "ffmpeg.exe", [].append)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(mp4, output)
             self.assertFalse(trustworthy)
-            self.assertFalse((Path(d) / "movie.mp4").exists())
+            self.assertEqual(output.read_bytes(), content)
+            self.assertCountEqual(Path(directory).iterdir(), [video, output])
 
 if __name__ == "__main__":
     unittest.main()

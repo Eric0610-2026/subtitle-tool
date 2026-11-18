@@ -336,7 +336,7 @@ class TestWrapSubtitleText(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         for target in ("短句", ""):
             blocks, texts = split_bilingual_subtitles([SubtitleBlock(1, 0, 2, "短句")], [target])
-            self.assertEqual(texts, ["短句\n短句" if target else "短句"])
+            self.assertEqual(texts, ["短句"])
         blocks, texts = split_bilingual_subtitles([SubtitleBlock(1, 0, 2, "あ")], ["译" * 80])
         self.assertEqual("".join(t.splitlines()[1] for t in texts), "译" * 80)
         self.assertTrue(all(t.splitlines()[0] == "あ" for t in texts))

@@ -682,27 +682,29 @@ class TranslationClient:
                     "originals": sent_originals,
                     "updated_at": datetime.now().isoformat(),
                 })
-            still = sum(1 for gsid, _, _ in flat if not str(sent_trans.get(gsid, "")).strip())
-            if still:
-                self.post_ui({
-                    "type": "log",
-                    "message": f"补翻后仍有 {still} 句无译文（将尽量用已有部分组装）",
-                    "level": "WARNING",
-                })
 
         if stop_check is not None and stop_check():
             self._abort_translation(batch_futures, state_path, sent_originals, sent_trans)
             raise TranslationStopped()
 
         missing_count = sum(not sent_trans.get(gsid, "").strip() for gsid, _, _ in flat)
-        if missing_count:
+        if missing_count == len(flat):
             self._abort_translation([], state_path, sent_originals, sent_trans)
             raise IncompleteTranslation(_reassemble_blocks(blocks, flat, sent_trans), missing_count)
+        if missing_count:
+            self.post_ui({
+                "type": "log",
+                "message": f"补翻后仍有 {missing_count}/{len(flat)} 句无有效译文，"
+                           "这些句子保留原文，继续输出字幕与视频内嵌",
+                "level": "WARNING",
+            })
 
-        # Step 4: 仅完整翻译才告知 UI 完成
+        # Step 4: 补翻结束后告知 UI 完成，缺失句由组装逻辑保留原文。
         self.post_ui({
             "type": "progress", "percent": 100,
-            "stage": "翻译", "detail": f"翻译完成（共 {len(blocks)} 条）",
+            "stage": "翻译", "detail": (
+                f"翻译处理完成（共 {len(blocks)} 条，{missing_count} 句保留原文）"
+                if missing_count else f"翻译完成（共 {len(blocks)} 条）"),
             "total": len(blocks), "cache": len(self.cache),
         })
 

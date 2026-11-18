@@ -5,6 +5,7 @@
 """
 import gc
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -155,7 +156,7 @@ class Transcriber:
                "-ac", str(cfg.whisper.audio_channels), str(audio_path)]
         post({"type": "progress", "percent": 0, "stage": "提取音频", "detail": "ffmpeg 提取音频中..."})
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW)
         if self._register_proc:
@@ -170,7 +171,8 @@ class Transcriber:
         reader.start()
 
         last_progress_time = 0.0
-        last_report = 0.0
+        last_report = float("-inf")
+        last_reported_time = 0.0
 
         try:
             while True:
@@ -183,32 +185,26 @@ class Transcriber:
                         proc.wait(timeout=2)
                     raise RuntimeError("用户停止")
 
-                new_lines: list = []
+                finished = stderr_done.is_set() and proc.poll() is not None
                 with stderr_lock:
                     new_lines = list(stderr_lines)
                     stderr_lines.clear()
-                for line in new_lines:
-                    t = _parse_ffmpeg_time(line)
-                    if t is not None and duration > 0:
-                        last_progress_time = t
-                        pct = (t / duration) * 100
-                        post({"type": "progress", "percent": pct, "stage": "提取音频",
-                              "detail": f"音频提取 {fmt_duration(t)}/{fmt_duration(duration)}"})
+                for line in reversed(new_lines):
+                    progress_time = _parse_ffmpeg_time(line)
+                    if progress_time is not None:
+                        last_progress_time = progress_time
+                        break
 
-                now = time.time()
-                if now - last_report > 0.5 and duration > 0 and last_progress_time > 0:
-                    pct_inner = (last_progress_time / duration) * 100
-                    post({"type": "progress", "percent": pct_inner, "stage": "提取音频",
+                now = time.monotonic()
+                if (duration > 0 and last_progress_time != last_reported_time
+                        and (finished or now - last_report >= 0.5)):
+                    percent = min(100, (last_progress_time / duration) * 100)
+                    post({"type": "progress", "percent": percent, "stage": "提取音频",
                           "detail": f"音频提取 {fmt_duration(last_progress_time)}/{fmt_duration(duration)}"})
                     last_report = now
+                    last_reported_time = last_progress_time
 
-                if stderr_done.is_set() and proc.poll() is not None:
-                    with stderr_lock:
-                        for line in stderr_lines:
-                            t = _parse_ffmpeg_time(line)
-                            if t is not None:
-                                last_progress_time = t
-                        stderr_lines.clear()
+                if finished:
                     break
 
                 time.sleep(0.05)
@@ -374,7 +370,6 @@ class Transcriber:
                     if not ffmpeg:
                         # 无法裁剪时若继续沿用旧段落，会从整段开头再转一遍旧内容导致 SRT 重复。
                         logger.warning("缺少 ffmpeg，无法按断点裁剪音频续转，回退为从头转写，避免字幕重复")
-                        completed_blocks = []
                         resume_offset = 0.0
                     else:
                         trimmed_path = temp_dir / "audio_trimmed.wav"
@@ -388,8 +383,7 @@ class Transcriber:
                             str(trimmed_path),
                         ]
                         trim_proc = subprocess.Popen(
-                            trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace",
+                            trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             creationflags=subprocess.CREATE_NO_WINDOW)
                         if self._register_proc:
                             self._register_proc(trim_proc)
@@ -412,13 +406,18 @@ class Transcriber:
                                 self._unregister_proc(trim_proc)
                         if not trim_ok or trim_proc.returncode != 0 or not trimmed_path.exists():
                             logger.warning("音频裁剪失败，回退为从头转写")
-                            completed_blocks = []
                             resume_offset = 0.0
                         else:
                             audio_path = trimmed_path
                             post({"type": "log",
                                   "message": f"音频已裁剪：从 {fmt_duration(resume_offset)} 开始",
                                   "level": "INFO"})
+
+                if self.stop_check and self.stop_check():
+                    raise RuntimeError("用户停止")
+                if not resume_offset:
+                    completed_blocks.clear()
+                    blocks.clear()
 
                 model = self.load_whisper_model(
                     model_dir, device, compute_type, post)
@@ -459,7 +458,9 @@ class Transcriber:
                     initial_prompt=init_prompt,
                     word_timestamps=use_word_timestamps)
                 if duration <= 0:
-                    duration = getattr(info, "duration", 0.0) or 0.0
+                    remaining_duration = getattr(info, "duration", 0.0) or 0.0
+                    if remaining_duration > 0:
+                        duration = resume_offset + remaining_duration
                 detected_lang = info.language
                 if language == "auto" and reuse_lang and self._cached_auto_lang is None:
                     self._cached_auto_lang = detected_lang
@@ -518,6 +519,8 @@ class Transcriber:
                             Transcriber._write_partial_srt(partial_srt, blocks)
                         except OSError as e:
                             logger.warning("断点写入失败: %s", e)
+                if self.stop_check and self.stop_check():
+                    raise RuntimeError("用户停止")
                 sanitize_blocks(blocks)
                 blocks = split_long_blocks(blocks)
                 # split 可能在强制切分路径上再生空块，再净化一次
@@ -601,7 +604,9 @@ class Transcriber:
             try:
                 stdout, stderr = proc.communicate(timeout=cfg.translation.ffprobe_timeout)
                 if proc.returncode == 0:
-                    return float(stdout.strip())
+                    duration = float(stdout.strip())
+                    if math.isfinite(duration) and duration > 0:
+                        return duration
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
