@@ -1,6 +1,6 @@
 # 🎬 本地字幕生成与双语翻译工具
 
-基于 **faster-whisper** 的本地语音转写 + **AI** 翻译的 Windows 桌面工具。拖拽视频/音频即可生成字幕，支持批量处理、两阶段顺序调度和 MKV 字幕内嵌。
+基于 **Electron** 的 Windows 桌面工具，使用 Python 后端执行本地语音转写和 AI 翻译。拖拽视频或音频即可生成字幕，支持批量处理、两阶段顺序调度和 MKV 字幕内嵌。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python">
@@ -11,11 +11,11 @@
 
 - [完整使用说明书](docs/使用说明书.md)：操作、设置、输出文件与故障排查。
 - [开发与维护](docs/开发与维护.md)：测试、修改约定与交付检查。
-- [前端美化变更说明](docs/前端美化变更说明-2026-10-04.md)：五项视觉调整、页面覆盖、效果截图与验证范围。
+- [前端美化历史记录](docs/前端美化变更说明-2026-10-04.md)：五项视觉调整、页面覆盖、效果截图与验证范围。
 - [AGENTS.md](AGENTS.md)：模块职责、架构约束与 AI 协作要求。
 - [更新日志](CHANGELOG.md)：v3.3 变化说明与历史版本。
 
-依赖和模型准备完成后，转写与翻译在本机运行；首次启动或依赖环境变化时，入口可能联网安装依赖。
+依赖在安装步骤中下载。准备好依赖和模型后，转写与翻译均在本机运行。
 
 ---
 
@@ -40,8 +40,8 @@
 
 - **操作系统**：Windows 10/11
 - **Python**：3.10+（[下载地址](https://www.python.org/downloads/windows/)，安装时务必勾选 **Add Python to PATH**）
+- **Node.js**：22.12+（用于安装 Electron 和从源码启动）
 - **GPU**（强烈推荐）：NVIDIA 显卡 + [CUDA 12.x](https://developer.nvidia.com/cuda-downloads) + [cuDNN](https://developer.nvidia.com/cudnn)；转写可用纯 CPU，速度取决于硬件、模型和音频长度
-- **Visual C++ Redistributable**：[下载链接](https://aka.ms/vs/17/release/vc_redist.x64.exe)（PySide6 必需，缺少则启动闪退）
 
 ---
 
@@ -61,11 +61,11 @@ cd subtitle-tool
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r tools/requirements.txt
+npm ci
+npx install-electron
 ```
 
 如需 NVIDIA GPU 加速，先按 [PyTorch 安装页面](https://pytorch.org/get-started/locally/) 选择适合本机驱动的 CUDA 构建，用 `.\.venv\Scripts\python.exe -m pip` 安装，再执行上方的依赖清单命令。运行 `.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"` 验证；输出 `False` 时检查驱动和 PyTorch 构建。纯 CPU 运行时，将 `subtitle_app/config.json` 中的 `whisper.device` 设为 `cpu`，`whisper.compute_type` 设为 `int8`。
-
-也可跳过手动安装：入口首次运行会尝试联网安装依赖；失败时弹出错误信息，可在终端运行上述安装命令。以后依赖清单或 Python 环境改变时，入口会重新执行安装。
 
 ### 3️⃣ 准备 ffmpeg（必需）
 
@@ -101,10 +101,10 @@ Git 仓库**不包含** llama.cpp 可执行文件和 Hy-MT2 模型。将 Windows
 if (-not (Test-Path subtitle_app/config.json)) {
     Copy-Item subtitle_app/config.example.json subtitle_app/config.json
 }
-.\.venv\Scripts\python.exe subtitle_app/subtitle_app.py
+npm start
 ```
 
-双击项目根目录的 `字幕工具.exe`，启动时显示主界面、不显示命令行窗口。EXE 自动定位项目目录，优先使用 `.venv/Scripts/pythonw.exe`，否则从系统 PATH 查找 `pythonw.exe` 或 `pyw.exe`；无需绑定项目的绝对路径。
+也可以双击项目根目录的 `字幕工具.exe`。启动器从项目目录加载 Electron，后端优先使用 `.venv/Scripts/python.exe`，其次使用系统 PATH 中的 Python。已有配置、模型、缓存和任务断点可直接复用。
 
 先用短文件验证转写，再开启翻译验证本地服务。翻译失败时检查上述两个目录和 `cache/.llama-server.log`。
 
@@ -121,7 +121,7 @@ if (-not (Test-Path subtitle_app/config.json)) {
 
 > **移动项目目录**：先彻底退出程序，再移动整个文件夹（包括 `字幕工具.exe`、模型、工具和所需缓存），移动后双击新目录中的 `字幕工具.exe` 即可。项目内模型应使用默认相对路径，或通过设置界面永久保存为相对路径；缓存和日志也随项目目录定位。项目外部的媒体、模型或 Python 安装位置发生变化时，仍需更新对应配置或环境；复制到另一台电脑还需按下方说明准备运行环境。
 
-> **换电脑迁移**：从旧电脑复制 `subtitle_app/config.json`（检查绝对路径）、`models/` 和所需的 `tools/llama-cpp/`、`tools/ffmpeg.exe`、`tools/ffprobe.exe`。若要保留翻译缓存、处理记录和字幕备份，再复制 `cache/` 与 `logs/srt_backup/`。这些目录或文件不会随 Git 克隆；新电脑仍需安装 Python 和显卡驱动。旧版 `cache/.deps_installed` 标记会自动失效；若复制缓存后发现新环境缺依赖，可删除该标记再启动。
+> **换电脑迁移**：从旧电脑复制 `subtitle_app/config.json`（检查绝对路径）、`models/` 和所需的 `tools/llama-cpp/`、`tools/ffmpeg.exe`、`tools/ffprobe.exe`。若要保留翻译缓存、处理记录和字幕备份，再复制 `cache/` 与 `logs/srt_backup/`。这些目录或文件不会随 Git 克隆。新电脑按上面的安装步骤准备 Python、Node.js 和所需显卡驱动。
 
 ---
 
@@ -142,11 +142,9 @@ if (-not (Test-Path subtitle_app/config.json)) {
 乱序字幕按起始时间稳定排序后净化，保留合法时间和对应文本；断点间隔为 0 或负数时
 回退到 30 段。字幕匹配不区分大小写，备份、译文及转写断点不会被选作续翻源。
 
-> **下载器联动**：下载器每批下载结束后选择“是”，本工具会被打开或激活，并把成功视频加入「视频/音频生成字幕」队列；不会自动开始处理，重复或已处理的视频会跳过。扫描目录和下载器导入均按完整路径匹配已完成记录，不同目录的同名文件会分别添加。
+> **下载器联动**：下载器每批下载结束后选择“是”，本工具会被打开或激活，并把成功视频加入「待处理文件」。手动点击「开始处理」即可运行。扫描目录和下载器导入均按完整路径跳过已完成记录，不同目录的同名文件会分别添加。
 
 > **后台运行与退出**：有活动任务时，点窗口关闭按钮会把程序隐藏到 Windows 右下角通知区域，任务继续处理；空闲时则直接保存状态、清理模型与本地翻译服务并退出，不弹确认。活动任务包括处理、手动嵌入或提取、模型加载或卸下，以及等待嵌入确认和停止收尾；仅添加文件但未开始、模型已加载待命均算空闲。左键单击托盘图标、右键选择「打开窗口」，或再次运行 `字幕工具.exe`，均可恢复隐藏的原窗口；再次运行不会创建第二个常驻进程。右键选择「彻底退出」也可关闭程序，任务仍在运行时会先确认。隐藏期间如需确认嵌入，会收到系统通知；打开窗口后再处理。
-
-可用按钮、复选框及 Qt 提示框按钮统一显示手形指针，禁用时恢复箭头；Windows 原生文件选择器由系统管理。
 
 ### 输出文件说明
 
@@ -167,6 +165,8 @@ if (-not (Test-Path subtitle_app/config.json)) {
 ### 功能详解
 
 - **翻译开关**：不勾选翻译时使用原文字幕；视频仍会尝试自动内嵌，未内嵌时保留原文 SRT
+- **重复文字清理**：生成字幕时，同一个字或字母连续出现 4 次及以上会自动压成 1 次（如「啊啊啊啊！」→「啊！」），保留短重复、数字和标点。
+- **字幕质检**：在字幕预览点击「字幕质检」可检查全文，点击问题跳到分页编辑器中的对应段。检查时间轴重叠、停留不足 0.8 秒和阅读速度过快（以中日韩字符为主时 12 字符/秒，其他 20 字符/秒，空白不计）；本次翻译保留原文的段也会标记。质检只提示，不自动改字幕；重新打开已有 SRT 时不会推测漏译。
 - **MKV 内嵌**：在「更多设置」中可开启「嵌入前暂停」，在弹窗中预览/编辑字幕后再决定是否嵌入。自动处理等待确认时可停止任务，取消会唤醒等待并关闭或跳过确认；停止优先于同时发生的确认或超时。嵌入及清理边界检查停止，阻止尚未执行的嵌入、源文件清理和完成记录；已删除的文件不能回滚。未取消时，等待一小时超时仍会自动继续嵌入。
 - **提取内嵌字幕**：点击「📤 提取字幕」按钮，选择含内嵌字幕的视频文件（如 MKV），批量提取其第一个字幕流为独立 SRT；图像字幕（PGS/VobSub 等）无法提取为文本 SRT。勾选「提取后转为 MP4」可同时将视频转换为 MP4（不带字幕，流复制优先、失败自动降级重编码），仅在时长验证通过后删除原文件。转换非 MP4 源文件时，若转码完成但没有通过时长验证的结果，则保留最近一次完整候选与原视频。
 - **两阶段调度**：先批量转写全部文件，再统一翻译+内嵌，正常情况下错峰使用 GPU；手动同时加载两种模型或服务关闭失败时，不保证只驻留一个模型
@@ -183,7 +183,7 @@ if (-not (Test-Path subtitle_app/config.json)) {
 
 所有参数集中在 `subtitle_app/config.json`（从 `config.example.json` 复制创建）。
 
-**推荐做法（无需手改 JSON）**：复制 `config.example.json` 为 `config.json` 后，启动应用，在「⚙ 更多设置」对话框中完成个性化配置——默认视频目录、模型目录、识别语言、目标语言、语言检测复用、字幕备份份数等。点击「💾 本次有效」会应用到当前会话随后启动的任务；点击「💾 永久保存（下次默认）」还会写回 `config.json`，供下次启动时读取。已开始的任务始终使用启动时的设置快照；手动编辑 `config.json` 后请重启应用。若需回退，直接删除 `config.json` 即可恢复默认。
+在「更多设置」中可调整默认视频目录、模型目录、识别语言、目标语言、语言检测复用和字幕备份份数。「本次有效」应用到当前会话随后启动的任务，「永久保存」同时创建或更新 `config.json`。已开始的任务沿用启动时的设置。手动编辑 `config.json` 后请重启应用。
 
 ### 核心配置项
 
@@ -206,13 +206,11 @@ if (-not (Test-Path subtitle_app/config.json)) {
 ## 📂 项目结构
 
 ```
-├── 字幕工具.exe                   # 带应用图标的可移动启动入口，直接调用 Python
+├── 字幕工具.exe                   # 可移动的 Windows Electron 启动入口
+├── package.json                   # Electron 依赖与启动命令
+├── electron/                      # 窗口、界面与系统集成
 ├── subtitle_app/                  # 主应用包
-│   ├── subtitle_app.py            # 入口：自动安装依赖后启动 Qt 界面
-│   ├── qt_app.py                  # PySide6 主窗口 UI + 事件处理
-│   ├── panels.py                  # 进度条、字幕预览、日志面板
-│   ├── widgets.py                 # 拖放文件列表、日志条目等自定义控件
-│   ├── dialogs.py                 # 设置、历史记录、缓存及本地模型管理对话框
+│   ├── electron_backend.py        # Electron 与字幕处理流程之间的接口
 │   ├── transcriber.py             # 音频提取 + faster-whisper 语音转写
 │   ├── translation.py             # 本地翻译客户端（缓存、批量、断点续翻）
 │   ├── translator.py              # 翻译阶段编排（翻译 → 落盘 → MKV 内嵌）
@@ -253,7 +251,7 @@ python -m unittest discover -s tools/tests -v
 # 运行单个测试文件
 python -m unittest tools.tests.test_translator -v
 python -m unittest tools.tests.test_muxer -v
-python -m unittest tools.tests.test_widgets -v
+python -m unittest tools.tests.test_subtitle_app -v
 ```
 
 测试数量以实际运行输出为准，模型与媒体处理调用使用模拟对象，无需加载真实模型；翻译编排测试的备份目录隔离在临时目录中。模型管理回归见 `test_model_manager.py`，外部服务识别与关闭边界见 `test_windows_service.py`；终止操作使用模拟对象，原生检查只读取测试进程和临时监听。
@@ -272,7 +270,7 @@ python -m unittest tools.tests.test_widgets -v
 
 | 组件 | 用途 |
 |------|------|
-| [PySide6](https://doc.qt.io/qtforpython/) | 桌面 GUI 框架 |
+| [Electron](https://www.electronjs.org/) | 桌面界面及 Windows 集成 |
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | 本地语音识别（CTranslate2 加速） |
 | [ffmpeg](https://ffmpeg.org/) | 音频提取、字幕内嵌（MP4 → MKV 重封装） |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | 本地 Hy-MT2 翻译模型推理服务 |

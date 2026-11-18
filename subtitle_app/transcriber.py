@@ -19,7 +19,7 @@ from .config import cfg
 from .srt_utils import (
     make_post_mapper, safe_stem, fmt_duration, seconds_to_srt_time,
     SubtitleBlock, sanitize_blocks, parse_srt, split_sentences,
-    PREVIEW_BLOCK_LIMIT,
+    PREVIEW_BLOCK_LIMIT, collapse_repeated_letters,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,6 +317,8 @@ class Transcriber:
                 try:
                     parsed = parse_srt(partial_srt)
                     if parsed:
+                        for block in parsed:
+                            block.text = collapse_repeated_letters(block.text)
                         completed_blocks = parsed
                         resume_offset = parsed[-1].end
                         post({"type": "log",
@@ -484,7 +486,7 @@ class Transcriber:
                         # 公共异常处理保存 checkpoint，避免停止时重复写盘。
                         raise RuntimeError("用户停止")
                     # ── 跳过空文本的 segment（Whisper 在长静音段偶发输出空 seg）──
-                    text = seg.text.strip()
+                    text = collapse_repeated_letters(seg.text.strip())
                     if not text:
                         continue
                     # ── 偏移时间戳 ──
@@ -512,7 +514,7 @@ class Transcriber:
                         # 标准 SRT 块结构（序号/时间/文本），供预览表格解析
                         time_range = f"{seconds_to_srt_time(seg_start)} --> {seconds_to_srt_time(seg_end)}"
                         t_post({"type": "preview_append",
-                                "message": f"{len(blocks)}\n{time_range}\n{seg.text.strip()}"})
+                                "message": f"{len(blocks)}\n{time_range}\n{text}"})
                     # ── 定期写入断点文件 ──
                     if checkpoint_enabled and partial_srt and len(blocks) % checkpoint_interval == 0:
                         try:

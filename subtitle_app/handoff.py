@@ -31,9 +31,3 @@ def decode_handoff_request(raw: bytes) -> Tuple[Optional[List[str]], Optional[st
             return None, "文件路径无效"
         cleaned.append(path.strip())
     return cleaned, None
-
-
-def encode_handoff_response(ok: bool, **extra) -> bytes:
-    """将处理结果编码为单行 JSON 响应。"""
-    response = {"ok": ok, **extra}
-    return (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")

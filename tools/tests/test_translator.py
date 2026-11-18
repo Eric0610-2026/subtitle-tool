@@ -361,7 +361,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                         "translation_only": translation_only, "_bump_translated": bump}
 
                 def translate(client, blocks, source_lang, is_bilingual, state_path,
-                              stop_check=None):
+                              stop_check=None, fallback_indexes=None):
                     from subtitle_app.srt_utils import save_json
                     save_json(state_path, {
                         "target_lang": "zh", "name_glossary": "",
@@ -399,7 +399,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
 
     def test_partial_translation_continues_video_embedding(self):
         from subtitle_app.translator import translate_only
-        from subtitle_app.srt_utils import write_srt, parse_srt
+        from subtitle_app.srt_utils import write_srt, parse_srt, split_srt_blocks
 
         for translation_only in (False, True):
             with self.subTest(translation_only=translation_only), tempfile.TemporaryDirectory() as d:
@@ -415,7 +415,7 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                         "translation_only": translation_only, "_bump_translated": bump}
 
                 def translate(client, texts, context="", depth=0):
-                    return [{"id": i + 1, "zh": "你好" if t == "Hello" else t}
+                    return [{"id": i + 1, "zh": "你好，欢迎来到这里。我们很高兴见到你，希望你在这里一切顺利。" if t == "Hello" else t}
                             for i, t in enumerate(texts)]
 
                 def embed(video_path, subtitle_path, *args, **kwargs):
@@ -441,15 +441,21 @@ class TestTranslateOnlyWithTranslation(unittest.TestCase):
                                     and "保留原文" in e["message"] for e in events))
                 self.assertTrue(any(e.get("percent") == 100 and "1 句保留原文" in e.get("detail", "")
                                     for e in events))
+                preview = next(event for event in events if event["type"] == "preview")
+                preview_blocks = split_srt_blocks(preview["message"])
+                self.assertEqual(preview["fallback_rows"], [len(preview_blocks) - 1])
+                self.assertEqual(preview_blocks[-1].splitlines()[2], "World")
 
     def test_translate_output_modes(self):
         """双语/纯译文写入对应内容；预览译文列不重复原文。"""
         from subtitle_app.srt_utils import parse_srt
         for translation_only in (False, True):
             with self.subTest(translation_only=translation_only):
-                posts, mocks = self._run(srt_texts=["Hello", "World"],
+                posts, mocks = self._run(srt_texts=["Helloooo", "World"],
                                          translation_only=translation_only)
                 mocks["ensure_running"].assert_called_once()
+                sent_blocks = mocks["client"].translate_blocks.call_args.args[0]
+                self.assertEqual(sent_blocks[0].text, "Hello")
                 preview = next(p["message"] for p in posts if p["type"] == "preview")
                 self.assertEqual(preview.splitlines()[:4], [
                     "1", "00:00:00,000 --> 00:00:02,000", "Hello", "Hello（中文）"])
@@ -694,19 +700,6 @@ class TestPruneBackups(unittest.TestCase):
                 (Path(d) / f"t{i}.srt").write_text("x", encoding="utf-8")
             _prune_backups(Path(d), 0)
             self.assertEqual(len(list(Path(d).glob("*.srt"))), 5)
-
-
-class TestBatchSizePersistenceField(unittest.TestCase):
-    """永久保存批大小：qt_app._batch_size_save_field"""
-
-    def test_field_selection(self):
-        from subtitle_app.qt_app import _batch_size_save_field
-        # 自定义 → batch_size
-        self.assertEqual(
-            _batch_size_save_field({"translation_batch_size": 50}),
-            ("batch_size", 50))
-        # 等于默认值（None=跟随 config）→ 不覆盖 config
-        self.assertIsNone(_batch_size_save_field({"translation_batch_size": None}))
 
 
 if __name__ == "__main__":

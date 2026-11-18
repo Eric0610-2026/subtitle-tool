@@ -16,7 +16,7 @@ from .config import cfg
 from .srt_utils import (
     safe_stem, parse_srt, sanitize_blocks, write_srt, seconds_to_srt_time, has_chinese, to_simplified,
     load_json, save_json, IGNORE_FILE,
-    match_video_for_subtitle, split_bilingual_subtitles,
+    match_video_for_subtitle, split_bilingual_subtitles, collapse_repeated_letters,
 )
 from .translation import TranslationClient, TranslationStopped, IncompleteTranslation
 from .muxer import embed_subtitles_to_video
@@ -164,6 +164,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
 
     post({"type": "log", "message": f"解析字幕: {source_srt.name}", "level": "INFO"})
     blocks = parse_srt(source_srt)
+    for block in blocks:
+        block.text = collapse_repeated_letters(block.text)
     sanitize_blocks(blocks)  # 过滤空文本条目
     if not blocks:
         raise ValueError(f"字幕没有有效区块，请检查格式或编码: {source_srt}")
@@ -172,6 +174,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         return
 
     translated_srt: Optional[Path] = None
+    fallback_rows = set()
     if translate_enabled:
         post({"type": "log", "message": f"开始翻译（{len(blocks)} 条字幕）...", "level": "INFO"})
         cache_path = work_dir / "cache" / ".subtitle_translation_cache.json"
@@ -198,7 +201,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         # 本地 llama-server 以 --parallel 1 运行：批次并发固定 1，
         # 多线程并发只会排队等待，还有把请求拖过 API 超时的风险
         send_all = opts.get("send_all", False)
-        # 由 qt_app._build_opts 在任务开始前解析为具体值，不能在这里回读 cfg。
+        # 后端在任务开始前冻结批大小，处理中不回读设置。
         # 否则配置保存/重载会让同一任务的后续文件使用不同批大小。
         _bs = opts.get("translation_batch_size", cfg.translation.batch_size or 20)
         client = TranslationClient(cache_path, post,
@@ -226,12 +229,15 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
                     post({"type": "log", "message": "本地 Hy-MT2 服务已自动启动（首次加载模型需数秒），开始翻译", "level": "INFO"})
                 need_blocks = [blocks[i] for i in need_translate_idx]
                 is_bilingual = not translation_only
+                fallback_indexes: set[int] = set()
                 need_texts = client.translate_blocks(need_blocks, detected_lang,
                                                      is_bilingual, state_path,
-                                                     stop_check=is_stopped)
+                                                     stop_check=is_stopped,
+                                                     fallback_indexes=fallback_indexes)
+                fallback_rows = {need_translate_idx[index] for index in fallback_indexes}
                 zh_texts = [""] * len(blocks)
                 for j, i in enumerate(need_translate_idx):
-                    zh_texts[i] = need_texts[j]
+                    zh_texts[i] = collapse_repeated_letters(need_texts[j])
                 for i in already_translated_idx:
                     zh_texts[i] = blocks[i].text
             else:
@@ -240,9 +246,10 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         except IncompleteTranslation as e:
             partial_texts = [b.text for b in blocks]
             for i, text in zip(need_translate_idx, e.texts):
-                partial_texts[i] = text
+                partial_texts[i] = collapse_repeated_letters(text)
             if not translation_only:
-                partial_blocks, partial_texts = split_bilingual_subtitles(blocks, partial_texts)
+                partial_blocks, partial_texts = split_bilingual_subtitles(
+                    blocks, partial_texts, collapse_repeats=True)
             else:
                 partial_blocks = blocks
             partial_path = source_srt.with_name(source_srt.stem + ".partial.srt")
@@ -264,7 +271,11 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         elif not is_chinese_source:
             missing_zh = sum(not (zh or "").strip() for zh in zh_texts)
             original_count = len(blocks)
-            blocks, final_texts = split_bilingual_subtitles(blocks, zh_texts)
+            source_indexes = [] if fallback_rows else None
+            blocks, final_texts = split_bilingual_subtitles(
+                blocks, zh_texts, source_indexes=source_indexes, collapse_repeats=True)
+            if source_indexes is not None:
+                fallback_rows = {row for row, source_index in enumerate(source_indexes) if source_index in fallback_rows}
             if missing_zh:
                 post({
                     "type": "log",
@@ -277,7 +288,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
         translated_srt = source_srt.with_name(f"{safe_stem(item.name)}.translated.tmp.srt")
         if is_chinese_source:
             post({"type": "log", "message": "检测到中文源，转换为简体中文...", "level": "INFO"})
-            final_texts = [to_simplified(t) for t in final_texts]
+            final_texts = [collapse_repeated_letters(to_simplified(t)) for t in final_texts]
         write_srt(translated_srt, blocks, final_texts)
 
         # 标准 SRT 块结构（序号/时间/原文/译文），供预览表格解析；
@@ -289,7 +300,8 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             preview_lines.append(b.text.strip())
             preview_lines.append(_preview_translation(b.text, t))
             preview_lines.append("")
-        post({"type": "preview", "message": "\n".join(preview_lines)})
+        post({"type": "preview", "message": "\n".join(preview_lines),
+              "fallback_rows": sorted(fallback_rows), "paired_preview": True})
 
         if state_path and state_path.exists():
             try:
@@ -308,7 +320,7 @@ def translate_only(source_srt: Path, output_dir: Path, item: Path,
             preview_lines.append(b.text)
             preview_lines.append(t)
             preview_lines.append("")
-        post({"type": "preview", "message": "\n".join(preview_lines)})
+        post({"type": "preview", "message": "\n".join(preview_lines), "paired_preview": True})
         # 即使不翻译，也生成临时字幕文件用于嵌入 MKV
         post({"type": "log", "message": "AI 翻译已关闭，使用原文字幕嵌入", "level": "INFO"})
         translated_srt = source_srt.with_name(f"{safe_stem(item.name)}.translated.tmp.srt")

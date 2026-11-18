@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """下载器导入协议的无界面单元测试。"""
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
+from subtitle_app import electron_backend
 from subtitle_app.handoff import (
     MAX_HANDOFF_PATHS,
     decode_handoff_request,
-    encode_handoff_response,
 )
 
 
@@ -47,14 +50,14 @@ class TestHandoffProtocol(unittest.TestCase):
         self.assertIsNone(paths)
         self.assertEqual(error, "文件列表无效")
 
-    def test_response_is_single_line_json(self):
-        response = encode_handoff_response(True, added=2, skipped=1)
-
-        self.assertTrue(response.endswith(b"\n"))
-        self.assertEqual(
-            json.loads(response.decode("utf-8")),
-            {"ok": True, "added": 2, "skipped": 1},
-        )
+    def test_backend_handoff_reports_added_skipped_and_invalid(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(electron_backend, "ROOT", Path(d)):
+            file = Path(d) / "样片.mp4"
+            file.touch()
+            backend = electron_backend.DesktopBackend(Mock())
+            request = json.dumps({"action": "add_media", "paths": [str(file), str(file), "invalid.mp4"]})
+            self.assertEqual(backend.handoff(request), {"ok": True, "added": 1, "skipped": 1, "invalid": 1})
+            self.assertEqual(backend.jobs, [file.resolve()])
 
 
 if __name__ == "__main__":

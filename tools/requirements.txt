@@ -1,10 +1,5 @@
- # 字幕生成与双语翻译工具 - Python 依赖
- # 安装（项目根目录）: python -m pip install -r tools/requirements.txt
- # GPU 环境：按 README 和所安装组件的官方兼容说明准备驱动、CUDA/cuDNN。
- # 使用与应用相同的 Python 环境安装；不要直接套用旧版 CUDA 安装命令。
-
- torch>=2.0
- PySide6>=6.5
- faster-whisper>=1.0
- opencc-python-reimplemented  # 繁简转换，不含该包则使用内置简易转换表
- winotify                      # Windows 通知（可选，有 PowerShell 回退）
+# 字幕工具 Python 后端依赖
+# GPU 环境按 README 和所安装组件的兼容说明配置。
+torch>=2.0
+faster-whisper>=1.0
+opencc-python-reimplemented

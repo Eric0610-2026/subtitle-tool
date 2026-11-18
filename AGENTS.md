@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-- `subtitle_app/` contains the Python/PySide6 desktop application. `subtitle_app.py` launches `qt_app.py`; `panels.py`, `widgets.py`, and `dialogs.py` implement the interface.
+- `electron/` contains the desktop interface and Windows integration. `subtitle_app/electron_backend.py` connects it to the Python processing modules.
 - `pipeline.py` coordinates transcription (`transcriber.py`), translation (`translation.py`, `translator.py`), and media processing (`muxer.py`). `local_service.py` manages local inference.
-- `tools/tests/` contains unittest suites; `tools/requirements.txt` lists dependencies. `subtitle_app/icon.ico` is the application icon.
+- `tools/tests/` contains unittest suites. `tools/requirements.txt` lists Python backend dependencies. `subtitle_app/icon.ico` is the application icon.
 - `models/`, `cache/`, and `logs/` hold local runtime data. See `README.md` and `docs/` for installation and maintenance instructions.
 
 ## Build, Test, and Development Commands
@@ -13,13 +13,15 @@ Run from the repository root in Windows PowerShell:
 
 ```powershell
 python -m pip install -r tools/requirements.txt
-python subtitle_app/subtitle_app.py
+npm ci
+npx install-electron
+npm start
 python -m unittest discover -s tools/tests
 python -m unittest tools.tests.test_translator
 git diff --check
 ```
 
-These install dependencies, launch the application, run all tests or one suite, and check whitespace errors. No separate build step is required. First launch may install dependencies; actual media processing requires the tools and models described in README.
+The root Windows launcher starts the installed Electron executable. Rebuild it with `tools/build-launcher.ps1` when the launcher source changes. Actual media processing requires the tools and models described in README.
 
 ## Coding Style & Naming Conventions
 

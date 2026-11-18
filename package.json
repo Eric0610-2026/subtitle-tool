@@ -1,0 +1,13 @@
+{
+  "name": "subtitle-tool",
+  "version": "3.3.0",
+  "private": true,
+  "productName": "本地字幕生成工具",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "45.3.4"
+  }
+}

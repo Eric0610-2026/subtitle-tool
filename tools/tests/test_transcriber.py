@@ -275,7 +275,7 @@ class TestTranscribeVideoBasic(unittest.TestCase):
         class FakeInfo:
             language = "en"
 
-        seg_iter = iter([FakeSegment(0.0, 1.0, "Hello world.")])
+        seg_iter = iter([FakeSegment(0.0, 1.0, "Helloooo world. 啊啊啊啊！")])
         mock_model.transcribe.return_value = (seg_iter, FakeInfo())
 
         # Mock get_duration to avoid ffprobe issues
@@ -291,7 +291,10 @@ class TestTranscribeVideoBasic(unittest.TestCase):
             self.assertEqual(lang, "en")
             self.assertTrue(result_srt.exists())
             content = result_srt.read_text(encoding="utf-8")
-            self.assertIn("Hello world.", content)
+            self.assertIn("Hello world. 啊！", content)
+            live_preview = next(event["message"] for (event,), _ in self.base_opts["post"].call_args_list
+                                if event["type"] == "preview_append")
+            self.assertTrue(live_preview.endswith("Hello world. 啊！"))
 
     def test_audio_progress_coalesces_lines_and_reports_actual_duration(self):
         proc = MagicMock(returncode=0)

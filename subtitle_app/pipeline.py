@@ -96,7 +96,10 @@ class SubtitleWorker:
         # 避免后台任务在两个文件之间读到不同的配置值。
         opts = dict(opts)
         self._progress_file = Path(opts["work_dir"]) / IGNORE_FILE
-        self.transcriber.attach_proc_handlers(self._register_proc, self._unregister_proc)
+        self.transcriber.attach_proc_handlers(
+            opts.get("_register_proc", self._register_proc),
+            opts.get("_unregister_proc", self._unregister_proc),
+        )
         self.transcriber.stop_check = lambda: self.stop_requested
         self.thread = threading.Thread(target=self._run, args=(jobs, opts), daemon=True)
         self.thread.start()

@@ -7,11 +7,8 @@
     "window_height": 780,
     "window_min_width": 1024,
     "window_min_height": 680,
-    "poll_interval_ms": 100,
     "max_log_lines": 500,
     "default_video_dir": "",
-    "notification_duration_ms": 8000,
-    "notification_sleep_s": 9,
     "scan_skip_exts": [".mkv"]
   },
 

@@ -10,14 +10,30 @@ from subtitle_app.srt_utils import (
     seconds_to_srt_time, srt_time_to_seconds, fmt_duration,
     SubtitleBlock, parse_srt, parse_srt_text, write_srt, split_sentences,
     sentence_cache_key, to_simplified, has_chinese, safe_stem,
-    load_json, save_json, fmt_job_display, find_existing_subtitle,
+    load_json, save_json, fmt_file_size, find_existing_subtitle,
     match_video_for_subtitle,
     wrap_subtitle_text,
-    split_bilingual_subtitles,
+    split_bilingual_subtitles, check_subtitle_quality, subtitle_fallback_key, collapse_repeated_letters,
 )
 
 
 class TestTimeUtils(unittest.TestCase):
+    def test_subtitle_quality_flags_nested_overlaps_and_bilingual_reading_speed(self):
+        blocks = [
+            "8\n00:00:02,000 --> 00:00:02,700\nToo many letters for this short duration.",
+            "3\n00:00:01,000 --> 00:00:04,000\nouter",
+            "9\n00:00:03,000 --> 00:00:04,000\ninner",
+            "10\n00:00:04,000 --> 00:00:05,000\nThis stays readable.\n你好，很高兴见到你。",
+        ]
+        fallback = {subtitle_fallback_key(blocks[2])}
+        issues = check_subtitle_quality(blocks, fallback, paired_preview=True)
+        self.assertEqual([issue[0] for issue in issues], [0, 1, 2])
+        self.assertEqual([issue[1] for issue in issues], ["8", "3", "9"])
+        self.assertTrue(any(message.startswith("停留太短") for message in issues[0][3]))
+        self.assertTrue(any(message.startswith("阅读速度过快") for message in issues[0][3]))
+        self.assertTrue(all("时间轴重叠" in issue[3] for issue in issues))
+        self.assertIn("此字幕段含未译句（保留原文）", issues[2][3])
+
     def test_time_conversions_and_format(self):
         # 秒 → SRT 时间
         self.assertEqual(seconds_to_srt_time(0), "00:00:00,000")
@@ -166,6 +182,19 @@ class TestCacheKey(unittest.TestCase):
                             sentence_cache_key("Hello", "m2", True))
 
 
+class TestCollapseRepeatedLetters(unittest.TestCase):
+    def test_collapses_long_repetitions_only(self):
+        text = "啊啊啊啊！ あああああ Noooo ÉÉÉÉ 哈哈 哈哈哈 AAA 1111 !!! ……\n啊啊\n啊啊"
+        self.assertEqual(collapse_repeated_letters(text),
+                         "啊！ あ No É 哈哈 哈哈哈 AAA 1111 !!! ……\n啊啊\n啊啊")
+
+    def test_bilingual_join_does_not_create_a_long_repetition(self):
+        blocks, texts = split_bilingual_subtitles(
+            [SubtitleBlock(1, 0, 2, "ああ\nああ")], ["啊啊\n啊啊"], collapse_repeats=True)
+        self.assertEqual(blocks[0].text, "あ")
+        self.assertEqual(texts, ["あ\n啊"])
+
+
 class TestToSimplified(unittest.TestCase):
     def test_idempotent_simple(self):
         self.assertEqual(to_simplified("你好"), "你好")
@@ -232,14 +261,13 @@ class TestJsonAtomic(unittest.TestCase):
             self.assertEqual(len(data.get("done", [])), 1, "最终文件应为完整单条记录")
 
 
-class TestJobDisplay(unittest.TestCase):
-    def test_has_icon_and_name(self):
+class TestFileSize(unittest.TestCase):
+    def test_formats_file_size_for_queue(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "v.mp4"
-            f.write_text("x")
-            disp = fmt_job_display(f)
-            self.assertIn("v.mp4", disp)
-            self.assertIn("🎬", disp)
+            f.write_bytes(b"x")
+            self.assertEqual(fmt_file_size(f), "[1 B]")
+            self.assertEqual(fmt_file_size(f.with_name("missing.mp4")), "")
 
 
 class TestFindSubtitle(unittest.TestCase):

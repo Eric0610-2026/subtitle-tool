@@ -785,13 +785,13 @@ class TestSharedCacheManagement(unittest.TestCase):
 
     def test_clear_and_remove_shared_cache(self):
         from subtitle_app.translation import (
-            clear_shared_cache, remove_shared_cache_entries, shared_cache_snapshot,
+            remove_shared_cache_entries, shared_cache_snapshot,
         )
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "cache.json"
-            c = TranslationClient( path, lambda *a: None)
+            c = TranslationClient(path, lambda *a: None)
             c.cache["k1"] = "v1"
-            clear_shared_cache()
+            remove_shared_cache_entries(shared_cache_snapshot(), path)
             self.assertEqual(c.get_cache_size(), 0, "已创建的 client 应看到清空后的缓存")
             c.cache["k2"] = "v2"
             removed = remove_shared_cache_entries(["k2", "不存在的key"])

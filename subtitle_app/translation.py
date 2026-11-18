@@ -75,12 +75,6 @@ def remove_shared_cache_entries(keys, cache_path: Optional[Path] = None) -> int:
     return removed
 
 
-def clear_shared_cache() -> None:
-    """清空进程级共享缓存（缓存管理对话框「清空缓存」用；就地清空，理由同上）。"""
-    with _shared_cache_lock:
-        _shared_cache.clear()
-
-
 # ── 常量（从 config.json 读取）──
 
 API_TIMEOUT = cfg.translation.api_timeout
@@ -372,7 +366,8 @@ class TranslationClient:
     def translate_blocks(self, blocks: List[SubtitleBlock], source_lang: str,
                          is_bilingual: bool, state_path: Optional[Path] = None,
                          translation_concurrency: int = 1,
-                         stop_check: Optional[Callable[[], bool]] = None) -> List[str]:
+                         stop_check: Optional[Callable[[], bool]] = None, *,
+                         fallback_indexes: Optional[set[int]] = None) -> List[str]:
         self._stop_check = stop_check
         if source_lang.startswith("zh") and self.target_lang.startswith("zh"):
             return [block.text for block in blocks]
@@ -687,11 +682,14 @@ class TranslationClient:
             self._abort_translation(batch_futures, state_path, sent_originals, sent_trans)
             raise TranslationStopped()
 
-        missing_count = sum(not sent_trans.get(gsid, "").strip() for gsid, _, _ in flat)
+        missing_indexes = [block_index for gsid, block_index, _ in flat if not sent_trans.get(gsid, "").strip()]
+        missing_count = len(missing_indexes)
         if missing_count == len(flat):
             self._abort_translation([], state_path, sent_originals, sent_trans)
             raise IncompleteTranslation(_reassemble_blocks(blocks, flat, sent_trans), missing_count)
         if missing_count:
+            if fallback_indexes is not None:
+                fallback_indexes.update(missing_indexes)
             self.post_ui({
                 "type": "log",
                 "message": f"补翻后仍有 {missing_count}/{len(flat)} 句无有效译文，"

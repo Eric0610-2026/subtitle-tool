@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+    <title>本地字幕生成工具</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="renderer.js" defer></script>
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <img src="../subtitle_app/icon.ico" alt="">
+            <h1>本地字幕生成工具</h1>
+        </div>
+        <div class="actions">
+            <label class="check"><input id="translate" type="checkbox" checked> AI 翻译</label>
+            <button id="theme" class="quiet">切换主题</button>
+            <button id="settings">更多设置</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="workspace panel">
+            <label for="directory">视频目录</label>
+            <input id="directory" type="text" placeholder="选择目录，或输入路径后按回车">
+            <button id="browse">浏览</button>
+            <button id="default-dir">默认目录</button>
+        </div>
+        <div class="dashboard">
+            <section class="panel queue-panel" id="queue-panel" aria-labelledby="queue-heading">
+                <div class="panel-head">
+                    <div class="section-title"><h2 id="queue-heading">待处理文件</h2><span id="queue-count" class="count">0 个文件</span></div>
+                    <div class="actions">
+                        <button id="add-media" class="tint">添加文件</button>
+                        <button id="add-folder">添加文件夹</button>
+                    </div>
+                </div>
+                <div class="scroll queue-area">
+                    <div id="empty-queue" class="empty">
+                        <div class="drop-mark" aria-hidden="true">↓</div>
+                        <strong>拖入视频、音频或文件夹</strong>
+                        <span>队列按列表顺序处理，可拖动调整顺序</span>
+                    </div>
+                    <ul id="queue" class="queue"></ul>
+                </div>
+                <div class="panel-foot">
+                    <div class="actions">
+                        <button id="select-all" class="quiet">全选</button>
+                        <button id="ignore" class="quiet">切换忽略</button>
+                        <button id="remove" class="quiet">移除</button>
+                        <button id="clear" class="quiet">清空</button>
+                    </div>
+                    <span id="selection" class="muted"></span>
+                </div>
+            </section>
+
+            <section class="panel preview-panel" id="preview-panel" aria-labelledby="preview-heading">
+                <div class="panel-head">
+                    <div class="section-title"><h2 id="preview-heading">字幕预览</h2><span id="preview-count" class="count"></span></div>
+                    <div class="actions">
+                        <button id="open-srt">打开 SRT</button>
+                        <button id="edit-srt">分页编辑</button>
+                        <button id="quality">字幕质检</button>
+                    </div>
+                </div>
+                <div class="scroll preview-area">
+                    <table id="preview-table" hidden>
+                        <thead><tr><th scope="col">序号</th><th scope="col">起止时间</th><th scope="col">原文</th><th scope="col" id="translation-heading" hidden>译文</th></tr></thead>
+                        <tbody id="preview-rows"></tbody>
+                    </table>
+                    <div id="empty-preview" class="empty"><strong>暂无字幕</strong><span>选中队列文件，或打开、拖入 SRT 字幕</span></div>
+                </div>
+                <div class="panel-foot">
+                    <span id="preview-file" class="muted truncate"></span>
+                    <div class="actions">
+                        <button id="preview-offset" class="quiet">时间偏移</button>
+                        <button id="preview-save" class="quiet">保存字幕</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel progress-panel" aria-labelledby="progress-heading">
+                <div class="panel-head"><h2 id="progress-heading">处理进度</h2><span id="run-state" class="state">就绪</span></div>
+                <div class="progress-body">
+                    <div class="progress-label"><strong>总进度</strong><span id="overall-pct">0%</span></div>
+                    <progress id="overall" max="100" value="0" aria-label="总进度"></progress>
+                    <p id="overall-detail" class="muted" aria-live="polite">等待开始</p>
+                    <div class="progress-label"><strong id="stage">当前阶段</strong><span id="stage-pct">0%</span></div>
+                    <progress id="stage-progress" max="100" value="0" aria-label="当前阶段进度"></progress>
+                    <p id="stage-detail" class="muted truncate"></p>
+                    <p id="counter" class="muted">已转写 0 / 已翻译 0 / 缓存 0</p>
+                </div>
+            </section>
+
+            <section class="panel log-panel" aria-labelledby="log-heading">
+                <div class="panel-head">
+                    <h2 id="log-heading">运行日志</h2>
+                    <div class="actions">
+                        <button id="show-output" class="quiet">定位输出</button>
+                        <button id="export-log" class="quiet">导出日志</button>
+                    </div>
+                </div>
+                <ol id="logs" class="scroll logs" aria-label="日志列表"></ol>
+            </section>
+        </div>
+    </main>
+
+    <footer class="action-bar">
+        <div class="actions">
+            <button id="start" class="primary">开始处理</button>
+            <button id="stop" class="danger">停止</button>
+            <button id="retry">重试</button>
+        </div>
+        <div class="actions">
+            <button id="models">本地模型管理</button>
+            <button id="embed">嵌入字幕</button>
+            <button id="extract">提取字幕</button>
+        </div>
+    </footer>
+
+    <dialog id="settings-dialog">
+        <form id="settings-form">
+            <div class="dialog-head"><h2>更多设置</h2><button type="button" class="quiet" data-close="settings-dialog">关闭</button></div>
+            <div class="dialog-body">
+                <fieldset>
+                    <legend>语音识别</legend>
+                    <label class="field"><span>模型目录</span><input name="model_dir"><button type="button" data-dir="model_dir">浏览</button></label>
+                    <label class="field"><span>默认视频目录</span><input name="default_video_dir"><button type="button" data-dir="default_video_dir">浏览</button></label>
+                    <label class="field"><span>识别语言</span><select name="language"></select></label>
+                    <div class="checks">
+                        <label class="check"><input name="extract_audio" type="checkbox"> 提取音频</label>
+                        <label class="check"><input name="vad_filter" type="checkbox"> VAD 过滤</label>
+                        <label class="check"><input name="reuse_auto_lang" type="checkbox"> 复用同批语言检测结果</label>
+                    </div>
+                </fieldset>
+                <fieldset>
+                    <legend>本地翻译 · Hy-MT2</legend>
+                    <label class="field"><span>目标语言</span><select name="target_lang"></select></label>
+                    <label class="field"><span>人名译法</span><textarea name="glossary" rows="3" placeholder="每行一组，按目标语言保存：原名=译名"></textarea></label>
+                    <div class="checks">
+                        <label class="check"><input name="translation_only" type="checkbox"> 只要译文</label>
+                        <label class="check"><input name="send_all" type="checkbox"> 一次性发送全部文本</label>
+                        <label class="check"><input name="pause_before_embed" type="checkbox"> 嵌入前暂停确认</label>
+                    </div>
+                    <div class="numbers">
+                        <label class="check">每批句数 <input name="translation_batch_size" type="number" min="10" max="5000" required></label>
+                        <label class="check">备份份数 <input name="backup_max_files" type="number" min="0" max="10000" required title="0 表示不清理"></label>
+                    </div>
+                </fieldset>
+            </div>
+            <div class="dialog-foot">
+                <div class="actions"><button type="button" id="history">处理历史</button><button type="button" id="cache">翻译缓存</button></div>
+                <div class="actions"><button type="submit" value="session">本次有效</button><button class="primary" type="submit" value="permanent">永久保存</button></div>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="model-dialog">
+        <div class="dialog-head"><h2>本地模型管理</h2><button class="quiet" data-close="model-dialog">关闭</button></div>
+        <div class="dialog-body">
+            <div class="model-row"><div><strong>Whisper</strong><p id="whisper-status" class="muted">检查中</p></div>
+                <div class="actions"><button data-model="whisper" data-op="load">加载</button><button data-model="whisper" data-op="unload">卸下</button></div>
+            </div>
+            <div class="model-row"><div><strong>Hy-MT2</strong><p id="hy-mt2-status" class="muted">检查中</p></div>
+                <div class="actions"><button data-model="hy-mt2" data-op="load">加载</button><button data-model="hy-mt2" data-op="unload">卸下</button></div>
+            </div>
+            <p id="model-detail" class="muted" aria-live="polite"></p>
+        </div>
+        <div class="dialog-foot"><button id="refresh-models">刷新状态</button></div>
+    </dialog>
+
+    <dialog id="editor-dialog" class="wide">
+        <div class="dialog-head"><h2>字幕编辑</h2><button class="quiet" data-close="editor-dialog">关闭</button></div>
+        <div class="dialog-body editor-body">
+            <div class="actions wrap">
+                <button id="previous-page">上一页</button><button id="next-page">下一页</button>
+                <label class="check">第 <input id="editor-page" class="short-number" type="number" min="1" value="1"> / <span id="editor-pages">1</span> 页</label>
+                <label class="check">每页 <select id="page-size"><option>50</option><option selected>100</option><option>200</option></select> 段</label>
+                <input id="find-text" type="search" placeholder="搜索全文" aria-label="搜索全文"><button id="find">查找下一个</button>
+            </div>
+            <textarea id="editor-text" class="subtitle-text" aria-label="当前页字幕"></textarea>
+            <div id="issue-panel" hidden>
+                <p id="issue-summary" class="muted"></p>
+                <ul id="issues" class="record-list"></ul>
+            </div>
+        </div>
+        <div class="dialog-foot">
+            <div class="actions"><button id="editor-offset">时间偏移</button><button id="editor-quality">检查全文</button></div>
+            <div class="actions"><button id="apply-edits">应用到预览</button><button id="save-edits" class="primary">保存字幕</button></div>
+        </div>
+    </dialog>
+
+    <dialog id="offset-dialog">
+        <form id="offset-form">
+            <div class="dialog-head"><h2>时间偏移</h2><button type="button" class="quiet" data-close="offset-dialog">取消</button></div>
+            <div class="dialog-body"><label class="field"><span>偏移秒数</span><input name="offset" type="number" value="0" step="0.001" required></label><p class="muted">正数延后，负数提前。</p></div>
+            <div class="dialog-foot"><button class="primary" type="submit">应用</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="pause-dialog" class="wide">
+        <div class="dialog-head"><h2>确认嵌入字幕</h2><span id="pause-file" class="muted truncate"></span></div>
+        <div class="dialog-body"><textarea id="pause-text" class="subtitle-text" aria-label="嵌入前预览和编辑字幕"></textarea></div>
+        <div class="dialog-foot">
+            <button id="stop-pause" class="danger">停止任务</button>
+            <div class="actions"><button id="skip-pause">跳过，保留外挂 SRT</button><button id="embed-pause" class="primary">确认嵌入</button></div>
+        </div>
+    </dialog>
+
+    <dialog id="media-dialog" class="wide">
+        <div class="dialog-head"><h2 id="media-title"></h2><button class="quiet" data-close="media-dialog">关闭</button></div>
+        <div class="dialog-body">
+            <div id="embed-fields">
+                <label class="field"><span>视频</span><input id="embed-video" readonly><button id="pick-video">选择视频</button></label>
+                <label class="field"><span>字幕</span><input id="embed-srt" readonly><button id="pick-subtitle">选择字幕</button></label>
+                <button id="add-pair">添加到列表</button>
+            </div>
+            <div id="extract-fields" class="actions">
+                <button id="extract-pick">选择视频</button>
+                <label class="check"><input id="convert-mp4" type="checkbox"> 提取后转为 MP4</label>
+            </div>
+            <ul id="media-list" class="record-list"></ul>
+        </div>
+        <div class="dialog-foot"><button id="media-clear" class="quiet">清空</button><button id="media-start" class="primary">开始</button></div>
+    </dialog>
+
+    <dialog id="records-dialog" class="wide">
+        <div class="dialog-head"><h2 id="records-title"></h2><button class="quiet" data-close="records-dialog">关闭</button></div>
+        <div class="dialog-body">
+            <div id="record-tabs" class="actions"><button data-records="done">已完成</button><button data-records="ignored">已忽略</button></div>
+            <ul id="records-list" class="record-list"></ul>
+            <div class="actions">
+                <button id="records-prev">上一页</button><span id="record-page" class="muted"></span><button id="records-next">下一页</button>
+            </div>
+        </div>
+        <div class="dialog-foot"><button id="records-clear" class="danger">清空缓存</button><button id="records-remove">删除选中</button></div>
+    </dialog>
+
+    <div id="toast" role="status" popover="manual"></div>
+</body>
+</html>

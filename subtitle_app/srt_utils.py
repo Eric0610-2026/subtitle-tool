@@ -14,13 +14,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import cfg
 
 logger = logging.getLogger(__name__)
 
-# 主窗口只预览连续的前 100 行；转写发送端与 Qt 渲染端使用同一上限。
+# 转写时仅发送前 100 段实时预览，完成或中断时会另发全文。
 PREVIEW_BLOCK_LIMIT = 100
 
 # ── 常量（从 config.json 读取）──
@@ -249,6 +249,68 @@ def split_srt_blocks(text: str) -> List[str]:
     return [text[start:end].strip() for start, end in zip(starts, starts[1:] + [len(text)])]
 
 
+def subtitle_fallback_key(block: str) -> Optional[Tuple[str, str]]:
+    match = SRT_BLOCK_RE.match(block)
+    if match:
+        return match.group(1) or "", block[match.end():].strip()
+    return None
+
+
+def check_subtitle_quality(
+    blocks: List[str], fallback_blocks: set[Tuple[str, str]], paired_preview: bool = False,
+) -> List[Tuple[int, str, str, List[str]]]:
+    """检查全文，返回问题的块位置、字幕编号、时间轴和提示；不修改原字幕。"""
+    issues: Dict[int, Tuple[str, str, List[str]]] = {}
+    intervals = []
+    for row, block in enumerate(blocks):
+        match = SRT_BLOCK_RE.match(block)
+        if not match:
+            continue
+        number = match.group(1) or str(row + 1)
+        timing = f"{match.group(2)} --> {match.group(3)}"
+        messages: List[str] = []
+        issues[row] = (number, timing, messages)
+        text = block[match.end():].strip()
+        if (match.group(1) or "", text) in fallback_blocks:
+            messages.append("此字幕段含未译句（保留原文）")
+        try:
+            start_ms = round(srt_time_to_seconds(match.group(2)) * 1000)
+            end_ms = round(srt_time_to_seconds(match.group(3)) * 1000)
+        except ValueError:
+            messages.append("无效时间戳")
+            continue
+        duration = (end_ms - start_ms) / 1000
+        if duration <= 0:
+            messages.append("结束时间不晚于开始时间")
+            continue
+        intervals.append((start_ms, end_ms, row))
+        if duration < 0.8:
+            messages.append(f"停留太短（{duration:.2f} 秒）")
+        segments = text.split("\n", 1) if paired_preview else (text,)
+        for segment in segments:
+            chars = [char for char in segment if not char.isspace()]
+            if not chars:
+                continue
+            max_cps = 12 if sum(map(is_cjk, chars)) * 2 >= len(chars) else 20
+            cps = len(chars) / duration
+            if cps > max_cps:
+                messages.append(f"阅读速度过快（{cps:.1f} 字符/秒，提示线 {max_cps}）")
+                break
+
+    latest_end = -1
+    latest_row = -1
+    overlapping = set()
+    for start_ms, end_ms, row in sorted(intervals):
+        if start_ms < latest_end:
+            overlapping.update((latest_row, row))
+        if end_ms > latest_end:
+            latest_end, latest_row = end_ms, row
+    for row in overlapping:
+        issues[row][2].append("时间轴重叠")
+    return [(row, number, timing, messages)
+            for row, (number, timing, messages) in issues.items() if messages]
+
+
 def _read_text_auto(path: Path) -> str:
     """读取一次文件，识别 Unicode BOM/UTF-16 后回退 UTF-8、GBK、Latin-1。
 
@@ -328,6 +390,15 @@ def sanitize_blocks(blocks: List[SubtitleBlock],
     blocks.clear()
     blocks.extend(result)
     return blocks
+
+
+_REPEATED_CHARACTER_RE = re.compile(r"(.)\1{3,}")
+
+
+def collapse_repeated_letters(text: str) -> str:
+    """将连续四次及以上的同一文字压成一次，保留数字、标点和短重复。"""
+    return _REPEATED_CHARACTER_RE.sub(
+        lambda match: match[1] if match[1].isalpha() else match[0], text)
 
 
 # ── 字幕换行（防止播放器中长行被挤压强制折行）──
@@ -421,7 +492,8 @@ def _wrap_latin_line(line: str, max_chars: int) -> List[str]:
 
 def split_bilingual_subtitles(
     blocks: List[SubtitleBlock], translations: List[str],
-    max_chars: int = SUBTITLE_LINE_MAX_CHARS,
+    max_chars: int = SUBTITLE_LINE_MAX_CHARS, *, source_indexes: Optional[List[int]] = None,
+    collapse_repeats: bool = False,
 ) -> Tuple[List[SubtitleBlock], List[str]]:
     """双语长句拆为连续短段，原文/译文各一行；时间按文本比例分配。
 
@@ -433,7 +505,9 @@ def split_bilingual_subtitles(
 
     def single_line(text: str) -> str:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return ("" if any(is_cjk(c) for c in text) else " ").join(lines)
+        separator = "" if any(is_cjk(c) for c in text) else " "
+        joined = separator.join(lines)
+        return collapse_repeated_letters(joined) if collapse_repeats else joined
 
     def parts(line: str, count: int) -> List[str]:
         # 每段至少保留一个字符，且剩余文本能在余下段数内放下。
@@ -463,7 +537,7 @@ def split_bilingual_subtitles(
         return [result[min(len(result) - 1, i * len(result) // count)]
                 for i in range(count)]
 
-    for block, translated in zip(blocks, translations):
+    for source_index, (block, translated) in enumerate(zip(blocks, translations)):
         source = single_line(block.text)
         target = single_line(translated or "")
         if target == source:
@@ -474,6 +548,8 @@ def split_bilingual_subtitles(
         if not target or count <= 1:
             output_blocks.append(SubtitleBlock(len(output_blocks) + 1, block.start, block.end, source))
             output_texts.append(f"{source}\n{target}" if target else source)
+            if source_indexes is not None:
+                source_indexes.append(source_index)
             continue
         start_ms, end_ms = round(block.start * 1000), round(block.end * 1000)
         if end_ms - start_ms < count:
@@ -491,6 +567,8 @@ def split_bilingual_subtitles(
             )
             output_blocks.append(SubtitleBlock(len(output_blocks) + 1, current_ms / 1000, next_ms / 1000, src))
             output_texts.append(f"{src}\n{dst}")
+            if source_indexes is not None:
+                source_indexes.append(source_index)
             current_ms = next_ms
     return output_blocks, output_texts
 
@@ -733,19 +811,6 @@ def fmt_file_size(path: Path) -> str:
         return f"[{size} B]"
     except OSError:
         return ""
-
-
-def _file_icon(path: Path) -> str:
-    ext = path.suffix.lower()
-    if ext in VIDEO_EXTS:
-        return "\U0001F3AC"  # 🎬
-    if ext in SUB_EXTS:
-        return "\U0001F4DD"  # 📝
-    return "\U0001F4C4"  # 📄
-
-
-def fmt_job_display(path: Path) -> str:
-    return f"{_file_icon(path)}  {path.name}  {fmt_file_size(path)}"
 
 
 def has_chinese(text: str, source_lang: str = "") -> bool:

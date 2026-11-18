@@ -25,7 +25,7 @@ def _dict_to_ns(d: Any) -> Any:
 def _deep_merge(defaults: dict, override: dict) -> dict:
     """以 defaults 为基底、override 递归覆盖，返回合并后的新 dict。
 
-    老用户的 config.json 缺少后期新增字段（如 notification_duration_ms），
+    老用户的 config.json 缺少后期新增字段时，
     缺字段处用 example 的默认值补齐，避免消费方抛 AttributeError。
     """
     merged = dict(defaults)

@@ -9,22 +9,19 @@ internal static class Launcher
     private static int Main()
     {
         string root = AppDomain.CurrentDomain.BaseDirectory;
-        string entry = Path.Combine(root, "subtitle_app", "subtitle_app.py");
+        string manifest = Path.Combine(root, "package.json");
+        string electron = Path.Combine(root, "node_modules", "electron", "dist", "electron.exe");
         try
         {
-            if (!File.Exists(entry))
-                throw new FileNotFoundException("未找到应用入口，请将启动器放在项目根目录中。", entry);
-
-            string python = Path.Combine(root, ".venv", "Scripts", "pythonw.exe");
-            if (!File.Exists(python))
-                python = FindOnPath("pythonw.exe") ?? FindOnPath("pyw.exe");
-            if (python == null)
-                throw new FileNotFoundException("未找到 Python。请安装 Python 3.10+ 并加入 PATH，或在项目中创建 .venv。");
+            if (!File.Exists(manifest))
+                throw new FileNotFoundException("未找到 package.json，请将启动器放在项目根目录中。", manifest);
+            if (!File.Exists(electron))
+                throw new FileNotFoundException("请在项目目录执行 npm ci 和 npx install-electron，再启动字幕工具。", electron);
 
             Process.Start(new ProcessStartInfo
             {
-                FileName = python,
-                Arguments = "\"" + entry + "\"",
+                FileName = electron,
+                Arguments = ".",
                 WorkingDirectory = root,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -38,17 +35,4 @@ internal static class Launcher
         }
     }
 
-    private static string FindOnPath(string name)
-    {
-        foreach (string item in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
-        {
-            string directory = Environment.ExpandEnvironmentVariables(item.Trim().Trim('"'));
-            if (directory.Length == 0)
-                continue;
-            string candidate = Path.Combine(directory, name);
-            if (File.Exists(candidate))
-                return candidate;
-        }
-        return null;
-    }
 }
